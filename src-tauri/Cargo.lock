@@ -1201,22 +1201,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "halyard"
-version = "0.0.0"
-dependencies = [
- "parking_lot",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-window-state",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
- "windows",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1774,6 +1758,22 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "mailbox"
+version = "0.0.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-window-state",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+ "windows",
+]
 
 [[package]]
 name = "markup5ever"

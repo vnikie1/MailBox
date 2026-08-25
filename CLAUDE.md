@@ -1,4 +1,4 @@
-# Halyard — working instructions
+# MailBox — working instructions
 
 A Windows 11 email client reproducing macOS Mail's look and interaction model.
 `PROMPT.md` is the contract: role, 21 standing rules, definition of done, phase order.

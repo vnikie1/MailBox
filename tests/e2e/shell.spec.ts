@@ -13,7 +13,7 @@ import { expect, test } from '@playwright/test'
 test.describe('window shell', () => {
   test('renders the shell', async ({ page }) => {
     await page.goto('/')
-    await expect(page.getByRole('heading', { name: 'Halyard' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'MailBox' })).toBeVisible()
   })
 
   test('lays the toolbar out to the spec height', async ({ page }) => {

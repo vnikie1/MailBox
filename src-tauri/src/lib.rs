@@ -1,4 +1,4 @@
-//! Halyard — application shell.
+//! MailBox — application shell.
 //!
 //! Phase 0 scope: window, chrome, appearance. No database, no network, no mail.
 //! The IPC surface here is the seam described in docs/03-architecture.md §4; the
@@ -40,17 +40,17 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("failed to start Halyard");
+        .expect("failed to start MailBox");
 }
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_env("HALYARD_LOG").unwrap_or_else(|_| {
+    let filter = EnvFilter::try_from_env("MAILBOX_LOG").unwrap_or_else(|_| {
         EnvFilter::new(if cfg!(debug_assertions) {
-            "halyard_lib=debug,warn"
+            "mailbox_lib=debug,warn"
         } else {
-            "halyard_lib=info,warn"
+            "mailbox_lib=info,warn"
         })
     });
 

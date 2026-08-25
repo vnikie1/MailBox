@@ -14,6 +14,27 @@ for the convention.
 
 First working session. Project went from specification-only to a running Windows app.
 
+### Added — tooling and version control
+
+- **Version control.** Repository initialised, first commit, and pushed to the private
+  GitHub repo `vnikie1/MailBox`. `.gitattributes` normalises line endings to LF so working
+  on Windows does not rewrite every file on checkout.
+- **`CHANGELOG.md` and `CLAUDE.md`.** `CLAUDE.md` loads into context at the start of every
+  session, and instructs that this changelog is updated in the same session as the work,
+  unprompted, with incidents mandatory. That file is the enforcement mechanism.
+
+### Changed — product name
+
+- **Product renamed from the placeholder `Halyard` to `MailBox`** across `package.json`,
+  `Cargo.toml` (crate `mailbox`, lib `mailbox_lib`), `tauri.conf.json`, the window title,
+  the log filter env var (`HALYARD_LOG` → `MAILBOX_LOG`) and the CI artifact name.
+
+  The bundle identifier stays `com.uniki.mailclient`. It was deliberately decoupled from
+  the display name when the placeholder was chosen, precisely so a rename would cost
+  nothing: Tauri derives the `%LOCALAPPDATA%` data directory from the identifier, so no
+  mail store moves and no update channel breaks. Verified green after the rename —
+  13 vitest, 6 playwright, 4 cargo tests, clippy clean, `mailbox.exe` builds.
+
 ### Added
 
 - **Toolchain** (installed on the dev machine, not in the repo): Node 24.19.0 / npm 11.17.0,

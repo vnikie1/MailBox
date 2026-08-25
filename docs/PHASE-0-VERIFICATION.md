@@ -28,7 +28,7 @@ Windows SDK 10.0.26100, WebView2 151.0.4129.101.
 | Rust formatting | `cargo fmt -- --check` | pass |
 | Rust lint | `cargo clippy --all-targets -- -D warnings` | 0 warnings |
 | Rust tests | `cargo test` | 4 / 4 |
-| Rust build | `cargo build` | `halyard.exe`, 15.2 MB |
+| Rust build | `cargo build` | `mailbox.exe`, 15.2 MB |
 
 The stylelint run enforces standing rule 1: a hex colour, `rgb()` literal, `px` length,
 duration or raw easing curve inside any `*.module.css` fails the build.

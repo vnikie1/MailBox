@@ -23,7 +23,7 @@ export function ShellDiagnostics() {
 
   return (
     <section className={styles.panel}>
-      <h1 className={styles.title}>Halyard</h1>
+      <h1 className={styles.title}>MailBox</h1>
       <p className={styles.subtitle}>
         Phase 0 — window shell. Theme, accent and backdrop below are read from Windows and pushed by
         the core; nothing here polls.
