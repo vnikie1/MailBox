@@ -1,0 +1,48 @@
+/**
+ * Tier 3 — COMPONENT
+ * Per-component values. Density swaps ONLY this file. docs/02-design-system.md §1, §6, §7.
+ *
+ * Phase 0 populates the window chrome only: the toolbar bar itself. The remaining
+ * component tokens (§6.2–§6.10) belong to Phase 1, which implements the design system in
+ * full, and Phase 2, which builds the panes and the toolbar controls.
+ */
+
+:root {
+  /* ---------- titlebar / toolbar — docs/02 §6.1 ---------- */
+  --toolbar-height: 52px;
+  --toolbar-btn-size: 28px;
+  --toolbar-btn-radius: var(--r-md);
+  --toolbar-btn-icon: 17px;
+  --toolbar-btn-stroke: 1.5;
+  --toolbar-gap-within: var(--sp-1); /* 2px inside a group */
+  --toolbar-gap-between: var(--sp-8); /* 20px between groups */
+  --toolbar-pad-x: var(--sp-5);
+
+  /* Window frame — docs/01 §2. The system caption above this bar is drawn by Windows;
+   see src-tauri/src/platform/mod.rs for why. */
+  --window-radius: var(--r-xl);
+
+  /* ---------- panes — docs/01 §2 ---------- */
+  --sidebar-width: 232px;
+
+  /* Typographic measure for prose surfaces — the reader body and empty states in
+   * docs/02 §6.10 both want one. */
+  --measure-prose: 60ch;
+}
+
+/* ---------- density — docs/02 §7 ---------- */
+
+[data-density='compact'] {
+  --font-size-base: 12.5px;
+  --toolbar-height: 44px;
+}
+
+[data-density='default'] {
+  --font-size-base: 13px;
+  --toolbar-height: 52px;
+}
+
+[data-density='comfortable'] {
+  --font-size-base: 14px;
+  --toolbar-height: 58px;
+}

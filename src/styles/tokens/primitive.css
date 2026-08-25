@@ -1,0 +1,138 @@
+/**
+ * Tier 1 — PRIMITIVE
+ * Raw values only. No roles, no components. Nothing outside this file and semantic.css
+ * may contain a literal colour, length, duration or easing curve (enforced by stylelint).
+ *
+ * Source: docs/02-design-system.md §3 (primitive block) and §4.
+ */
+
+:root {
+  /* ---------- Apple system colour palette (sRGB), light / dark ---------- *
+   * These are published system colour VALUES, used as facts. They are the only
+   * saturated colours the app is permitted to draw, and only via the accent and
+   * the seven flag roles in semantic.css.                                    */
+  --blue-l: #007aff;
+  --blue-d: #0a84ff;
+  --red-l: #ff3b30;
+  --red-d: #ff453a;
+  --orange-l: #ff9500;
+  --orange-d: #ff9f0a;
+  --yellow-l: #ffcc00;
+  --yellow-d: #ffd60a;
+  --green-l: #28cd41;
+  --green-d: #32d74b;
+  --mint-l: #00c7be;
+  --mint-d: #63e6e2;
+  --teal-l: #59adc4;
+  --teal-d: #6ac4dc;
+  --indigo-l: #5856d6;
+  --indigo-d: #5e5ce6;
+  --purple-l: #af52de;
+  --purple-d: #bf5af2;
+  --pink-l: #ff2d55;
+  --pink-d: #ff375f;
+  --gray-l: #8e8e93;
+  --gray-d: #98989d;
+
+  /* ---------- type ---------- */
+  --font-ui: 'Inter', 'Inter var', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
+
+  /* SF-alike tuning: cv05 (l with tail), cv08 (upper-case i), ss03 (round quotes). */
+  --font-feat-ui: 'cv05' 1, 'cv08' 1, 'ss03' 1, 'calt' 1;
+  --font-feat-num: 'tnum' 1;
+
+  /* Density anchor. component.css overrides this per density mode; the whole type
+   * scale in semantic.css is expressed as offsets from it. docs/02 §7. */
+  --font-size-base: 13px;
+
+  /* ---------- space ---------- */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 16px;
+  --sp-8: 20px;
+  --sp-9: 24px;
+  --sp-10: 32px;
+
+  /* ---------- radius ---------- */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 10px;
+  --r-2xl: 14px;
+  --r-pill: 999px;
+
+  --hairline: 1px;
+
+  /* ---------- motion ---------- */
+  --ease-out: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --ease-in-out: cubic-bezier(0.42, 0, 0.58, 1);
+  --ease-spring: linear(
+    0,
+    0.006,
+    0.026,
+    0.056,
+    0.096,
+    0.144,
+    0.198,
+    0.257,
+    0.318,
+    0.38,
+    0.44,
+    0.497,
+    0.55,
+    0.599,
+    0.643,
+    0.682,
+    0.716,
+    0.746,
+    0.771,
+    0.793,
+    0.812,
+    0.828,
+    0.842,
+    0.854,
+    0.864,
+    0.873,
+    0.881,
+    0.888,
+    0.909,
+    0.926,
+    0.94,
+    0.951,
+    0.96,
+    0.968,
+    0.974,
+    0.98,
+    0.984,
+    0.988,
+    0.991,
+    0.994,
+    0.996,
+    0.998,
+    1
+  );
+
+  --dur-micro: 100ms; /* cross-fade, icon state */
+  --dur-fast: 150ms; /* hover, focus ring */
+  --dur-base: 200ms; /* disclosure, panel resize */
+  --dur-slow: 250ms; /* sidebar collapse */
+  --dur-sheet: 320ms; /* popover / compose open */
+}
+
+/* Definition of done: honour prefers-reduced-motion. Collapsing the duration tokens
+ * disables every transition in the app from one place. Anything that must observe a
+ * transitionend has to tolerate 0ms — see src/lib/motion.ts. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-micro: 0ms;
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+    --dur-sheet: 0ms;
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Window-chrome permissions for the main window. Windows owns the caption strip, so the WebView needs no window-command permissions at all - only the ability to drag by the toolbar. Deliberately granular rather than core:default — this app will hold someone's entire private correspondence, and the capability set is the place that stays honest about what the WebView is allowed to ask the core for.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:default",
+
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+
+    "window-state:default"
+  ]
+}

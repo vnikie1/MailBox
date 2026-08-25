@@ -1,0 +1,19 @@
+# Specification documents are authored by hand and are the source of truth for this
+# project. Prettier must never touch them: reflowing a table or a code fence in a spec
+# creates diff noise against a document whose exact wording is being cited elsewhere.
+docs/
+PROMPT.md
+prompt.md
+README.md
+
+# Reference captures — compared against, never edited.
+assets/reference/
+
+dist
+node_modules
+src-tauri/target
+src-tauri/gen
+coverage
+playwright-report
+test-results
+package-lock.json

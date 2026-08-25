@@ -1,0 +1,200 @@
+/**
+ * Tier 2 — SEMANTIC
+ * Roles, not raw values. Themes swap ONLY this file. docs/02-design-system.md §3.
+ *
+ * Two deliberate departures from the doc, both reported in the Phase 0 review:
+ *
+ *   1. `--accent-hover` is DERIVED from `--accent`, not a fixed hex. The doc pins
+ *      #0A6FD8 / #3D9BFF, which are correct only while the accent is Apple blue —
+ *      but docs/01 §11 requires the accent to follow the Windows OS accent at runtime.
+ *      A fixed hover hex is wrong the moment the user's accent is not blue. The
+ *      color-mix ratios below reproduce the doc's hand-picked values to within ~1/255.
+ *
+ *   2. `--accent-fg` is supplied at runtime by src/lib/appearance.ts, which picks black
+ *      or white by WCAG relative luminance of the resolved accent. White text on a
+ *      yellow (#FFCC00) OS accent is ~1.6:1 and fails the contrast item in docs/02 §8.
+ *      The static value here is the coherent default for the blue fallback accent.
+ */
+
+:root,
+[data-theme='light'] {
+  /* Rust pushes --accent-system from the OS accent colour; blue is the fallback. */
+  --accent: var(--accent-system, var(--blue-l));
+  --accent-hover: color-mix(in srgb, var(--accent) 85%, black);
+  --accent-fg: var(--accent-fg-system, #ffffff);
+
+  --label-1: rgb(0 0 0 / 85%);
+  --label-2: rgb(0 0 0 / 50%);
+  --label-3: rgb(0 0 0 / 26%);
+  --label-4: rgb(0 0 0 / 10%);
+
+  --bg-window: #ffffff;
+  --bg-content: #ffffff;
+  --bg-sidebar: rgb(242 242 247 / 72%);
+  --bg-header: rgb(255 255 255 / 80%);
+  --bg-menu: rgb(250 250 252 / 92%);
+  --bg-raised: #f5f5f7;
+
+  /* Opaque stand-ins used when Reduce Transparency is on or the backdrop is unavailable. */
+  --bg-sidebar-opaque: #f2f2f7;
+  --bg-header-opaque: #ffffff;
+  --bg-menu-opaque: #fafafc;
+
+  --fill-hover: rgb(0 0 0 / 4%);
+  --fill-pressed: rgb(0 0 0 / 8%);
+  --fill-selected-inactive: rgb(0 0 0 / 8%);
+
+  --separator: rgb(0 0 0 / 10%);
+  --stroke-inner: rgb(255 255 255 / 60%);
+
+  --shadow-popover: 0 8px 28px rgb(0 0 0 / 18%), 0 0 0 0.5px rgb(0 0 0 / 10%);
+  --shadow-window: 0 24px 64px rgb(0 0 0 / 28%), 0 0 0 0.5px rgb(0 0 0 / 14%);
+
+  --flag-red: var(--red-l);
+  --flag-orange: var(--orange-l);
+  --flag-yellow: var(--yellow-l);
+  --flag-green: var(--green-l);
+  --flag-blue: var(--blue-l);
+  --flag-purple: var(--purple-l);
+  --flag-gray: var(--gray-l);
+
+  --accent-inactive: var(--gray-l);
+
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --accent: var(--accent-system, var(--blue-d));
+  --accent-hover: color-mix(in srgb, var(--accent) 80%, white);
+  --accent-fg: var(--accent-fg-system, #ffffff);
+
+  --label-1: rgb(255 255 255 / 85%);
+  --label-2: rgb(255 255 255 / 55%);
+  --label-3: rgb(255 255 255 / 25%);
+  --label-4: rgb(255 255 255 / 10%);
+
+  --bg-window: #1e1e1e;
+  --bg-content: #1e1e1e;
+  --bg-sidebar: rgb(42 42 44 / 72%);
+  --bg-header: rgb(30 30 30 / 80%);
+  --bg-menu: rgb(44 44 46 / 92%);
+  --bg-raised: #2a2a2c;
+
+  --bg-sidebar-opaque: #2a2a2c;
+  --bg-header-opaque: #1e1e1e;
+  --bg-menu-opaque: #2c2c2e;
+
+  --fill-hover: rgb(255 255 255 / 5%);
+  --fill-pressed: rgb(255 255 255 / 9%);
+  --fill-selected-inactive: rgb(255 255 255 / 11%);
+
+  --separator: rgb(255 255 255 / 12%);
+  --stroke-inner: rgb(255 255 255 / 10%);
+
+  --shadow-popover: 0 8px 28px rgb(0 0 0 / 55%), 0 0 0 0.5px rgb(255 255 255 / 10%);
+  --shadow-window: 0 24px 64px rgb(0 0 0 / 65%), 0 0 0 0.5px rgb(255 255 255 / 12%);
+
+  --flag-red: var(--red-d);
+  --flag-orange: var(--orange-d);
+  --flag-yellow: var(--yellow-d);
+  --flag-green: var(--green-d);
+  --flag-blue: var(--blue-d);
+  --flag-purple: var(--purple-d);
+  --flag-gray: var(--gray-d);
+
+  --accent-inactive: var(--gray-d);
+
+  color-scheme: dark;
+}
+
+/**
+ * Inactive window. docs/01 §9.11 — "the window goes quiet when inactive".
+ * One remap, whole app: the accent desaturates to system grey and primary label text
+ * drops to secondary. Selection fills are handled separately by the component specs,
+ * which switch to --fill-selected-inactive and keep their own text colours.
+ */
+[data-window-inactive] {
+  --accent: var(--accent-inactive);
+  --label-1: var(--label-2);
+}
+
+/**
+ * Reduce Transparency. Required by the definition of done and by docs/02 §5, and set
+ * from the Windows "Transparency effects" setting as well as by an in-app override.
+ * Swapping the three material backgrounds to opaque is the whole implementation.
+ */
+[data-reduce-transparency] {
+  --bg-sidebar: var(--bg-sidebar-opaque);
+  --bg-header: var(--bg-header-opaque);
+  --bg-menu: var(--bg-menu-opaque);
+}
+
+/**
+ * No DWM material on the window — an old build, composition off, or the user's
+ * transparency setting. The sidebar then has nothing to sample, so it becomes an opaque
+ * surface. backdrop-filter is NOT a substitute: inside a WebView it blurs page content
+ * behind the element, never the desktop. It stays the right tool for the header and menu
+ * materials from Phase 1 on, which do blur app content.
+ */
+[data-backdrop='none'] {
+  --bg-sidebar: var(--bg-sidebar-opaque);
+}
+
+/**
+ * Type scale. docs/02 §2.
+ *
+ * The doc leaves the type scale outside the three-tier model while also requiring that
+ * density (which changes the base size) swap only component.css. Resolved here by
+ * expressing every step as an offset from --font-size-base, which component.css owns.
+ * At the default base of 13px this reproduces the doc's table exactly.
+ *
+ * These are emitted as four separate properties rather than a `font:` shorthand on
+ * purpose: the shorthand resets font-feature-settings, which would silently discard
+ * the SF-alike tuning applied on <body>.
+ */
+:root {
+  --t-caption-size: calc(var(--font-size-base) - 3px);
+  --t-caption-weight: 400;
+  --t-caption-leading: 1.3;
+  --t-caption-tracking: 0;
+
+  --t-footnote-size: calc(var(--font-size-base) - 2px);
+  --t-footnote-weight: 500;
+  --t-footnote-leading: 1.3;
+  --t-footnote-tracking: 0.01em;
+
+  --t-subhead-size: calc(var(--font-size-base) - 1px);
+  --t-subhead-weight: 400;
+  --t-subhead-leading: 1.35;
+  --t-subhead-tracking: -0.005em;
+
+  --t-body-size: var(--font-size-base);
+  --t-body-weight: 400;
+  --t-body-leading: 1.35;
+  --t-body-tracking: -0.01em;
+
+  --t-headline-size: var(--font-size-base);
+  --t-headline-weight: 600;
+  --t-headline-leading: 1.35;
+  --t-headline-tracking: -0.01em;
+
+  --t-title3-size: calc(var(--font-size-base) + 2px);
+  --t-title3-weight: 600;
+  --t-title3-leading: 1.3;
+  --t-title3-tracking: -0.015em;
+
+  --t-title2-size: calc(var(--font-size-base) + 4px);
+  --t-title2-weight: 600;
+  --t-title2-leading: 1.28;
+  --t-title2-tracking: -0.02em;
+
+  --t-title1-size: calc(var(--font-size-base) + 9px);
+  --t-title1-weight: 700;
+  --t-title1-leading: 1.22;
+  --t-title1-tracking: -0.022em;
+
+  --t-mailbody-size: var(--font-size-base);
+  --t-mailbody-weight: 400;
+  --t-mailbody-leading: 1.55;
+  --t-mailbody-tracking: -0.005em;
+}

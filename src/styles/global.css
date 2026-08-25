@@ -1,0 +1,60 @@
+@import './tokens/primitive.css';
+@import './tokens/semantic.css';
+@import './tokens/component.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  /* The DWM system backdrop paints behind the WebView, so the page must not paint an
+   * opaque ground of its own or the Mica/Acrylic material is simply hidden. Surfaces
+   * that need to be opaque (reader, compose) declare it themselves. */
+  background: transparent;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-feature-settings: var(--font-feat-ui);
+  font-size: var(--t-body-size);
+  font-weight: var(--t-body-weight);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  color: var(--label-1);
+  background: transparent;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizelegibility;
+
+  /* Chrome is chrome: it must not be selectable or draggable like content. Message
+   * bodies and header fields opt back in — docs/01 §9.10 requires text to be
+   * selectable everywhere it is content. */
+  user-select: none;
+  cursor: default;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* No focus ring for pointer users, always one for keyboard users. */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* Tabular figures wherever numbers must not shimmy as they change — docs/01 §2. */
+.tabular {
+  font-feature-settings: var(--font-feat-ui), var(--font-feat-num);
+}

@@ -1,0 +1,57 @@
+.panel {
+  max-width: var(--measure-prose);
+  padding: var(--sp-10) var(--sp-8);
+}
+
+.title {
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-title1-size);
+  font-weight: var(--t-title1-weight);
+  line-height: var(--t-title1-leading);
+  letter-spacing: var(--t-title1-tracking);
+}
+
+.subtitle {
+  margin: var(--sp-4) 0 var(--sp-10);
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  font-weight: var(--t-subhead-weight);
+  line-height: var(--t-mailbody-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--sp-4) var(--sp-8);
+  margin: 0;
+  align-items: baseline;
+}
+
+.term {
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+.value {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: center;
+  margin: 0;
+  color: var(--label-1);
+
+  /* docs/01 §9.10 — text is selectable wherever it is content, not chrome. */
+  user-select: text;
+  cursor: text;
+}
+
+.swatch {
+  padding: var(--sp-1) var(--sp-4);
+  border-radius: var(--r-md);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-headline-weight);
+}
