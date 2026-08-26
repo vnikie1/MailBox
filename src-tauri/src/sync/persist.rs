@@ -304,6 +304,31 @@ pub fn record_mailbox_state(
     Ok(())
 }
 
+/// Records how far down the UID space the backfill has walked.
+///
+/// Written after every batch rather than once at the end, because the interesting case is
+/// the run that does not reach the end: an app closed mid-backfill, a dropped connection, a
+/// mailbox whose sync errored. Without a per-batch checkpoint each of those restarts the
+/// whole walk, which is the behaviour this column exists to stop.
+///
+/// `lowest_uid` of 1 means finished — there is nothing below UID 1.
+pub fn record_backfill_progress(
+    tx: &Transaction<'_>,
+    mailbox_id: i64,
+    lowest_uid: u32,
+) -> Result<(), DbError> {
+    tx.execute(
+        // Never moves backwards. A later sync fetching the newest page must not reset a
+        // completed backfill to the top of the UID space.
+        "UPDATE mailbox
+            SET backfill_uid = MIN(COALESCE(backfill_uid, ?2), ?2)
+          WHERE id = ?1",
+        params![mailbox_id, lowest_uid],
+    )?;
+
+    Ok(())
+}
+
 /// Drops every message in a mailbox. docs/03 §5's `UIDVALIDITY` recovery.
 ///
 /// *Drop and re-sync that mailbox. Do not try to be clever.* Row by row rather than by a
@@ -316,9 +341,12 @@ pub fn drop_mailbox_contents(tx: &Transaction<'_>, mailbox_id: i64) -> Result<us
     )?;
 
     tx.execute(
+        // `backfill_uid` resets with the rest. The UIDs it recorded refer to a numbering the
+        // server has thrown away, so "already walked down to 40000" is now meaningless — and
+        // keeping it would leave everything below that permanently unfetched.
         "UPDATE mailbox
             SET uid_validity = NULL, uid_next = NULL, highest_modseq = NULL,
-                unread_count = 0, total_count = 0
+                backfill_uid = NULL, unread_count = 0, total_count = 0
           WHERE id = ?1",
         params![mailbox_id],
     )?;
@@ -809,5 +837,58 @@ mod tests {
             write_batch(&tx, 1, 1, &[]).expect("write"),
             Written::default()
         );
+    }
+
+    fn backfill_uid(conn: &rusqlite::Connection) -> Option<i64> {
+        conn.query_row("SELECT backfill_uid FROM mailbox WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("read backfill_uid")
+    }
+
+    #[test]
+    fn backfill_progress_only_ever_moves_downwards() {
+        // The walk goes from `uid_next` towards 1, so progress is a *decreasing* number, and
+        // the newest-page sync that runs before it must not push the mark back up. Letting it
+        // move upwards is how a finished backfill silently becomes an unfinished one, and the
+        // symptom is an hour of zero-insert batches on every sync.
+        let mut conn = store();
+
+        {
+            let tx = conn.transaction().expect("tx");
+            assert_eq!(backfill_uid(&tx), None, "a new mailbox has walked nowhere");
+
+            record_backfill_progress(&tx, 1, 40_000).expect("first");
+            assert_eq!(backfill_uid(&tx), Some(40_000));
+
+            record_backfill_progress(&tx, 1, 12_000).expect("further down");
+            assert_eq!(backfill_uid(&tx), Some(12_000));
+
+            record_backfill_progress(&tx, 1, 90_000).expect("a newer page");
+            assert_eq!(
+                backfill_uid(&tx),
+                Some(12_000),
+                "a higher UID must not undo progress already made"
+            );
+
+            tx.commit().expect("commit");
+        }
+
+        assert_eq!(backfill_uid(&conn), Some(12_000), "and it persists");
+    }
+
+    #[test]
+    fn dropping_a_mailbox_forgets_how_far_it_had_been_backfilled() {
+        // `UIDVALIDITY` changed, so every UID recorded refers to a numbering the server has
+        // discarded. Keeping the mark would leave everything below it permanently unfetched —
+        // a mailbox that looks synced and is missing most of its mail.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        record_backfill_progress(&tx, 1, 1).expect("complete");
+        assert_eq!(backfill_uid(&tx), Some(1));
+
+        drop_mailbox_contents(&tx, 1).expect("drop");
+        assert_eq!(backfill_uid(&tx), None);
     }
 }

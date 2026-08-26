@@ -1266,7 +1266,7 @@ to do with this code, and a rendering state the tests had encoded backwards.
   wrapper. That is not empty, so `MessageBody`'s "is there any HTML?" test said yes and
   mounted an iframe around nothing.
 
-  It matters more than it sounds. Bodies are fetched lazily *after* selection (docs/03 §5),
+  It matters more than it sounds. Bodies are fetched lazily _after_ selection (docs/03 §5),
   so **every** message passes through this state on first open — and only 10 of 431 messages
   in the real account had bodies at the time, so nearly every click produced a blank card
   that filled in fifteen seconds later with no explanation. From the user's side this is
@@ -1330,3 +1330,86 @@ to do with this code, and a rendering state the tests had encoded backwards.
   connection that previously advertised `IDLE MOVE CONDSTORE X-GM-EXT-1 UIDPLUS`. Not chased
   this session; recorded because it is a change, and because Phase 5's remaining work
   (IDLE, CONDSTORE incremental sync) depends on reading those correctly.
+
+---
+
+## 2026-08-26 — Phase 5: three bugs that only a running sync could show
+
+Resumed Phase 5. The first task was meant to be a small one — capability detection was
+logging `false` for a Gmail server that advertises `IDLE CONDSTORE X-GM-EXT-1 UIDPLUS`. It
+turned out to be the thread that unravelled the other two, and each was found by adding a log
+line rather than by reading the code.
+
+### Fixed
+
+- **Every IMAP capability had been reading `false` since Phase 5 was written.** The set was
+  built with `format!("{capability:?}")`, but `Capability` is an enum whose atoms carry their
+  name in a payload, so the derived `Debug` produced `Atom("CONDSTORE")` — which matches
+  nothing. IDLE, CONDSTORE, MOVE and UIDPLUS were all silently off.
+
+  Nothing failed loudly because "the server cannot do this" is a legitimate answer, and the
+  fallback path for each is correct if slow. Every existing test fed `Caps::read` strings
+  written by hand, so all of them passed while the real path matched nothing — the seam
+  between the library's types and ours had no test crossing it. Now named by matching the
+  enum, with a test that goes through real `Capability` values and asserts the flags the
+  engine branches on come out true. Verified live: `condstore=true idle=true gmail=true`.
+
+- **Backfill walked the numeric UID range instead of the UIDs that exist**, which on any
+  long-lived mailbox is a wildly different number. The real Gmail Inbox holds 214 messages
+  with `uid_next` at 106,287, so windows of 500 meant 213 round trips of ~20 seconds — about
+  seventy minutes — to fetch 214 messages, inserting nothing on nearly every one. At docs/04's
+  50k-message exit gate it does not finish at all.
+
+  `fetch::all_uids` now issues one `UID SEARCH ALL` and `backfill_window` batches through the
+  UIDs that came back, listed explicitly rather than as a range spanning the gaps. Measured
+  after: one round trip plus **one** batch, 26 seconds, complete. The newest page still uses
+  the cheap range — it costs no round trip and it is what the user waits for; being
+  approximate there is fine because the search is what guarantees nothing is missed.
+
+- **Backfill also had no memory, so it restarted from the top on every sync** and, ending only
+  at UID 1, effectively never ended. Added `mailbox.backfill_uid` (migration 0002), written
+  after _every_ batch rather than once at the end — the case that matters is the run that does
+  not finish. It never moves upwards, so the newest-page sync cannot undo a completed walk,
+  and `drop_mailbox_contents` clears it because a `UIDVALIDITY` change makes the recorded UID
+  meaningless.
+
+- **Re-threading took 20 seconds per batch, per mailbox** — with `batch_ms=9` and
+  `count_ms=0` beside it, it was the entire cost of a sync. 46 mailboxes at ~30s each is a
+  23-minute sync of an account holding a few hundred messages.
+
+  The aggregate roll-up runs three correlated subqueries per thread. Two are answered by
+  `ix_msg_thread(thread_id, date_sent)` as a covering index in ~1.5ms; the third,
+  `MAX(date_received)`, had no usable index at all — `EXPLAIN` showed a bare `SEARCH message`
+  — and cost **38.6 seconds** across 415 threads. Migration 0003 adds
+  `ix_msg_thread_recent(thread_id, date_received)`, and `ix_msg_account_recent(account_id,
+date_received DESC)` for the window `SELECT` beside it, which was scanning the whole table
+  and sorting through a temp b-tree.
+
+  Measured on the real database: the roll-up went **38,600ms → 2.2ms**. In the running app
+  `thread_ms` went **20,416 → ~38**, and a full sync of 44 mailboxes went from never finishing
+  to **44 seconds, 673 messages inserted, 0 failures**.
+
+  `date_sent` was deliberately left in the existing index rather than replaced: the reader
+  orders a thread by the sender's clock and this roll-up wants the server's.
+
+### Added
+
+- **Per-mailbox sync progress logging, and timings split by stage.** `sync_mailbox` now logs
+  what it selected, what it stored, and each backfill batch; `sync finished` carries mailbox,
+  failure and insert counts. The newest-page log carries `fetch_ms`, `write_ms`, `batch_ms`,
+  `count_ms` and `thread_ms`.
+
+  This is the reason the other three entries above exist. The engine previously logged nothing
+  between "discovered mailboxes" and "sync finished", so a 46-mailbox account looked hung for
+  minutes at a time whether it was working or not — and the first instinct on seeing that was
+  to suspect the network. Splitting fetch from write settled it in one line: `fetch_ms=418`,
+  `write_ms=22510`. Two clock reads per mailbox is worth keeping permanently.
+
+### Notes
+
+- **`qresync` really is absent.** Gmail advertises CONDSTORE but not QRESYNC, so `has_modseq()`
+  is true by the CONDSTORE path alone. The earlier note that all four flags looked wrong was
+  half right: three were misread, and this one was correct.
+- Still outstanding in Phase 5: IDLE on a dedicated connection, CONDSTORE incremental sync,
+  `pending_op` drain, the 2–4 connection pool, an in-process IMAP test server, and Gmail
+  labels-as-mailboxes. The exit gate needs Dovecot-in-Docker and a 12-hour soak.

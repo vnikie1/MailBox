@@ -1,0 +1,33 @@
+-- Two indexes the threading pass needs, both found by timing a real sync rather than by
+-- reading the schema.
+--
+-- Re-threading ran on every batch of every mailbox and took **20 seconds a time** against a
+-- 100k-row message table — with `batch_ms=9` and `count_ms=0` beside it, so it was the whole
+-- cost of a sync. 46 mailboxes at ~30s each is a 23-minute sync of an account holding a few
+-- hundred messages, and docs/04's Phase 5 exit gate asks for a 50k-message mailbox.
+--
+-- 1. `ix_msg_thread_recent`
+--
+-- The aggregate roll-up in `persist::rethread` runs, per thread row:
+--
+--     SELECT MAX(date_received) FROM message WHERE thread_id = ?
+--
+-- `ix_msg_thread` is (thread_id, date_sent), which answers the two COUNT subqueries beside it
+-- as a covering index in ~1.5ms — but carries no `date_received`, so the MAX had no usable
+-- index at all (EXPLAIN: a bare "SEARCH message") and cost 38.6 seconds across 415 threads.
+-- Ordering by `date_received` makes the maximum the last entry of the thread's index range.
+--
+-- `date_sent` is deliberately left in the existing index rather than replaced: the reader
+-- orders a thread's messages by the sender's clock, and this roll-up wants the server's.
+CREATE INDEX ix_msg_thread_recent ON message(thread_id, date_received);
+
+-- 2. `ix_msg_account_recent`
+--
+-- `rethread` selects the account's most recent `RETHREAD_WINDOW` messages:
+--
+--     SELECT ... FROM message WHERE account_id = ? ORDER BY date_received DESC LIMIT ?
+--
+-- with no index on `account_id` at all, so it scanned the whole table and sorted through a
+-- temp b-tree. Only ~50ms today, but it grows with every message in every account, and it is
+-- on the path that runs after each batch.
+CREATE INDEX ix_msg_account_recent ON message(account_id, date_received DESC);

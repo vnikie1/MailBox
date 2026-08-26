@@ -301,19 +301,52 @@ pub fn newest_range(uid_next: u32, count: u32) -> String {
     format!("{lowest}:{highest}")
 }
 
-/// One backfill window, ending just below `before_uid`.
+/// Every UID in the selected mailbox, newest first.
 ///
-/// Returns `None` once there is nothing older left, which is how the backfill loop knows to
-/// stop rather than fetching `1:1` forever.
-pub fn backfill_range(before_uid: u32, count: u32) -> Option<String> {
-    if before_uid <= 1 {
-        return None;
-    }
+/// One round trip, and it is what makes backfill proportional to the number of *messages*
+/// rather than to the size of the UID space. Those are wildly different numbers on a mailbox
+/// that has been archived from for years: the real Gmail Inbox this was found on holds 214
+/// messages with `uid_next` at 106,287, so walking the numeric range in windows of 500 meant
+/// 213 round trips — about seventy minutes — to fetch 214 messages. Scaled to the 50k-message
+/// mailbox in docs/04's Phase 5 exit gate, the range walk simply does not finish.
+///
+/// The newest page deliberately still uses `newest_range` above: it costs no round trip and
+/// it is the thing the user is actually waiting for. Being approximate is fine there, because
+/// this search is what guarantees nothing is ultimately missed.
+pub async fn all_uids(session: &mut ImapSession) -> Result<Vec<u32>, SyncError> {
+    let mut uids: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
 
-    let highest = before_uid - 1;
-    let lowest = highest.saturating_sub(count.saturating_sub(1)).max(1);
+    // Newest first, so backfill continues in the direction the user reads.
+    uids.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(uids)
+}
 
-    Some(format!("{lowest}:{highest}"))
+/// One backfill window taken from a known UID list, ending just below `before_uid`.
+///
+/// Returns the sequence set and the lowest UID it covers, or `None` when nothing older is
+/// left — which is how the backfill loop knows it has finished rather than fetching `1:1`
+/// forever.
+///
+/// `uids` must be sorted newest first, as `all_uids` returns it.
+pub fn backfill_window(uids: &[u32], before_uid: u32, count: u32) -> Option<(String, u32)> {
+    let window: Vec<u32> = uids
+        .iter()
+        .copied()
+        .filter(|uid| *uid < before_uid)
+        .take(count as usize)
+        .collect();
+
+    let lowest = *window.last()?;
+
+    // Listed explicitly rather than as a range: the UIDs are genuinely sparse, and a range
+    // spanning the gaps is exactly the cost this function exists to avoid.
+    let set = window
+        .iter()
+        .map(|uid| uid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    Some((set, lowest))
 }
 
 /// Fetches envelopes for a sequence set.
@@ -410,44 +443,75 @@ mod tests {
         assert_eq!(newest_range(1, 500), "1:*");
     }
 
+    /// UIDs as `all_uids` returns them: descending, and only the ones that exist.
+    fn descending(uids: &[u32]) -> Vec<u32> {
+        let mut sorted = uids.to_vec();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted
+    }
+
     #[test]
     fn backfill_walks_backwards_in_batches() {
-        assert_eq!(backfill_range(501, 500).as_deref(), Some("1:500"));
-        assert_eq!(backfill_range(1001, 500).as_deref(), Some("501:1000"));
+        let uids = descending(&(1..=1000).collect::<Vec<_>>());
+
+        let (set, lowest) = backfill_window(&uids, 1001, 500).expect("first window");
+        assert_eq!(lowest, 501);
+        assert!(set.starts_with("1000,999,"), "{set}");
+        assert!(set.ends_with(",501"), "{set}");
+
+        let (_, lowest) = backfill_window(&uids, lowest, 500).expect("second window");
+        assert_eq!(lowest, 1);
     }
 
     #[test]
     fn backfill_stops_rather_than_looping_at_the_bottom() {
-        // The termination condition. Without it the engine refetches "1:1" forever, which is
-        // a connection storm aimed at one mailbox — exactly what the soak test looks for.
-        assert_eq!(backfill_range(1, 500), None);
-        assert_eq!(backfill_range(0, 500), None);
+        // The termination condition. Without it the engine refetches the last window forever,
+        // which is a connection storm aimed at one mailbox — what the soak test looks for.
+        let uids = descending(&[1, 2, 3]);
+
+        assert_eq!(backfill_window(&uids, 1, 500), None);
+        assert_eq!(backfill_window(&uids, 0, 500), None);
+        assert_eq!(backfill_window(&[], 5000, 500), None);
 
         // The last partial batch is still returned.
-        assert_eq!(backfill_range(2, 500).as_deref(), Some("1:1"));
+        let (set, lowest) = backfill_window(&uids, 2, 500).expect("partial");
+        assert_eq!(set, "1");
+        assert_eq!(lowest, 1);
+    }
+
+    #[test]
+    fn backfill_asks_only_for_uids_that_exist() {
+        // The point of the whole change. A mailbox archived from for years has a handful of
+        // messages scattered across an enormous UID space; asking for the range between them
+        // is what made a 214-message Inbox take 213 round trips.
+        let uids = descending(&[7, 4001, 98_000, 106_286]);
+
+        let (set, lowest) = backfill_window(&uids, 200_000, 500).expect("window");
+
+        assert_eq!(set, "106286,98000,4001,7");
+        assert_eq!(lowest, 7);
+        assert!(!set.contains(':'), "must not span the gaps: {set}");
     }
 
     #[test]
     fn backfill_covers_every_uid_with_no_gap_and_no_overlap() {
-        // A gap loses mail; an overlap refetches it. Walk the whole range and check both.
-        let mut cursor = 2001u32;
+        // A gap loses mail; an overlap refetches it. Walk a sparse mailbox and check both.
+        let present: Vec<u32> = (1..=2000).filter(|uid| uid % 7 == 0).collect();
+        let uids = descending(&present);
+
+        let mut cursor = u32::MAX;
         let mut covered: Vec<u32> = Vec::new();
 
-        while let Some(range) = backfill_range(cursor, 500) {
-            let (low, high) = range.split_once(':').expect("range shape");
-            let low: u32 = low.parse().expect("low");
-            let high: u32 = high.parse().expect("high");
-
-            covered.extend(low..=high);
-            cursor = low;
+        while let Some((set, lowest)) = backfill_window(&uids, cursor, 50) {
+            covered.extend(set.split(',').map(|uid| uid.parse::<u32>().expect("uid")));
+            cursor = lowest;
         }
 
         covered.sort_unstable();
-        let expected: Vec<u32> = (1..=2000).collect();
 
         assert_eq!(
-            covered, expected,
-            "backfill must cover 1..=2000 exactly once"
+            covered, present,
+            "backfill must cover every existing UID exactly once"
         );
     }
 

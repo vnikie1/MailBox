@@ -149,6 +149,24 @@ pub struct Caps {
     pub uidplus: bool,
 }
 
+/// The wire name of one advertised capability.
+///
+/// Must not be `format!("{capability:?}")`. `Capability` is an enum whose atoms carry their
+/// name in a payload, so the derived `Debug` renders `Atom("CONDSTORE")` — which matches
+/// nothing, silently, and leaves every capability false. That is exactly what happened: IDLE,
+/// CONDSTORE, MOVE and UIDPLUS were all off against a Gmail server advertising all four, and
+/// nothing failed loudly because "the server cannot do this" is a legitimate answer.
+fn capability_name(capability: &async_imap::types::Capability) -> String {
+    use async_imap::types::Capability;
+
+    match capability {
+        Capability::Imap4rev1 => "IMAP4REV1".into(),
+        // Rendered the way it is advertised, so a future `has("AUTH=XOAUTH2")` works.
+        Capability::Auth(name) => format!("AUTH={name}"),
+        Capability::Atom(name) => name.clone(),
+    }
+}
+
 impl Caps {
     fn read(names: &[String]) -> Self {
         let has = |needle: &str| names.iter().any(|name| name.eq_ignore_ascii_case(needle));
@@ -333,10 +351,7 @@ async fn handshake(
     // they know who is asking — CONDSTORE and X-GM-EXT-1 in particular are commonly absent
     // from the pre-login greeting.
     let capabilities = session.capabilities().await?;
-    let names: Vec<String> = capabilities
-        .iter()
-        .map(|capability| format!("{capability:?}"))
-        .collect();
+    let names: Vec<String> = capabilities.iter().map(capability_name).collect();
 
     let caps = Caps::read(&names);
 
@@ -358,6 +373,51 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_capability_is_named_by_its_atom_and_not_by_its_debug_form() {
+        // The regression guard for a bug that ran from Phase 5 until it was found by reading
+        // a log line. Every test below hands `Caps::read` strings written by hand, so they
+        // all passed while the real path fed it `Atom("CONDSTORE")` and matched nothing.
+        //
+        // The lesson is the shape of the gap, not the typo: the seam between the library's
+        // types and ours had no test crossing it, so both sides could be right on their own
+        // terms and still not meet.
+        use async_imap::types::Capability;
+
+        let advertised = [
+            Capability::Imap4rev1,
+            Capability::Atom("CONDSTORE".into()),
+            Capability::Atom("IDLE".into()),
+            Capability::Atom("MOVE".into()),
+            Capability::Atom("UIDPLUS".into()),
+            Capability::Atom("X-GM-EXT-1".into()),
+            Capability::Auth("XOAUTH2".into()),
+        ];
+
+        let read: Vec<String> = advertised.iter().map(capability_name).collect();
+        assert_eq!(
+            read,
+            names(&[
+                "IMAP4REV1",
+                "CONDSTORE",
+                "IDLE",
+                "MOVE",
+                "UIDPLUS",
+                "X-GM-EXT-1",
+                "AUTH=XOAUTH2",
+            ])
+        );
+
+        // And the whole point: the flags the sync engine branches on actually come out true.
+        let caps = Caps::read(&read);
+        assert!(caps.condstore, "CONDSTORE did not survive the round trip");
+        assert!(caps.idle, "IDLE did not survive the round trip");
+        assert!(caps.move_command);
+        assert!(caps.uidplus);
+        assert!(caps.gmail);
+        assert!(caps.has_modseq());
     }
 
     #[test]

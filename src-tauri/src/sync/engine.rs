@@ -337,8 +337,15 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
         .find(|(mailbox, _)| mailbox.role == Some(mailboxes::Role::Inbox))
         .map(|(mailbox, (id, _))| (mailbox.remote_path.clone(), *id));
 
+    // Counted so "sync finished" can say what it did. A run that logs only its own start and
+    // end is indistinguishable from a run that hung — which is exactly how a 46-mailbox
+    // account read for the several minutes it was working correctly.
+    let mut inserted_total = 0usize;
+    let mut synced = 0usize;
+    let mut failed = 0usize;
+
     if let Some((path, mailbox_id)) = inbox {
-        sync_mailbox(
+        inserted_total += sync_mailbox(
             app,
             db,
             &mut session,
@@ -349,6 +356,7 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
             true,
         )
         .await?;
+        synced += 1;
     }
 
     // ---- 3. everything else, newest 200 each -------------------------------------------
@@ -364,7 +372,7 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
             continue;
         }
 
-        if let Err(error) = sync_mailbox(
+        match sync_mailbox(
             app,
             db,
             &mut session,
@@ -376,9 +384,17 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
         )
         .await
         {
+            Ok(inserted) => {
+                inserted_total += inserted;
+                synced += 1;
+            }
+
             // One unreadable mailbox must not abort the account. A shared folder whose
             // permissions changed is common, and losing the Inbox because of it is not.
-            tracing::warn!(path = %mailbox.remote_path, %error, "mailbox sync failed; continuing");
+            Err(error) => {
+                failed += 1;
+                tracing::warn!(path = %mailbox.remote_path, %error, "mailbox sync failed; continuing");
+            }
         }
     }
 
@@ -395,7 +411,13 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
         },
     );
 
-    tracing::info!(account_id, "sync finished");
+    tracing::info!(
+        account_id,
+        mailboxes = synced,
+        failed,
+        inserted = inserted_total,
+        "sync finished"
+    );
     Ok(())
 }
 
@@ -410,18 +432,19 @@ async fn sync_mailbox(
     mailbox_id: i64,
     path: &str,
     backfill: bool,
-) -> Result<(), SyncError> {
-    let stored: Option<u32> = db
+) -> Result<usize, SyncError> {
+    let (stored, backfilled_to): (Option<u32>, Option<u32>) = db
         .read(move |conn| {
-            let value: Option<i64> = conn
+            let row: Option<(Option<i64>, Option<i64>)> = conn
                 .query_row(
-                    "SELECT uid_validity FROM mailbox WHERE id = ?1",
+                    "SELECT uid_validity, backfill_uid FROM mailbox WHERE id = ?1",
                     rusqlite::params![mailbox_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .ok()
-                .flatten();
-            Ok(value.map(|v| v as u32))
+                .ok();
+
+            let (validity, backfill) = row.unwrap_or((None, None));
+            Ok((validity.map(|v| v as u32), backfill.map(|v| v as u32)))
         })
         .await?;
 
@@ -448,17 +471,37 @@ async fn sync_mailbox(
     };
 
     if selected.uid_next == 0 && selected.exists == 0 {
-        return Ok(());
+        tracing::debug!(path, "mailbox is empty");
+        return Ok(0);
     }
+
+    tracing::debug!(
+        path,
+        exists = selected.exists,
+        uid_next = selected.uid_next,
+        backfill,
+        "syncing mailbox"
+    );
 
     let first_page = if backfill { FIRST_PAGE } else { 200 };
     let range = fetch::newest_range(selected.uid_next, first_page);
-    let batch = fetch::envelopes(session, &range, caps).await?;
 
-    let written = {
+    // Timed separately because "the mailbox took thirty seconds" says nothing about whether
+    // the server, the network or our own writer is responsible — and the answer decided what
+    // to fix. Cheap enough to leave in: two clock reads per mailbox.
+    let fetch_started = std::time::Instant::now();
+    let batch = fetch::envelopes(session, &range, caps).await?;
+    let fetch_ms = fetch_started.elapsed().as_millis() as u64;
+
+    let write_started = std::time::Instant::now();
+    let (written, batch_ms, count_ms, thread_ms) = {
         let batch = batch.clone();
         db.write(move |tx| {
+            let started = std::time::Instant::now();
             let written = persist::write_batch(tx, account_id, mailbox_id, &batch)?;
+            let batch_ms = started.elapsed().as_millis() as u64;
+
+            let started = std::time::Instant::now();
             persist::recount(tx, mailbox_id)?;
             persist::record_mailbox_state(
                 tx,
@@ -467,11 +510,17 @@ async fn sync_mailbox(
                 selected.uid_next,
                 selected.highest_modseq,
             )?;
+            let count_ms = started.elapsed().as_millis() as u64;
+
+            let started = std::time::Instant::now();
             persist::rethread(tx, account_id, RETHREAD_WINDOW)?;
-            Ok(written)
+            let thread_ms = started.elapsed().as_millis() as u64;
+
+            Ok((written, batch_ms, count_ms, thread_ms))
         })
         .await?
     };
+    let write_ms = write_started.elapsed().as_millis() as u64;
 
     let _ = app.emit(
         "sync:progress",
@@ -486,26 +535,78 @@ async fn sync_mailbox(
 
     let _ = app.emit("messages:added", mailbox_id);
 
+    tracing::debug!(
+        path,
+        inserted = written.inserted,
+        updated = written.updated,
+        fetch_ms,
+        write_ms,
+        batch_ms,
+        count_ms,
+        thread_ms,
+        "newest page stored"
+    );
+
+    let mut total = written.inserted;
+
     if !backfill {
-        return Ok(());
+        return Ok(total);
     }
 
     // ---- backfill ------------------------------------------------------------------------
     // Batches of 500 walking backwards, lowest priority. The pause between batches is not
     // politeness: it is what stops a backfill from saturating the connection the user's
     // interactions share, which docs/03 §5 calls "pausing on user interaction".
-    let mut cursor = written.lowest_uid;
+    //
+    // Two things here were wrong and are worth stating, because both were invisible until the
+    // per-mailbox logging above went in and both looked like a hang rather than a bug.
+    //
+    // First, the walk restarts nowhere: it resumes from `backfill_uid`. It used to begin again
+    // below the newest page every time, and since it only ended at UID 1 it effectively never
+    // ended.
+    //
+    // Second — and much worse — it walked the *numeric UID range* in windows of 500 rather
+    // than the UIDs that exist. On a mailbox archived from for years those are not remotely
+    // the same size: the real Gmail Inbox this was found on holds 214 messages with `uid_next`
+    // at 106,287, so the range walk needed 213 round trips of about twenty seconds each, some
+    // seventy minutes, to fetch 214 messages — inserting nothing on almost every one. At the
+    // 50k-message mailbox docs/04's exit gate asks for, it does not finish at all.
+    //
+    // `UID SEARCH ALL` costs one round trip and makes the whole thing proportional to the
+    // number of messages instead.
+    if backfilled_to == Some(1) {
+        tracing::debug!(path, "backfill already complete");
+        return Ok(total);
+    }
 
-    while let Some(range) = fetch::backfill_range(cursor, BACKFILL_BATCH) {
-        let batch = fetch::envelopes(session, &range, caps).await?;
+    let uids = fetch::all_uids(session).await?;
+
+    tracing::debug!(path, known = uids.len(), "backfill: uid list fetched");
+
+    // Resume where the last run stopped; on a mailbox never backfilled, start below the page
+    // just fetched.
+    let mut cursor = match backfilled_to {
+        Some(uid) => uid.min(written.lowest_uid.max(1)),
+        None => written.lowest_uid,
+    };
+
+    // A checkpoint the loop can record without repeating itself, and the thing that makes an
+    // interrupted backfill resumable rather than merely restartable.
+    async fn checkpoint(db: &Db, mailbox_id: i64, uid: u32) -> Result<(), SyncError> {
+        db.write(move |tx| persist::record_backfill_progress(tx, mailbox_id, uid))
+            .await?;
+        Ok(())
+    }
+
+    while let Some((set, lowest)) = fetch::backfill_window(&uids, cursor, BACKFILL_BATCH) {
+        let batch = fetch::envelopes(session, &set, caps).await?;
 
         if batch.is_empty() {
-            // No messages in this window — a gap in the UID space, which is normal after
-            // deletions. Step past it rather than stopping, or the rest never arrives.
-            cursor = cursor.saturating_sub(BACKFILL_BATCH);
-            if cursor <= 1 {
-                break;
-            }
+            // The server listed these UIDs a moment ago and now returns nothing for them,
+            // which happens when they are expunged between the search and the fetch. Step
+            // past rather than stopping, or everything older never arrives.
+            cursor = lowest;
+            checkpoint(db, mailbox_id, cursor).await?;
             continue;
         }
 
@@ -531,15 +632,31 @@ async fn sync_mailbox(
         );
         let _ = app.emit("messages:added", mailbox_id);
 
-        if written.lowest_uid == 0 || written.lowest_uid >= cursor {
-            break;
-        }
-        cursor = written.lowest_uid;
+        total += written.inserted;
+
+        // Step to the bottom of the window that was asked for, not to what came back. They
+        // differ when a message is expunged mid-walk, and trusting the response would leave
+        // the cursor above UIDs already covered — walking them again on the next pass.
+        cursor = lowest;
+        checkpoint(db, mailbox_id, cursor).await?;
+
+        tracing::debug!(
+            path,
+            cursor,
+            inserted = written.inserted,
+            total,
+            "backfill batch stored"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
 
-    Ok(())
+    // Reaching the bottom is what "complete" means, and recording it is what stops the next
+    // sync walking the whole mailbox again.
+    checkpoint(db, mailbox_id, 1).await?;
+    tracing::debug!(path, total, "backfill complete");
+
+    Ok(total)
 }
 
 /// Fetches one message's body, caches the `.eml`, and stores what was parsed out of it.

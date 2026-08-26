@@ -22,11 +22,23 @@ struct Migration {
 /// The full history. **Append only** — editing an applied migration changes what new
 /// databases get without changing existing ones, which is how two installs of the same
 /// version end up with different schemas.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("../../migrations/0001_initial.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("../../migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "backfill_progress",
+        sql: include_str!("../../migrations/0002_backfill_progress.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "thread_rollup_indexes",
+        sql: include_str!("../../migrations/0003_thread_rollup_indexes.sql"),
+    },
+];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.
 pub fn run(conn: &mut Connection) -> Result<(), DbError> {

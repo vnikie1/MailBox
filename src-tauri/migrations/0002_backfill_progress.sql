@@ -1,0 +1,16 @@
+-- Remembering how far a mailbox has been backfilled.
+--
+-- Without this the backfill walks the whole UID space from `uid_next` downwards on *every*
+-- sync, re-fetching messages already stored and inserting nothing. Observed against a real
+-- Gmail Inbox of 214 messages: thirteen consecutive batches, each ~20 seconds, each writing
+-- zero rows, with roughly an hour of that still to go before it would have reached UID 1.
+--
+-- It is not merely wasted work. docs/04 Phase 5's exit gate asks for a 12-hour soak with no
+-- connection storm, and a backfill that never completes holds the sync connection more or
+-- less permanently.
+--
+-- `backfill_uid` is the lowest UID this mailbox has walked down to:
+--   NULL — never backfilled; start at uid_next
+--   n    — resume from n
+--   1    — complete; there is nothing below UID 1, so the walk is finished
+ALTER TABLE mailbox ADD COLUMN backfill_uid INTEGER;
