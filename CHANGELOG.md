@@ -1413,3 +1413,145 @@ date_received DESC)` for the window `SELECT` beside it, which was scanning the w
 - Still outstanding in Phase 5: IDLE on a dedicated connection, CONDSTORE incremental sync,
   `pending_op` drain, the 2–4 connection pool, an in-process IMAP test server, and Gmail
   labels-as-mailboxes. The exit gate needs Dovecot-in-Docker and a 12-hour soak.
+
+---
+
+## 2026-08-26 — Phases 5 and 6: the rest of sync, and reading
+
+Asked to complete both phases. Phase 5's sync work is now done; Phase 6 is substantially done,
+with the remainder listed honestly at the end.
+
+### Added — Phase 5
+
+- **`pending_op` drain (`sync/ops.rs`).** Flagging, moving and deleting wrote locally and told
+  the server nothing, so any change made in this app was invisible everywhere else. Each
+  mutation now records its intent **inside the same transaction as the local write**: the
+  change and the obligation to push it are one atomic unit, so there is no window in which the
+  screen says one thing, the server another, and nothing remembers the difference. Offline mode
+  is not a mode — it is what this queue does when the drain cannot connect.
+
+  The drain runs at the _start_ of a sync. The other order loses data: pulling first overwrites
+  the local change with the stale value the server still holds, and the queued operation then
+  pushes a value the user has already watched revert. Operations are grouped per mailbox and
+  sent oldest first, and a failure **stops** the queue rather than skipping past it, because
+  later operations can depend on earlier ones having landed. Five failures drops an operation —
+  otherwise one impossible change blocks every change made after it, forever.
+
+- **IDLE (`sync/idle.rs`).** New mail now arrives without being asked for. On its own
+  connection, because an idling connection cannot be used for anything else, and re-issued
+  every 29 minutes per RFC 2177 §3 — past that a server may log the client off, and a dead
+  watcher is indistinguishable from a quiet mailbox.
+
+  Notifications are debounced and rate-limited, because the server reports _our own_ writes
+  too: a drain of twenty flags arrives as twenty notifications and would otherwise sync, drain
+  and notify again. Servers without IDLE fall back to polling, and the connection is closed
+  rather than held open doing nothing. Watchers are reconciled against the account list rather
+  than started blindly, so the UI can call `sync_watch` on launch and on every account change.
+
+- **CONDSTORE incremental sync.** RFC 7162. A mailbox whose MODSEQ has not moved needs no work
+  at all — against the real account that is **190 skips per pass**, one `SELECT` each instead
+  of a full envelope fetch. More importantly, a flag changed on another device is reported
+  _wherever it is in the mailbox_, not only in the part we happen to re-read: reconciling by
+  re-fetching the newest page is why most clients silently miss a message read on a phone last
+  month.
+
+  `flags_changed_since` asks for `FLAGS` and nothing else, and `apply_flag_changes` updates
+  only the flag columns, so three hundred messages read elsewhere do not become three hundred
+  search-index rewrites. Falls back to the full path when anything is missing, and also when
+  MODSEQ goes _backwards_ — RFC 7162 §3.1.2.2 allows that after a restore from backup, and it
+  makes every "changed since" question meaningless.
+
+### Added — Phase 6
+
+- **Quoted replies fold behind a `<details>`.** That element specifically, because the message
+  frame runs no script and never will (standing rule 11) — it is the one interactive control
+  HTML has that needs none, so the message stays completely inert and the quote still folds.
+
+  The cut is only ever made at the **top level**. Cutting inside an open element would put its
+  closing tag inside the wrapper and its opening tag outside, mangling the message rather than
+  folding it. Tracking depth by scanning is safe here only because this runs on sanitised
+  markup, which html5ever has already balanced; on raw input none of it would hold. Void
+  elements are excluded from the count — a `<br>` counted as an open tag would push everything
+  after it to a depth that never returns, and no quote would fold again.
+
+  Recognises the markers Gmail, Yahoo, Thunderbird, Outlook and Apple Mail actually emit, plus
+  the plain-text forms, and refuses to fold when the quote is the whole message. Outlook's
+  marker needed `id` allowed through the sanitiser on `div` and `hr`; without it
+  `divRplyFwdMsg` is stripped before the folder sees it and every Outlook reply shows its full
+  history, which is most business mail.
+
+- **Attachment preview and save.** There is deliberately **no "open with the default
+  application"**: handing an attachment to whatever the shell associates with its extension is
+  the most reliable way malware has ever spread through mail, and an Open button beside
+  `invoice.pdf.exe` is a loaded gun with a friendly label. The previewer renders images, text,
+  JSON and PDFs from a `data:` URI inside a sandboxed frame with no scripting; **the core**
+  decides what is previewable, because that is a security decision and belongs on the side of
+  the boundary that cannot be bypassed. Everything else offers Save only, where the shell's own
+  warnings stay intact.
+
+  `platform::files::safe_file_name` treats `Content-Disposition` filenames as the
+  attacker-controlled text they are: no separators or traversal, reserved device names defused,
+  the trailing dots and spaces the filesystem silently drops removed, and bidirectional
+  overrides stripped — a name using U+202E renders in a file dialog as `invoiceexe.pdf` while
+  remaining an executable.
+
+  Built on the existing `Sheet` so it inherits the focus trap and dismissal; a second modal
+  implementation is a second set of accessibility bugs.
+
+- **Data detectors** for parcel tracking numbers and phone numbers. Only text nodes are touched
+  — running a pattern over the whole document would rewrite the inside of attributes — and
+  anything already inside a link, a style block or a fold's summary is skipped, since a link
+  inside a link would break the reader's own click handling.
+
+  Detection is deliberately conservative, because a false positive is worse than a miss: it
+  puts a link on ordinary prose, and a link in a message is something the user is entitled to
+  believe the sender put there. Most of the tests are about what must _not_ match.
+
+### Fixed
+
+- **Messages in a thread were displayed but never downloaded.** The reader shows a _thread_;
+  the prefetch worked from the _message list_, and those are not the same set. A thread reaches
+  across mailboxes, so a message carrying a Gmail label lives elsewhere and never appears as a
+  row — the reader displayed messages nothing had asked for, and they sat on "Downloading this
+  message…" indefinitely. Common rather than exotic on a real Gmail account, where labels put
+  most conversations in that position. `useThreadBodies` now asks for exactly what the reader
+  renders.
+
+- **`open_external`'s scheme check is extracted and tested.** It was inline in an async command
+  and had no test at all. Now covered for `ms-msdt:`, `search-ms:`, `file:`, `javascript:`,
+  `vbscript:`, `data:` and UNC paths, none of which were exercised before. `tel:` was added for
+  the data detectors and is permitted **only** in the reduced `+`-and-digits form the detector
+  produces; a `tel:` a sender wrote is still refused, because it arrives with the rest of the
+  message's markup and has never been reduced to digits.
+
+### Incidents
+
+- **The blank card and the silent fetch were the same class of mistake, twice.** `fetch_body`
+  logged only on failure, so a call that returned nothing left no trace and looked exactly like
+  the UI never asking — the same shape as the sync's "log before the hanging call" recorded
+  earlier today. Both now log entry and exit. Worth stating plainly: on this project every bug
+  found by running the app has been found by a _log line_, and every one of them was invisible
+  to a green test suite.
+
+- **An IDLE rate limit that was enforced on paper and never in practice.** `MIN_INTERVAL` lived
+  inside one connection's scope, and since a notification ends the connection it was set and
+  immediately discarded every time. Caught by an unused-assignment warning rather than by a
+  test; it now lives across reconnects.
+
+### Notes
+
+- Verified in the running window against the real Gmail account: the inbox grew from 219 to 244
+  messages _on its own_ while the app sat idle, and a newsletter that had arrived two minutes
+  earlier opened and rendered with its layout, buttons and blocked-image banner intact.
+
+- **Still outstanding in Phase 5:** the 2–4 connection pool per account (one connection for
+  sync and one for IDLE is the current arrangement, which is inside the budget but does not
+  parallelise), an in-process IMAP test server, and Gmail labels-as-mailboxes. The exit gate
+  itself needs Dovecot-in-Docker and a 12-hour soak, neither of which has been run — so Phase 5
+  is feature-complete but its gate is not passed.
+
+- **Still outstanding in Phase 6:** drag-to-Explorer, the contact popover, and the date and
+  address data detectors. Drag-to-Explorer needs `DoDragDrop` and an `IDataObject` — real COM
+  work rather than a Tauri call — and was left undone rather than faked. The exit gate also
+  asks for twenty real newsletters checked in both themes, which has not been done
+  systematically.
