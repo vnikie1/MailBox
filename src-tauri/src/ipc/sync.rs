@@ -105,9 +105,13 @@ pub async fn sync_watch(
     engine: State<'_, SyncEngine>,
     watchers: State<'_, Watchers>,
 ) -> Result<(), AppError> {
+    // The handle becomes an `Events` here rather than deeper in, so the sync engine keeps no
+    // dependency on Tauri at all — see `sync::events`.
+    let events: std::sync::Arc<dyn crate::sync::events::Events> = std::sync::Arc::new(app);
+
     watchers
         .inner()
-        .reconcile(&app, db.inner(), engine.inner())
+        .reconcile(&events, db.inner(), engine.inner())
         .await;
 
     Ok(())

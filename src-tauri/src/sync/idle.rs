@@ -16,10 +16,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Notify;
 
 use crate::db::Db;
+
+use super::events::{payload, Events};
 
 use super::backoff::Backoff;
 use super::engine::{credential_for, SyncEngine};
@@ -78,7 +79,7 @@ impl Watcher {
 /// Returns immediately; the work happens on a spawned task. Errors are handled inside — a
 /// watcher that gave up on the first dropped connection would be worse than no watcher, because
 /// the app would look live and not be.
-pub fn watch(app: AppHandle, db: Db, engine: SyncEngine, account_id: i64) -> Watcher {
+pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) -> Watcher {
     let stop = Arc::new(Notify::new());
     let signal = Arc::clone(&stop);
 
@@ -91,7 +92,15 @@ pub fn watch(app: AppHandle, db: Db, engine: SyncEngine, account_id: i64) -> Wat
         let mut last_sync: Option<std::time::Instant> = None;
 
         loop {
-            let outcome = run(&app, &db, &engine, account_id, &signal, &mut last_sync).await;
+            let outcome = run(
+                app.as_ref(),
+                &db,
+                &engine,
+                account_id,
+                &signal,
+                &mut last_sync,
+            )
+            .await;
 
             match outcome {
                 // Asked to stop.
@@ -157,7 +166,7 @@ impl Watchers {
     }
 
     /// Starts watchers for accounts that should have one and stops the rest.
-    pub async fn reconcile(&self, app: &AppHandle, db: &Db, engine: &SyncEngine) {
+    pub async fn reconcile(&self, app: &Arc<dyn Events>, db: &Db, engine: &SyncEngine) {
         let accounts = match db.read(crate::accounts::store::list).await {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -220,7 +229,7 @@ impl Watchers {
 
 /// One connection's worth of watching: connect, select, then idle until something happens.
 async fn run(
-    app: &AppHandle,
+    app: &dyn Events,
     db: &Db,
     engine: &SyncEngine,
     account_id: i64,
@@ -303,12 +312,12 @@ async fn run(
                 *last_sync = Some(std::time::Instant::now());
 
                 tracing::info!(account_id, "idle: the server reported a change");
-                let _ = app.emit(
+                app.emit(
                     "sync:activity",
-                    Activity {
+                    payload(&Activity {
                         account_id,
                         live: true,
-                    },
+                    }),
                 );
 
                 // Dropped before syncing: the sync opens its own connection, and holding this
@@ -327,7 +336,7 @@ async fn run(
 
 /// The fallback for a server with no IDLE: look every so often.
 async fn poll(
-    app: &AppHandle,
+    app: &dyn Events,
     db: &Db,
     engine: &SyncEngine,
     account_id: i64,
@@ -339,12 +348,12 @@ async fn poll(
             _ = stop.notified() => return Ok(Stopped::Requested),
         }
 
-        let _ = app.emit(
+        app.emit(
             "sync:activity",
-            Activity {
+            payload(&Activity {
                 account_id,
                 live: false,
-            },
+            }),
         );
 
         let _ = engine.sync_account(app, db, account_id).await;

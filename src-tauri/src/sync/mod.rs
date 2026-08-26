@@ -4,6 +4,7 @@ pub mod backoff;
 pub mod bodies;
 pub mod engine;
 pub mod envelope;
+pub mod events;
 pub mod fetch;
 pub mod idle;
 pub mod mailboxes;

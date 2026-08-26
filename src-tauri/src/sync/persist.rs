@@ -304,6 +304,20 @@ pub fn record_mailbox_state(
     Ok(())
 }
 
+/// How many of an account's messages have never been given a thread.
+///
+/// Cheap enough to ask on every sync, and the answer decides whether the expensive full pass
+/// needs to run at all. On a steady-state mailbox it is zero and the pass is skipped, which
+/// matters: a full re-thread of a 50,000-message account costs about thirty seconds, and
+/// paying that on every incremental sync would undo the point of having one.
+pub fn unthreaded_count(tx: &Transaction<'_>, account_id: i64) -> Result<i64, DbError> {
+    Ok(tx.query_row(
+        "SELECT COUNT(*) FROM message WHERE account_id = ?1 AND thread_id IS NULL",
+        params![account_id],
+        |row| row.get(0),
+    )?)
+}
+
 /// Applies server-side flag changes to messages already stored.
 ///
 /// Envelopes are deliberately untouched: a flag change is the only thing CONDSTORE reported,

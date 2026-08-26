@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 use crate::accounts::credentials::{self, Kind};
@@ -23,6 +22,8 @@ use crate::accounts::provider::{AuthKind, Provider};
 use crate::accounts::store::AccountDetail;
 use crate::accounts::{self};
 use crate::db::Db;
+
+use super::events::{payload, Events};
 
 use super::backoff::Backoff;
 use super::bodies;
@@ -39,6 +40,14 @@ use super::session::{self, Caps, Credential, ImapSession, SyncError};
 /// the writer for seconds at a time. The most recent 5,000 covers every merge that matters
 /// in practice, and a full pass runs once at the end of the initial sync.
 const RETHREAD_WINDOW: usize = 5_000;
+
+/// The ceiling on the single full threading pass at the end of a sync.
+///
+/// Large enough not to be a limit on any real mailbox, and finite so that a corrupt account_id
+/// cannot turn the last step of a sync into an unbounded scan. The pass is affordable because
+/// `ix_msg_account_recent` and `ix_msg_thread_recent` exist — before those indexes it would
+/// have taken minutes rather than seconds, which is presumably why it was never written.
+const FULL_RETHREAD: usize = 1_000_000;
 
 /// What the UI is told while a sync runs. docs/03 §4's `sync:progress`.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -113,7 +122,7 @@ impl SyncEngine {
     /// is looking at matters more than parallelism.
     pub async fn sync_account(
         &self,
-        app: &AppHandle,
+        app: &dyn Events,
         db: &Db,
         account_id: i64,
     ) -> Result<(), SyncError> {
@@ -132,14 +141,14 @@ impl SyncEngine {
                 Err(error) if !error.is_retryable() => {
                     tracing::warn!(account_id, %error, "sync stopped: not retryable");
 
-                    let _ = app.emit(
+                    app.emit(
                         "account:error",
-                        AccountError {
+                        payload(&AccountError {
                             account_id,
                             message: describe(&error),
                             retry_in_seconds: 0,
                             needs_reauth: matches!(error, SyncError::Rejected { .. }),
-                        },
+                        }),
                     );
 
                     return Err(error);
@@ -159,14 +168,14 @@ impl SyncEngine {
                     // the user hear about it — a client that cries wolf on every sleep gets
                     // ignored when it finally matters.
                     if backoff.should_surface_error() {
-                        let _ = app.emit(
+                        app.emit(
                             "account:error",
-                            AccountError {
+                            payload(&AccountError {
                                 account_id,
                                 message: describe(&error),
                                 retry_in_seconds: delay.as_secs(),
                                 needs_reauth: false,
-                            },
+                            }),
                         );
                     }
 
@@ -287,7 +296,7 @@ pub(crate) async fn credential_for(
 }
 
 /// One attempt at a full pass.
-async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncError> {
+async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), SyncError> {
     let account = db
         .read(move |conn| crate::accounts::store::get(conn, account_id))
         .await?
@@ -336,7 +345,7 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
             .await?
     };
 
-    let _ = app.emit("mailboxes:changed", account_id);
+    app.emit("mailboxes:changed", payload(&account_id));
 
     // ---- 2. the Inbox, newest page first ------------------------------------------------
     // docs/03 §5 orders this deliberately: the Inbox is what the user is looking at, and its
@@ -410,15 +419,46 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
 
     let _ = session.logout().await;
 
-    let _ = app.emit(
+    // ---- one full threading pass -----------------------------------------------------------
+    // The per-batch re-thread above only covers the most recent `RETHREAD_WINDOW` messages,
+    // which is right during a sync — a full pass after every 500-message batch would hold the
+    // writer for the whole backfill — but it leaves everything older than that window with no
+    // thread at all.
+    //
+    // The window's own comment has claimed since Phase 5 that "a full pass runs once at the end
+    // of the initial sync". It did not. The Dovecot gate is what found it: a cold sync of
+    // 50,000 messages stored every one of them correctly and left **45,000 without a thread**,
+    // because only the newest 5,000 were ever threaded. Nothing failed, no test noticed, and
+    // the reader would have shown nine messages in ten as a conversation of one.
+    // Only when something actually needs it. The pass costs about thirty seconds on a
+    // 50,000-message account, and paying that on every incremental sync would undo the point of
+    // having one — on a steady-state mailbox the count is zero and nothing runs.
+    let outstanding = db
+        .write(move |tx| persist::unthreaded_count(tx, account_id))
+        .await?;
+
+    if outstanding > 0 {
+        let threaded = db
+            .write(move |tx| persist::rethread(tx, account_id, FULL_RETHREAD))
+            .await?;
+
+        tracing::debug!(
+            account_id,
+            outstanding,
+            threaded,
+            "full threading pass finished"
+        );
+    }
+
+    app.emit(
         "sync:progress",
-        Progress {
+        payload(&Progress {
             account_id,
             mailbox: String::new(),
             written: 0,
             usable: true,
             done: true,
-        },
+        }),
     );
 
     tracing::info!(
@@ -434,7 +474,7 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
 /// Syncs one mailbox: newest page, then backfill if this is the Inbox.
 #[allow(clippy::too_many_arguments)]
 async fn sync_mailbox(
-    app: &AppHandle,
+    app: &dyn Events,
     db: &Db,
     session: &mut ImapSession,
     caps: Caps,
@@ -449,9 +489,9 @@ async fn sync_mailbox(
 
     let StoredState {
         uid_validity: stored,
-        backfill_uid: backfilled_to,
-        uid_next: stored_uid_next,
-        highest_modseq: stored_modseq,
+        backfill_uid: mut backfilled_to,
+        uid_next: mut stored_uid_next,
+        highest_modseq: mut stored_modseq,
     } = stored_state;
 
     let selected = match fetch::select(session, path, stored, caps).await {
@@ -469,6 +509,17 @@ async fn sync_mailbox(
 
             db.write(move |tx| persist::drop_mailbox_contents(tx, mailbox_id))
                 .await?;
+
+            // The state read a moment ago described the mailbox that no longer exists, and
+            // `drop_mailbox_contents` has just cleared its stored copy. Forgetting it here too
+            // is what makes the re-sync a re-sync.
+            //
+            // The gate found this by leaving it out: after a reset the backfill marker still
+            // said "complete" from before the drop, so the mailbox was refetched to exactly one
+            // page — 500 messages of 50,000 — and reported success.
+            backfilled_to = None;
+            stored_uid_next = None;
+            stored_modseq = None;
 
             fetch::select(session, path, None, caps).await?
         }
@@ -501,8 +552,22 @@ async fn sync_mailbox(
     //
     // Falls through to the full path whenever anything is missing: no CONDSTORE, or a mailbox
     // this install has not stored state for yet.
-    if let (true, Some(stored_modseq), Some(stored_uid_next), Some(server_modseq)) = (
+    //
+    // **And whenever a backfill is still outstanding**, which is not an optimisation but a
+    // correctness rule, and the Dovecot gate is what found it. The first sync of a large
+    // mailbox records `uid_next` and the MODSEQ after its *first page*; if it is then
+    // interrupted — a closed lid, a dropped connection, the gate stopping the server — the next
+    // sync sees a MODSEQ that has not moved, concludes "unchanged since the last sync", and
+    // returns before reaching the backfill at all.
+    //
+    // Measured: a cold sync killed after 5,000 of 50,000 messages, re-run, finished in 1.6
+    // seconds having fetched nothing. The remaining 45,000 would never have arrived, and
+    // nothing anywhere would have said so.
+    let backfill_outstanding = backfill && backfilled_to != Some(1);
+
+    if let (true, false, Some(stored_modseq), Some(stored_uid_next), Some(server_modseq)) = (
         caps.has_modseq(),
+        backfill_outstanding,
         stored_modseq,
         stored_uid_next,
         selected.highest_modseq,
@@ -573,18 +638,18 @@ async fn sync_mailbox(
     };
     let write_ms = write_started.elapsed().as_millis() as u64;
 
-    let _ = app.emit(
+    app.emit(
         "sync:progress",
-        Progress {
+        payload(&Progress {
             account_id,
             mailbox: path.to_string(),
             written: written.inserted,
             usable: true,
             done: false,
-        },
+        }),
     );
 
-    let _ = app.emit("messages:added", mailbox_id);
+    app.emit("messages:added", payload(&mailbox_id));
 
     tracing::debug!(
         path,
@@ -671,17 +736,17 @@ async fn sync_mailbox(
             })
             .await?;
 
-        let _ = app.emit(
+        app.emit(
             "sync:progress",
-            Progress {
+            payload(&Progress {
                 account_id,
                 mailbox: path.to_string(),
                 written: written.inserted,
                 usable: true,
                 done: false,
-            },
+            }),
         );
-        let _ = app.emit("messages:added", mailbox_id);
+        app.emit("messages:added", payload(&mailbox_id));
 
         total += written.inserted;
 
@@ -749,7 +814,7 @@ impl StoredState {
 /// this one never reads an envelope it already holds, and never walks a page.
 #[allow(clippy::too_many_arguments)]
 async fn incremental(
-    app: &AppHandle,
+    app: &dyn Events,
     db: &Db,
     session: &mut ImapSession,
     caps: Caps,
@@ -821,17 +886,17 @@ async fn incremental(
     .await?;
 
     if inserted > 0 || changed > 0 {
-        let _ = app.emit(
+        app.emit(
             "sync:progress",
-            Progress {
+            payload(&Progress {
                 account_id,
                 mailbox: path.to_string(),
                 written: inserted,
                 usable: true,
                 done: false,
-            },
+            }),
         );
-        let _ = app.emit("messages:added", mailbox_id);
+        app.emit("messages:added", payload(&mailbox_id));
     }
 
     Ok(inserted)
@@ -843,7 +908,7 @@ async fn incremental(
 /// user is waiting for this one, and queueing it behind a backfill that has three hundred
 /// batches left would make opening a message take minutes.
 pub async fn fetch_body(
-    app: &AppHandle,
+    app: &dyn Events,
     db: &Db,
     account_id: i64,
     message_ids: Vec<i64>,
@@ -958,7 +1023,7 @@ pub async fn fetch_body(
     tracing::debug!(account_id, stored, "body fetch: finished");
 
     if stored > 0 {
-        let _ = app.emit("messages:updated", message_ids);
+        app.emit("messages:updated", payload(&message_ids));
     }
 
     Ok(stored)
