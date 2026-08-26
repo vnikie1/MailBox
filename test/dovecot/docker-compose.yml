@@ -17,7 +17,13 @@
 
 services:
   dovecot:
-    image: dovecot/dovecot:2.3-latest
+    # Built, not pulled. See the Dockerfile: Docker Desktop's credential helper is consulted
+    # on every pull and reads the login keychain, which cannot be unlocked from a
+    # non-interactive SSH session — so a public image that needs no credentials still cannot
+    # be fetched. Building from a base already on the host avoids the registry entirely.
+    build:
+      context: .
+    image: halcyon-dovecot:local
     container_name: halcyon-dovecot
     restart: unless-stopped
     ports:
@@ -27,7 +33,10 @@ services:
       # rather than assumed.
       - '9143:143'
     volumes:
-      - ./conf:/etc/dovecot/conf.d:ro
+      # Mounted as well as baked into the image. The `COPY` in the Dockerfile makes the image
+      # runnable on its own; this mount means a configuration change is a restart rather than
+      # a rebuild, which matters when the config is the thing being iterated on.
+      - ./dovecot.conf:/etc/dovecot/dovecot.conf:ro
       - ./certs:/etc/dovecot/certs:ro
       - ./users:/etc/dovecot/users:ro
       - maildata:/srv/mail
