@@ -1,0 +1,116 @@
+/* docs/02 §6.6. Ordered by ascending specificity — see Button.module.css. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.label {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+.control {
+  position: relative;
+  display: flex;
+  gap: var(--field-gap);
+  align-items: center;
+  min-width: 0;
+  height: var(--field-height);
+  padding: 0 var(--field-pad-x);
+  background: var(--fill-hover);
+  border-radius: var(--field-radius);
+  transition:
+    width var(--dur-base) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+/* docs/02 §6.6 — collapsed 200 wide, focused expands to 320 over --dur-base. The only
+ * width animation in the app, and the doc asks for it explicitly. */
+.search {
+  width: var(--search-width);
+}
+
+.leading {
+  flex: 0 0 auto;
+  width: var(--field-icon);
+  height: var(--field-icon);
+  color: var(--label-3);
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--label-1);
+  font-family: inherit;
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  background: none;
+  border: 0;
+  user-select: text;
+}
+
+.input::placeholder {
+  color: var(--label-3);
+}
+
+.clear {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--field-icon);
+  height: var(--field-icon);
+  padding: 0;
+  color: var(--label-3);
+  background: none;
+  border: 0;
+  cursor: default;
+
+  /* Laid out always, revealed only when there is something to clear: making it enter the
+   * layout would resize the text area as you type. Standing rule 6. */
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.clear svg {
+  width: 100%;
+  height: 100%;
+}
+
+.clearVisible {
+  opacity: 1;
+}
+
+.description {
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+.descriptionInvalid {
+  color: var(--flag-red);
+}
+
+.clear:hover {
+  color: var(--label-1);
+}
+
+.control:has(.input:focus-visible) {
+  box-shadow: var(--focus-ring);
+}
+
+.search:has(.input:focus) {
+  width: var(--search-width-focused);
+}
+
+.invalid:has(.input) {
+  box-shadow: 0 0 0 var(--hairline) var(--flag-red);
+}

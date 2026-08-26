@@ -1,0 +1,178 @@
+/**
+ * docs/01 §3, docs/02 §6.2. Ordered by ascending specificity — see ui/Button.module.css.
+ *
+ * Note what is NOT here: a :hover rule on .row. docs/01 §3 says the sidebar has selection
+ * and nothing else, and that restraint is most of why it reads as calm. Adding one is the
+ * single easiest way to make this look like a Windows app.
+ */
+
+.pane {
+  composes: materialSidebar from global;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+/* Right-aligned, because the traffic lights occupy the left of this strip on macOS and
+ * the Windows system caption occupies the equivalent space above it here. */
+.header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+
+  /* Settings at the leading edge, the collapse toggle at the trailing one, which is where
+     assets/reference/ puts the toggle. */
+  justify-content: space-between;
+  height: var(--toolbar-height);
+  padding: 0 var(--sp-5);
+}
+
+.header > *:only-child {
+  margin-left: auto;
+}
+
+.sidebar {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tree {
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-2) var(--sidebar-row-inset) var(--sp-8);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* docs/02 §6.2 — height 28, footnote, tertiary, left inset 10, not uppercased. */
+.sectionTitle {
+  display: flex;
+  align-items: center;
+  height: var(--sidebar-section-height);
+  margin: 0;
+  padding: 0 var(--sidebar-section-inset);
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+.row {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sidebar-row-gap);
+  align-items: center;
+  height: var(--sidebar-row-height);
+  padding-right: var(--sidebar-badge-inset);
+  border-radius: var(--sidebar-row-radius);
+  cursor: default;
+  user-select: none;
+}
+
+/* Always laid out, so a row with children and a row without share a text baseline and
+ * expanding one cannot shift the other. */
+.disclosure {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--sidebar-chevron);
+  height: var(--sidebar-chevron);
+}
+
+.chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  color: var(--label-3);
+  background: none;
+  border: 0;
+  cursor: default;
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.chevron svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* docs/02 §6.2 — rotates 90deg over --dur-base. The rows below slide because they are in
+ * normal flow; nothing pops. */
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.icon {
+  flex: 0 0 auto;
+  width: var(--sidebar-row-icon);
+  height: var(--sidebar-row-icon);
+  color: var(--accent);
+}
+
+.label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  margin-left: var(--sp-3);
+}
+
+/**
+ * The drop target. docs/02 §6.2 — the accent at 25% alpha with a 1px accent inset ring.
+ *
+ * An inset box-shadow rather than a border, because a border occupies layout and every row
+ * below would shift by a pixel as the pointer crossed this one.
+ */
+.dropTarget {
+  background: color-mix(in srgb, var(--accent) var(--tint-drop), transparent);
+  box-shadow: inset 0 0 0 var(--hairline) var(--accent);
+}
+
+/**
+ * Selection, quiet state: the sidebar is not the focused pane. A soft fill, and the label
+ * takes the accent rather than the fill doing so. This is the state the macOS 26 reference
+ * captures.
+ */
+.selected {
+  background: var(--fill-selected-inactive);
+}
+
+.selected .label,
+.selected .icon {
+  color: var(--accent);
+}
+
+/**
+ * Selection, loud state: focus is in the sidebar. docs/02 §6.2 — the row fills with the
+ * accent and everything on it turns --accent-fg.
+ */
+.sidebar:focus-within .selected {
+  background: var(--accent);
+}
+
+.sidebar:focus-within .selected .label,
+.sidebar:focus-within .selected .icon,
+.sidebar:focus-within .selected .chevron {
+  color: var(--accent-fg);
+}
+
+/**
+ * Window inactive needs no rule here. semantic.css remaps --accent to system grey under
+ * [data-window-inactive], so both selection states desaturate on their own — which is the
+ * 'one remap, whole app' promise in docs/02 §3 actually paying off.
+ */

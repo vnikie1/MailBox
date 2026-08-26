@@ -1,0 +1,347 @@
+/* docs/01 §5, docs/02 §6.4. */
+
+.pane {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  background: var(--bg-content);
+}
+
+/* The pane's own header, at the shared toolbar height, so the three pane headers line up
+ * into one band. */
+.header {
+  composes: materialHeader from global;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: var(--toolbar-height);
+}
+
+/* "1 Message" — the thread's own count, which macOS 26 puts above the stack. */
+.countRow {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: var(--list-date-header-height);
+  padding: 0 var(--reader-pad-x);
+}
+
+.count {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+.reader {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--reader-pad-x) var(--sp-10);
+}
+
+/**
+ * The subject, as macOS 26 draws it: the second line of the header block rather than a
+ * title above it. docs/02 §6.4 specifies title2 at the top of the pane; the reference
+ * disagrees and the reference wins. Recorded in docs/PHASE-2-VERIFICATION.md.
+ */
+.messageSubject {
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+/* docs/02 §6.4 — height 36, colour at 12% alpha, hairline, icon 14 plus subhead. */
+.banner {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-4);
+  align-items: center;
+  height: var(--reader-banner-height);
+  margin-bottom: var(--sp-4);
+  padding: 0 var(--sp-6);
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--r-md);
+}
+
+.banner[data-tone='flag'] {
+  background: color-mix(in srgb, var(--flag-orange) var(--tint-subtle), transparent);
+}
+
+.bannerIcon {
+  flex: 0 0 auto;
+  width: var(--reader-banner-icon);
+  height: var(--reader-banner-icon);
+  color: var(--flag-orange);
+}
+
+.message {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  padding: var(--sp-6) 0;
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+.messageHeader {
+  display: flex;
+  gap: var(--sp-6);
+  align-items: flex-start;
+  cursor: default;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  margin-top: var(--sp-1);
+}
+
+.identity {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.identityLine {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.sender {
+  flex: 0 0 auto;
+  color: var(--label-1);
+  font-size: var(--t-headline-size);
+  font-weight: var(--t-headline-weight);
+  line-height: var(--t-headline-leading);
+  letter-spacing: var(--t-headline-tracking);
+  user-select: text;
+}
+
+.address {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.recipients {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: 0;
+  color: var(--label-2);
+  font-family: inherit;
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: default;
+}
+
+.recipientsChevron {
+  width: var(--sidebar-chevron);
+  height: var(--sidebar-chevron);
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.collapsedPreview {
+  overflow: hidden;
+  color: var(--label-3);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.headerMeta {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-4);
+  align-items: center;
+}
+
+.date {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  white-space: nowrap;
+}
+
+/**
+ * docs/01 §5 — the header's action glyphs. Laid out permanently and revealed on hover, so
+ * the date does not shuffle sideways when the pointer crosses the header.
+ *
+ * Revealed by keyboard focus as well: an affordance that only exists under a pointer is
+ * one a keyboard user can tab into but never see, which fails the definition of done's
+ * "focus order sensible; focus ring visible" line.
+ */
+.actions {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: center;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.actions:focus-within {
+  opacity: 1;
+}
+
+.messageHeader:hover .actions {
+  opacity: 1;
+}
+
+.recipientDetail {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-2) var(--sp-6);
+  margin: var(--sp-4) 0 0 calc(var(--reader-avatar) + var(--sp-6));
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  user-select: text;
+}
+
+.recipientDetail dd {
+  margin: 0;
+  color: var(--label-1);
+}
+
+/* docs/01 §5 — body 13pt at the mail line height, generous margins, and selectable, which
+ * standing rule "text is always selectable" (docs/01 §9.10) requires for content. The rule
+ * above it separates header from content, as the reference does. */
+.body {
+  margin-top: var(--sp-6);
+  padding-top: var(--sp-6);
+  border-top: var(--hairline) solid var(--separator);
+  color: var(--label-1);
+  font-size: var(--t-mailbody-size);
+  line-height: var(--t-mailbody-leading);
+  letter-spacing: var(--t-mailbody-tracking);
+  user-select: text;
+}
+
+.paragraph {
+  max-width: var(--measure-prose);
+  margin: 0 0 var(--sp-6);
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  margin-top: var(--sp-6);
+}
+
+/* docs/02 §6.8 — height 44, radius 8, raised fill, padding 0 12, gap 8. */
+.attachment {
+  display: flex;
+  gap: var(--attachment-gap);
+  align-items: center;
+  height: var(--attachment-height);
+  padding: 0 var(--attachment-pad-x);
+  font-family: inherit;
+  text-align: left;
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--attachment-radius);
+  cursor: default;
+}
+
+.attachmentIcon {
+  flex: 0 0 auto;
+  width: var(--list-icon);
+  height: var(--list-icon);
+  color: var(--label-2);
+}
+
+.attachmentText {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.attachmentName {
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.attachmentSize {
+  color: var(--label-2);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+}
+
+/* docs/02 §6.10 — centred glyph plus a title1, both tertiary. Never a spinner. */
+.empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--empty-gap);
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  background: var(--bg-content);
+}
+
+.emptyGlyph {
+  width: var(--sp-10);
+  height: var(--sp-10);
+  color: var(--label-3);
+}
+
+.emptyTitle {
+  margin: 0;
+  color: var(--label-3);
+  font-size: var(--t-title1-size);
+  font-weight: var(--t-title1-weight);
+  line-height: var(--t-title1-leading);
+  letter-spacing: var(--t-title1-tracking);
+}
+
+.collapsed .messageHeader {
+  cursor: default;
+}
+
+.collapsed:hover {
+  background: var(--fill-hover);
+}
+
+.attachment:hover {
+  background: var(--fill-hover);
+}

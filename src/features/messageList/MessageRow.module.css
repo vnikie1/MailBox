@@ -1,0 +1,208 @@
+/**
+ * docs/01 §4, docs/02 §6.3. Ordered by ascending specificity — see ui/Button.module.css.
+ *
+ * The row's height comes from the token, not from its content. Content-driven height would
+ * make a two-line subject taller than a one-line one, the virtualiser's arithmetic wrong,
+ * and the list ragged — all three of which docs/01 §9.1 rules out.
+ */
+
+.row {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: flex-start;
+  width: 100%;
+  height: 100%;
+  padding: var(--sp-4) var(--list-row-pad-right) var(--sp-4) var(--sp-4);
+  border-radius: var(--list-row-radius);
+  cursor: default;
+  user-select: none;
+}
+
+/* Always laid out, dot or no dot. docs/01 §4 — "the gutter is always reserved, so nothing
+ * shifts horizontally when read state changes". */
+.gutter {
+  display: flex;
+  flex: 0 0 var(--list-gutter);
+  justify-content: center;
+  padding-top: var(--sp-2);
+}
+
+.dot {
+  width: var(--list-unread-dot);
+  height: var(--list-unread-dot);
+  background: var(--accent);
+  border-radius: var(--r-pill);
+}
+
+.photo {
+  margin-right: var(--sp-3);
+}
+
+.content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.line {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.sender {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  font-weight: var(--t-body-weight);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* docs/02 §6.3 — headline weight when unread, body weight when read. Weight carries the
+ * hierarchy, not a fill; standing rule 5. */
+.unread {
+  font-weight: var(--t-headline-weight);
+}
+
+.count {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  line-height: var(--t-footnote-leading);
+  background: var(--fill-hover);
+  border-radius: var(--r-pill);
+}
+
+.date {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  white-space: nowrap;
+}
+
+.subject {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.icons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.icon {
+  width: var(--list-icon);
+  height: var(--list-icon);
+  color: var(--label-2);
+}
+
+/* The seven flag colours are one of only two saturated families allowed on screen —
+ * standing rule 2. */
+.flag[data-flag='red'] {
+  color: var(--flag-red);
+}
+
+.flag[data-flag='orange'] {
+  color: var(--flag-orange);
+}
+
+.flag[data-flag='yellow'] {
+  color: var(--flag-yellow);
+}
+
+.flag[data-flag='green'] {
+  color: var(--flag-green);
+}
+
+.flag[data-flag='blue'] {
+  color: var(--flag-blue);
+}
+
+.flag[data-flag='purple'] {
+  color: var(--flag-purple);
+}
+
+.flag[data-flag='gray'] {
+  color: var(--flag-gray);
+}
+
+.preview {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-3);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  -webkit-box-orient: vertical;
+}
+
+.row:hover {
+  background: var(--fill-hover);
+}
+
+/**
+ * Selection. docs/02 §6.3: accent fill with every piece of text turning --accent-fg when
+ * the list has focus, a neutral fill keeping normal colours when it does not.
+ *
+ * A contiguous run merges into one block: only the first row keeps its top corners and
+ * only the last keeps its bottom ones, so five selected rows read as one shape rather than
+ * as five stacked pills.
+ */
+.selected {
+  background: var(--fill-selected-inactive);
+  border-radius: 0;
+}
+
+.runStart {
+  border-top-left-radius: var(--list-row-radius);
+  border-top-right-radius: var(--list-row-radius);
+}
+
+.runEnd {
+  border-bottom-left-radius: var(--list-row-radius);
+  border-bottom-right-radius: var(--list-row-radius);
+}
+
+.row.selected:hover {
+  background: var(--fill-selected-inactive);
+}
+
+:global(.messageListFocused) .selected {
+  background: var(--accent);
+}
+
+:global(.messageListFocused) .selected .sender,
+:global(.messageListFocused) .selected .subject,
+:global(.messageListFocused) .selected .preview,
+:global(.messageListFocused) .selected .date,
+:global(.messageListFocused) .selected .icon,
+:global(.messageListFocused) .selected .count {
+  color: var(--accent-fg);
+}
+
+:global(.messageListFocused) .selected .dot {
+  background: var(--accent-fg);
+}
+
+:global(.messageListFocused) .selected .count {
+  background: color-mix(in srgb, var(--accent-fg) var(--tint-token), transparent);
+}

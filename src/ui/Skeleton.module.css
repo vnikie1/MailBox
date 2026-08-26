@@ -1,0 +1,55 @@
+.skeleton {
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: var(--fill-hover);
+  border-radius: var(--skeleton-radius);
+}
+
+.bar {
+  height: var(--skeleton-bar-height);
+}
+
+.circle {
+  width: var(--avatar-lg);
+  height: var(--avatar-lg);
+  border-radius: var(--r-pill);
+}
+
+.w1 {
+  width: var(--skeleton-width-1);
+}
+
+.w2 {
+  width: var(--skeleton-width-2);
+}
+
+.w3 {
+  width: var(--skeleton-width-3);
+}
+
+/* docs/02 §6.10: shimmer 1.2s linear. The sweep is a second layer rather than an
+ * animated background-position, so it composites on the GPU and costs nothing per row
+ * when eight of these are on screen at once. */
+.skeleton::after {
+  position: absolute;
+  content: '';
+  inset: 0;
+  background: linear-gradient(to right, transparent, var(--fill-hover), transparent);
+  transform: translateX(-100%);
+  animation: shimmer var(--dur-shimmer) var(--ease-linear) infinite;
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Collapsing --dur-shimmer to 0 would leave an infinite zero-length animation running.
+ * Stopping it outright is what reduced motion actually asks for. */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+}

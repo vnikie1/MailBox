@@ -1,0 +1,26 @@
+/* docs/02 §5 material, §4 shadow. Standing rule 4: shadows on floating layers only. */
+
+.popover {
+  composes: materialMenu from global;
+  z-index: 1;
+  min-width: var(--popover-min-width);
+  padding: var(--popover-pad);
+  color: var(--label-1);
+
+  /* Grows from the edge nearest its trigger — see transformOriginFor(). */
+  transform: scale(var(--sheet-enter-scale));
+  transform-origin: var(--popover-origin, center);
+  opacity: 0;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.popover[data-status='open'] {
+  transform: scale(1);
+  opacity: 1;
+}
+
+.arrow {
+  fill: var(--bg-menu);
+}

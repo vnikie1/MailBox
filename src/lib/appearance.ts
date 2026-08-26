@@ -25,6 +25,42 @@ export const DEFAULT_APPEARANCE: Appearance = {
   backdrop: 'none',
 }
 
+/**
+ * The user's overrides. Windows reports what the OS wants; these say whether to obey it.
+ *
+ * Theme and transparency both default to following the OS, which is the macOS behaviour
+ * and what docs/01 §11 asks for — but Mail also lets you pin an appearance, and docs/02
+ * §5 requires a Reduce Transparency toggle of our own for weak GPUs, whose users may not
+ * want the system-wide setting changed. Density has no OS equivalent at all.
+ */
+export type ThemePreference = 'system' | ThemeName
+export type Density = 'compact' | 'default' | 'comfortable'
+export type TransparencyPreference = 'system' | 'reduce' | 'full'
+
+export interface DisplayPreferences {
+  theme: ThemePreference
+  density: Density
+  transparency: TransparencyPreference
+}
+
+export const DEFAULT_PREFERENCES: DisplayPreferences = {
+  theme: 'system',
+  density: 'default',
+  transparency: 'system',
+}
+
+export function resolveTheme(appearance: Appearance, preferences: DisplayPreferences): ThemeName {
+  return preferences.theme === 'system' ? appearance.theme : preferences.theme
+}
+
+export function resolveReduceTransparency(
+  appearance: Appearance,
+  preferences: DisplayPreferences,
+): boolean {
+  if (preferences.transparency === 'system') return appearance.reduceTransparency
+  return preferences.transparency === 'reduce'
+}
+
 /** sRGB channel to linear light, per WCAG 2.x. */
 function linearise(channel8Bit: number): number {
   const c = channel8Bit / 255
@@ -68,15 +104,24 @@ export function accentForeground(accent: string): '#000000' | '#FFFFFF' {
 }
 
 /**
- * Write the appearance onto <html>. Everything downstream is a token remap:
- * semantic.css keys off [data-theme] and [data-reduce-transparency], and the two custom
- * properties feed the accent chain.
+ * Write the resolved appearance onto <html>. Everything downstream is a token remap:
+ * semantic.css keys off [data-theme] and [data-reduce-transparency], component.css keys
+ * off [data-density], and the two custom properties feed the accent chain.
+ *
+ * This is deliberately the only function in the app that writes those attributes. Theme,
+ * density and transparency each have two inputs — what Windows reports and what the user
+ * pinned — and resolving them in one place is what stops the two halves fighting.
  */
-export function applyAppearance(appearance: Appearance, root: HTMLElement): void {
-  root.dataset.theme = appearance.theme
+export function applyAppearance(
+  appearance: Appearance,
+  preferences: DisplayPreferences,
+  root: HTMLElement,
+): void {
+  root.dataset.theme = resolveTheme(appearance, preferences)
+  root.dataset.density = preferences.density
   root.dataset.backdrop = appearance.backdrop
 
-  if (appearance.reduceTransparency) {
+  if (resolveReduceTransparency(appearance, preferences)) {
     root.dataset.reduceTransparency = ''
   } else {
     delete root.dataset.reduceTransparency

@@ -1,0 +1,62 @@
+/* The modal counterpart to Popover. Ordered by ascending specificity. */
+
+.overlay {
+  display: grid;
+  place-items: center;
+  background: var(--scrim);
+  opacity: 0;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+.sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sheet-gap);
+  min-width: var(--sheet-min-width);
+  max-width: var(--sheet-max-width);
+  padding: var(--sheet-pad);
+  color: var(--label-1);
+  background: var(--bg-menu-opaque);
+  border-radius: var(--sheet-radius);
+
+  /* Standing rule 4: a shadow is permitted here because a sheet is a floating layer. */
+  box-shadow: var(--shadow-window);
+  transform: scale(var(--sheet-enter-scale));
+  opacity: 0;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--t-title3-size);
+  font-weight: var(--t-title3-weight);
+  line-height: var(--t-title3-leading);
+  letter-spacing: var(--t-title3-tracking);
+}
+
+.description {
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  user-select: text;
+}
+
+/* Primary action last, matching the macOS button order. */
+.footer {
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: flex-end;
+}
+
+.overlay[data-status='open'] {
+  opacity: 1;
+}
+
+.sheet[data-status='open'] {
+  transform: scale(1);
+  opacity: 1;
+}

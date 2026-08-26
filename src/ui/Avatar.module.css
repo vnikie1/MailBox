@@ -1,0 +1,83 @@
+.avatar {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: var(--label-2);
+  font-weight: var(--t-headline-weight);
+  letter-spacing: 0;
+  background: var(--bg-raised);
+  border-radius: var(--r-pill);
+  user-select: none;
+}
+
+/* Eight tints, chosen by a hash of the address — see tintIndexFor(). */
+.avatar[data-tint='0'] {
+  color: var(--avatar-ink-0);
+  background: var(--avatar-tint-0);
+}
+
+.avatar[data-tint='1'] {
+  color: var(--avatar-ink-1);
+  background: var(--avatar-tint-1);
+}
+
+.avatar[data-tint='2'] {
+  color: var(--avatar-ink-2);
+  background: var(--avatar-tint-2);
+}
+
+.avatar[data-tint='3'] {
+  color: var(--avatar-ink-3);
+  background: var(--avatar-tint-3);
+}
+
+.avatar[data-tint='4'] {
+  color: var(--avatar-ink-4);
+  background: var(--avatar-tint-4);
+}
+
+.avatar[data-tint='5'] {
+  color: var(--avatar-ink-5);
+  background: var(--avatar-tint-5);
+}
+
+.avatar[data-tint='6'] {
+  color: var(--avatar-ink-6);
+  background: var(--avatar-tint-6);
+}
+
+.avatar[data-tint='7'] {
+  color: var(--avatar-ink-7);
+  background: var(--avatar-tint-7);
+}
+
+.sm {
+  width: var(--avatar-sm);
+  height: var(--avatar-sm);
+  font-size: var(--t-caption-size);
+}
+
+.md {
+  width: var(--avatar-md);
+  height: var(--avatar-md);
+  font-size: var(--t-footnote-size);
+}
+
+.lg {
+  width: var(--avatar-lg);
+  height: var(--avatar-lg);
+  font-size: var(--t-subhead-size);
+}
+
+.image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.glyph {
+  width: 60%;
+  height: 60%;
+}

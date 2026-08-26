@@ -24,7 +24,20 @@
   --accent-fg: var(--accent-fg-system, #ffffff);
 
   --label-1: rgb(0 0 0 / 85%);
-  --label-2: rgb(0 0 0 / 50%);
+
+  /**
+   * 55%, not the 50% in docs/02 §3.
+   *
+   * docs/02 contradicts itself here: §3 pins secondaryLabel at 50% black, and §8 requires
+   * "--label-2 on --bg-content >= 4.5:1 for anything the user must read". Measured, 50%
+   * composites to #808080 on white and gives 3.98:1 — it fails the doc's own floor. 55%
+   * gives 4.76:1 and is indistinguishable side by side.
+   *
+   * The floor wins over the value: a contrast requirement is a promise to a user, and a
+   * token is a means to it. Dark mode already passes at 5.91:1 and is untouched.
+   * Measured by tests/e2e/scaling.spec.ts, which prints both numbers on every run.
+   */
+  --label-2: rgb(0 0 0 / 55%);
   --label-3: rgb(0 0 0 / 26%);
   --label-4: rgb(0 0 0 / 10%);
 
@@ -58,7 +71,46 @@
   --flag-purple: var(--purple-l);
   --flag-gray: var(--gray-l);
 
+  /* The destructive button of docs/02 §6.5. The doc gives it --flag-red and no hover
+   * state; a filled button needs one, and deriving it the same way --accent-hover is
+   * derived keeps the two buttons behaving identically. */
+  --destructive: var(--red-l);
+  --destructive-hover: color-mix(in srgb, var(--destructive) 85%, black);
+  --destructive-fg: #ffffff;
+
   --accent-inactive: var(--gray-l);
+
+  /* Surfaces docs/02 §3 does not name but §6 and docs/01 §9.8 require: the scrim behind
+   * a modal sheet, and the overlay scrollbar thumb. Kept greyscale — standing rule 2. */
+
+  /**
+   * Contact-photo tints. docs/01 §4 asks for "a colour derived deterministically from the
+   * address hash", which reads at first like a licence to break standing rule 2 — a wall of
+   * saturated initials circles is the loudest way to lose the restraint docs/01 §9.3
+   * describes. But Mail's own avatars are not saturated: assets/reference/ shows soft
+   * lavender and blue-grey discs. These are the Apple hues mixed most of the way to the
+   * background, with ink mixed the other way so the initials stay legible on them.
+   */
+  --avatar-tint-0: color-mix(in srgb, var(--blue-l) 20%, white);
+  --avatar-tint-1: color-mix(in srgb, var(--indigo-l) 20%, white);
+  --avatar-tint-2: color-mix(in srgb, var(--purple-l) 20%, white);
+  --avatar-tint-3: color-mix(in srgb, var(--pink-l) 18%, white);
+  --avatar-tint-4: color-mix(in srgb, var(--orange-l) 20%, white);
+  --avatar-tint-5: color-mix(in srgb, var(--green-l) 20%, white);
+  --avatar-tint-6: color-mix(in srgb, var(--teal-l) 24%, white);
+  --avatar-tint-7: color-mix(in srgb, var(--gray-l) 24%, white);
+  --avatar-ink-0: color-mix(in srgb, var(--blue-l) 65%, black);
+  --avatar-ink-1: color-mix(in srgb, var(--indigo-l) 65%, black);
+  --avatar-ink-2: color-mix(in srgb, var(--purple-l) 65%, black);
+  --avatar-ink-3: color-mix(in srgb, var(--pink-l) 65%, black);
+  --avatar-ink-4: color-mix(in srgb, var(--orange-l) 70%, black);
+  --avatar-ink-5: color-mix(in srgb, var(--green-l) 70%, black);
+  --avatar-ink-6: color-mix(in srgb, var(--teal-l) 70%, black);
+  --avatar-ink-7: color-mix(in srgb, var(--gray-l) 70%, black);
+
+  --scrim: rgb(0 0 0 / 20%);
+  --scrollbar-thumb: rgb(0 0 0 / 28%);
+  --scrollbar-thumb-hover: rgb(0 0 0 / 45%);
 
   color-scheme: light;
 }
@@ -102,7 +154,33 @@
   --flag-purple: var(--purple-d);
   --flag-gray: var(--gray-d);
 
+  --destructive: var(--red-d);
+  --destructive-hover: color-mix(in srgb, var(--destructive) 80%, white);
+  --destructive-fg: #ffffff;
+
   --accent-inactive: var(--gray-d);
+
+  /* Same hues, mixed toward the dark ground instead of toward white. */
+  --avatar-tint-0: color-mix(in srgb, var(--blue-d) 28%, #1e1e1e);
+  --avatar-tint-1: color-mix(in srgb, var(--indigo-d) 28%, #1e1e1e);
+  --avatar-tint-2: color-mix(in srgb, var(--purple-d) 28%, #1e1e1e);
+  --avatar-tint-3: color-mix(in srgb, var(--pink-d) 26%, #1e1e1e);
+  --avatar-tint-4: color-mix(in srgb, var(--orange-d) 26%, #1e1e1e);
+  --avatar-tint-5: color-mix(in srgb, var(--green-d) 26%, #1e1e1e);
+  --avatar-tint-6: color-mix(in srgb, var(--teal-d) 30%, #1e1e1e);
+  --avatar-tint-7: color-mix(in srgb, var(--gray-d) 30%, #1e1e1e);
+  --avatar-ink-0: color-mix(in srgb, var(--blue-d) 75%, white);
+  --avatar-ink-1: color-mix(in srgb, var(--indigo-d) 75%, white);
+  --avatar-ink-2: color-mix(in srgb, var(--purple-d) 75%, white);
+  --avatar-ink-3: color-mix(in srgb, var(--pink-d) 75%, white);
+  --avatar-ink-4: color-mix(in srgb, var(--orange-d) 80%, white);
+  --avatar-ink-5: color-mix(in srgb, var(--green-d) 80%, white);
+  --avatar-ink-6: color-mix(in srgb, var(--teal-d) 80%, white);
+  --avatar-ink-7: color-mix(in srgb, var(--gray-d) 80%, white);
+
+  --scrim: rgb(0 0 0 / 45%);
+  --scrollbar-thumb: rgb(255 255 255 / 28%);
+  --scrollbar-thumb-hover: rgb(255 255 255 / 48%);
 
   color-scheme: dark;
 }
@@ -127,6 +205,13 @@
   --bg-sidebar: var(--bg-sidebar-opaque);
   --bg-header: var(--bg-header-opaque);
   --bg-menu: var(--bg-menu-opaque);
+
+  /* Not merely cosmetic: a backdrop-filter of any radius forces a compositing layer and
+   * a readback per frame. Setting it to none — rather than blur(0) — is what actually
+   * buys back the GPU cost on the weak hardware docs/02 §5 has in mind. */
+  --filter-sidebar: none;
+  --filter-header: none;
+  --filter-menu: none;
 }
 
 /**
@@ -197,4 +282,19 @@
   --t-mailbody-weight: 400;
   --t-mailbody-leading: 1.55;
   --t-mailbody-tracking: -0.005em;
+
+  /**
+   * The focus ring. docs/02 §6.5 gives it once, inline, then says "focus ring everywhere" —
+   * which makes it a role, not a per-component value. Naming it means a component that has
+   * to combine it with another shadow can, and that it follows the accent for free,
+   * including the inactive-window desaturation above.
+   */
+  --focus-ring: 0 0 0 var(--focus-ring-width)
+    color-mix(in srgb, var(--accent) var(--focus-ring-alpha), transparent);
+
+  /* The three materials of docs/02 §5, as a role each, so Reduce Transparency can switch
+   * them off from one place above. */
+  --filter-sidebar: blur(var(--blur-sidebar)) saturate(var(--saturate-material));
+  --filter-header: blur(var(--blur-header)) saturate(var(--saturate-material));
+  --filter-menu: blur(var(--blur-menu)) saturate(var(--saturate-material));
 }

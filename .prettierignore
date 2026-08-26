@@ -17,3 +17,6 @@ coverage
 playwright-report
 test-results
 package-lock.json
+
+# Generated from the Rust types by `cargo test`; rewritten on every run.
+src/lib/generated

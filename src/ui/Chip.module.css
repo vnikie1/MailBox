@@ -1,0 +1,74 @@
+.chip {
+  display: inline-flex;
+  flex: 0 1 auto;
+  gap: var(--chip-gap);
+  align-items: center;
+  max-width: 100%;
+  height: var(--chip-height);
+  padding: 0 var(--chip-pad-x);
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  background: var(--fill-hover);
+  border-radius: var(--chip-radius);
+  user-select: none;
+}
+
+.label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* docs/02 §6.6 — a committed search token. */
+.accent {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) var(--tint-token), transparent);
+}
+
+/* docs/02 §6.7 — an address that does not parse. */
+.invalid {
+  color: var(--flag-red);
+  background: color-mix(in srgb, var(--flag-red) var(--tint-token), transparent);
+}
+
+/* One Backspace selects, the next deletes. Selected wins over every tone. */
+.selected {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+
+.remove {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--chip-remove);
+  height: var(--chip-remove);
+  padding: 0;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-radius: var(--r-pill);
+  cursor: default;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.remove svg {
+  width: 100%;
+  height: 100%;
+}
+
+.remove:hover {
+  background: var(--fill-pressed);
+}
+
+/* Revealed by hovering the chip, by keyboard focus, and whenever the chip is the one
+ * Backspace has selected — so the target of the next keystroke is never invisible. */
+.chip:hover .remove,
+.chip:focus-visible .remove,
+.chip.selected .remove {
+  opacity: 1;
+}

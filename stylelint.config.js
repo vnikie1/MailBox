@@ -31,6 +31,9 @@ export default {
     // CSS Modules vocabulary
     'selector-pseudo-class-no-unknown': [true, { ignorePseudoClasses: ['global', 'local'] }],
     'property-no-unknown': [true, { ignoreProperties: ['composes'] }],
+    // `composes: materialMenu from global` — a CSS Modules value, not a CSS keyword,
+    // so its camelCase class name must survive.
+    'value-keyword-case': ['lower', { ignoreProperties: ['composes'] }],
     'custom-property-pattern': null,
     'selector-class-pattern': '^[a-z][a-zA-Z0-9]+$',
     // Stylelint's preference for shorthands fights the token system more than it helps.

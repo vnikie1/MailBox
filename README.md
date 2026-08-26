@@ -20,6 +20,7 @@ for what is verified, what is blocked, and why.
 | 4   | [docs/04-roadmap.md](docs/04-roadmap.md)                         | 12 phases with objective exit gates. ~12 weeks to v1.                                                                                                           |
 | 5   | [docs/05-risks-and-legal.md](docs/05-risks-and-legal.md)         | Long-lead blockers: Gmail OAuth verification, code signing, font licensing, IMAP reality checks. **Read before Phase 4.**                                       |
 | 6   | [docs/06-prompt-library.md](docs/06-prompt-library.md)           | One ready-to-paste prompt per phase, plus utility prompts for fidelity, performance and security audits.                                                        |
+| 7   | [docs/07-distribution.md](docs/07-distribution.md)               | Installers, code signing, and the full Microsoft Store / MSIX submission process. **Start §2 at Phase 9.**                                                      |
 
 ---
 

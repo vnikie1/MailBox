@@ -1,0 +1,70 @@
+/* docs/02 §6.7. Ordered by ascending specificity; see Button.module.css. */
+
+.field {
+  display: flex;
+  gap: var(--tokenfield-gap);
+  align-items: flex-start;
+  min-width: 0;
+  padding: var(--sp-2) 0;
+}
+
+/* docs/02 §6.7 — label fixed 60 wide, right-aligned, so To/Cc/Bcc stack into a column
+ * and every address starts on the same left edge. */
+.label {
+  flex: 0 0 auto;
+  width: var(--tokenfield-label-width);
+  min-height: var(--tokenfield-row-height);
+  padding-top: var(--sp-3);
+  color: var(--label-2);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  text-align: right;
+}
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: var(--chip-gap);
+  align-items: center;
+  min-width: 0;
+  min-height: var(--tokenfield-row-height);
+}
+
+.tokens {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.token {
+  display: contents;
+}
+
+/* Grows to fill the rest of the current line and wraps onto a new one when what is being
+ * typed no longer fits — the behaviour that makes a token field feel like a text field
+ * rather than a form control with a text field bolted on. */
+.input {
+  flex: 1 1 var(--menu-min-width);
+  min-width: 0;
+  height: var(--chip-height);
+  color: var(--label-1);
+  font-family: inherit;
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  background: none;
+  border: 0;
+  user-select: text;
+}
+
+.input::placeholder {
+  color: var(--label-3);
+}
+
+.disabled .label,
+.disabled .input {
+  color: var(--label-3);
+}

@@ -13,6 +13,9 @@ export default tseslint.config(
       'coverage',
       'playwright-report',
       'test-results',
+      // Written by `cargo test` from the Rust types; formatting them here would be undone
+      // on the next run and the diff would be pure noise.
+      'src/lib/generated',
     ],
   },
 
@@ -46,6 +49,16 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/restrict-template-expressions': ['error', { allowNumber: true }],
     },
+  },
+
+  // @floating-ui/react declares refs.setReference and refs.setFloating as methods, so
+  // unbound-method fires every time one is passed to a ref prop — which is the library’s
+  // documented and only usage. Wrapping them in arrow functions to satisfy the rule would
+  // create a new ref callback on every render, detaching and reattaching the node each
+  // time. Scoped to the primitives that actually host a floating layer.
+  {
+    files: ['src/ui/{Popover,Tooltip,Menu,ContextMenu,Sheet}.tsx'],
+    rules: { '@typescript-eslint/unbound-method': 'off' },
   },
 
   // Node-side config files.

@@ -1,0 +1,57 @@
+/**
+ * Overlay scrollbars — docs/01 §9.8.
+ *
+ * Do not add `scrollbar-width` or `scrollbar-color` here. Chromium drops every
+ * ::-webkit-scrollbar rule on an element that specifies the standard properties, so one
+ * well-meant line for Firefox would silently revert this to a stock Windows scrollbar.
+ */
+
+.scrollArea {
+  min-height: 0;
+
+  /* Rubber-banding within the pane, never chaining to the window — docs/01 §9.8. */
+  overscroll-behavior: contain;
+}
+
+.vertical {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.horizontal {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.both {
+  overflow: auto;
+}
+
+.scrollArea::-webkit-scrollbar {
+  width: var(--scrollbar-gutter);
+  height: var(--scrollbar-gutter);
+}
+
+.scrollArea::-webkit-scrollbar-track,
+.scrollArea::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.scrollArea::-webkit-scrollbar-thumb {
+  /* The transparent border is what insets the thumb inside the gutter: background-clip
+   * keeps the fill off it, so the thumb reads as 7px in a 15px channel. */
+  background-color: transparent;
+  background-clip: padding-box;
+  border: var(--scrollbar-inset) solid transparent;
+  border-radius: var(--scrollbar-thumb-radius);
+  transition: background-color var(--dur-base) var(--ease-out);
+}
+
+.scrollArea:hover::-webkit-scrollbar-thumb,
+.scrollArea[data-scrolling]::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+}
+
+.scrollArea::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}

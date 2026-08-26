@@ -1,0 +1,65 @@
+.viewport {
+  position: fixed;
+  right: var(--toast-inset);
+  bottom: var(--toast-inset);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--toast-stack-gap);
+  align-items: flex-end;
+
+  /* The stack must not swallow clicks aimed at the app behind it; each toast opts back
+   * in for itself. */
+  pointer-events: none;
+}
+
+.toast {
+  composes: materialMenu from global;
+  display: flex;
+  gap: var(--toast-gap);
+  align-items: center;
+  min-width: var(--toast-min-width);
+  max-width: var(--toast-max-width);
+  padding: var(--toast-pad-y) var(--toast-pad-x);
+  color: var(--label-1);
+  border-radius: var(--toast-radius);
+  transform: translateY(var(--toast-enter-offset));
+  opacity: 0;
+  transition:
+    opacity var(--dur-base) var(--ease-out),
+    transform var(--dur-base) var(--ease-out);
+  pointer-events: auto;
+}
+
+.icon {
+  flex: 0 0 auto;
+  width: var(--toast-icon);
+  height: var(--toast-icon);
+  color: var(--label-2);
+}
+
+.text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title {
+  font-size: var(--t-body-size);
+  font-weight: var(--t-headline-weight);
+  line-height: var(--t-headline-leading);
+  letter-spacing: var(--t-headline-tracking);
+}
+
+.description {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+.toast[data-status='open'] {
+  transform: translateY(0);
+  opacity: 1;
+}

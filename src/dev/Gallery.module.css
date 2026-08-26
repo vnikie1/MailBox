@@ -1,0 +1,201 @@
+/**
+ * The gallery's own chrome. Dev-only, but held to the same rule as everything else: no
+ * raw values, tokens throughout. If a specimen needs a value the token layer does not
+ * have, that is a gap in the design system, not a licence to hardcode it here.
+ */
+
+.gallery {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-content);
+}
+
+.header {
+  composes: materialHeader from global;
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-8);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-5) var(--sp-8);
+}
+
+.title {
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-title3-size);
+  font-weight: var(--t-title3-weight);
+  line-height: var(--t-title3-leading);
+  letter-spacing: var(--t-title3-tracking);
+}
+
+.controls {
+  display: flex;
+  gap: var(--sp-7);
+}
+
+.controlGroup {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.body {
+  flex: 1 1 auto;
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: start;
+}
+
+/* Each column carries its own [data-theme], so it paints its own ground rather than
+ * inheriting the page's. */
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-9);
+  padding: var(--sp-8);
+  color: var(--label-1);
+  background: var(--bg-content);
+}
+
+.columnTitle {
+  margin: 0;
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+  text-transform: uppercase;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-headline-size);
+  font-weight: var(--t-headline-weight);
+  line-height: var(--t-headline-leading);
+  letter-spacing: var(--t-headline-tracking);
+}
+
+.specimens {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: var(--search-width) 1fr;
+  gap: var(--sp-6);
+  align-items: center;
+}
+
+.rowLabel {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+.rowItems {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-5);
+  align-items: center;
+  min-width: 0;
+}
+
+.selectedRow {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: center;
+  justify-content: space-between;
+  width: var(--search-width);
+  height: var(--sidebar-row-height);
+  padding: 0 var(--sidebar-row-pad-x);
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: var(--sidebar-row-radius);
+}
+
+.dividerDemo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  width: var(--search-width);
+  color: var(--label-2);
+}
+
+.dividerRow {
+  display: flex;
+  gap: var(--sp-5);
+  align-items: center;
+  height: var(--btn-height);
+  color: var(--label-2);
+}
+
+.skeletonStack {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--skeleton-row-gap);
+  min-width: 0;
+  width: var(--search-width-focused);
+}
+
+.skeletonList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  width: var(--search-width-focused);
+}
+
+.skeletonRow {
+  display: flex;
+  gap: var(--sp-5);
+  align-items: center;
+}
+
+.contextRegion {
+  display: grid;
+  place-items: center;
+  width: var(--search-width-focused);
+  height: var(--attachment-height);
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  background: var(--fill-hover);
+  border-radius: var(--r-lg);
+}
+
+.popoverBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+}
+
+.scrollDemo {
+  width: var(--search-width-focused);
+  height: var(--toast-max-width);
+  background: var(--fill-hover);
+  border-radius: var(--r-lg);
+}
+
+.scrollRow {
+  display: flex;
+  align-items: center;
+  height: var(--menu-item-height);
+  padding: 0 var(--sp-5);
+  color: var(--label-2);
+  font-size: var(--t-body-size);
+}

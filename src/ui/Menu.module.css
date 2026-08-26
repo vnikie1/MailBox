@@ -1,0 +1,145 @@
+/**
+ * docs/02 §6.9. Shared by Menu and ContextMenu — they differ only in how they are
+ * positioned, never in how they look.
+ *
+ * Ordered by ascending specificity throughout; see Button.module.css.
+ */
+
+.menu {
+  composes: materialMenu from global;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: var(--menu-min-width);
+  max-height: var(--menu-max-height);
+  padding: var(--menu-pad);
+  overflow-y: auto;
+  border-radius: var(--menu-radius);
+  outline: none;
+  opacity: 0;
+  transition: opacity var(--dur-micro) var(--ease-out);
+}
+
+.menu[data-status='open'] {
+  opacity: 1;
+}
+
+.item {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--menu-item-gap);
+  align-items: center;
+  height: var(--menu-item-height);
+  padding: 0 var(--menu-item-pad-x);
+  color: var(--label-1);
+  font-family: inherit;
+  font-size: var(--t-body-size);
+  font-weight: var(--t-body-weight);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  text-align: left;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  border-radius: var(--menu-item-radius);
+  cursor: default;
+  user-select: none;
+}
+
+/* Always laid out, icon or no icon, so every label in a menu shares a left edge and a
+ * checkmark appearing cannot shift the row. Standing rule 6. */
+.lead {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--menu-lead-width);
+}
+
+.icon {
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+}
+
+.label {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shortcut {
+  flex: 0 0 auto;
+  margin-left: var(--menu-shortcut-gap);
+  color: var(--label-3);
+}
+
+.chevron {
+  flex: 0 0 auto;
+  width: var(--menu-icon);
+  height: var(--menu-icon);
+  margin-left: var(--menu-shortcut-gap);
+  color: var(--label-3);
+}
+
+.destructive {
+  color: var(--flag-red);
+}
+
+.separator {
+  flex: 0 0 auto;
+  height: var(--hairline);
+  margin: var(--menu-sep-margin);
+  background: var(--separator);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* docs/02 §6.6 — grouped with --t-footnote headers. */
+.sectionLabel {
+  padding: var(--sp-2) var(--menu-item-pad-x) var(--sp-1);
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+.item:disabled {
+  color: var(--label-3);
+}
+
+/**
+ * The highlight. docs/02 §6.9 — hover is the accent with --accent-fg text, and the
+ * shortcut hint inherits rather than staying grey.
+ *
+ * Keyed off :focus rather than :hover because Floating UI moves DOM focus as you arrow
+ * through a menu, and macOS highlights the keyboard row identically to the hovered one.
+ * Two selectors, one appearance.
+ */
+.item:hover:not(:disabled),
+.item:focus:not(:disabled) {
+  color: var(--accent-fg);
+  background: var(--accent);
+  outline: none;
+}
+
+.item[data-open] {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+
+.item:hover:not(:disabled) .shortcut,
+.item:focus:not(:disabled) .shortcut,
+.item:hover:not(:disabled) .chevron,
+.item:focus:not(:disabled) .chevron {
+  color: inherit;
+}
+
+/* The right-click region of ContextMenu. It must not become a layout box of its own —
+ * it wraps whatever the caller already laid out. */
+.region {
+  display: contents;
+}

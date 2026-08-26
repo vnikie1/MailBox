@@ -29,6 +29,24 @@ export default defineConfig({
       name: 'chromium',
       use: { ...devices['Desktop Chrome'], viewport: { width: 1400, height: 900 } },
     },
+
+    /**
+     * Windows display scaling. docs/02 §8 requires 100 / 125 / 150 / 175 % and the
+     * definition of done repeats it — this is a Windows app and 125 % is the factory
+     * setting on most laptops it will run on, so 100 % alone is the unusual case.
+     *
+     * Only the scaling spec runs here: re-running the whole suite four times would
+     * quadruple CI for no signal, since nothing else is scale-dependent.
+     */
+    ...[1.25, 1.5, 1.75].map((scale) => ({
+      name: `chromium@${String(scale)}x`,
+      testMatch: /scaling.spec.ts/,
+      use: {
+        ...devices['Desktop Chrome'],
+        viewport: { width: 1400, height: 900 },
+        deviceScaleFactor: scale,
+      },
+    })),
   ],
   webServer: {
     command: 'npm run dev',

@@ -1,0 +1,18 @@
+.badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--badge-min-width);
+  padding: 0 var(--badge-pad-x);
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+  user-select: none;
+}
+
+.selected {
+  color: var(--accent-fg);
+}

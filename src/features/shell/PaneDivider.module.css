@@ -1,0 +1,41 @@
+/**
+ * The rule itself is a hairline (standing rule 3); the grab area around it is not, because
+ * a 1px pointer target is unusable. The handle is transparent and 9px wide, centred on the
+ * rule, and takes no space in the layout beyond the hairline it draws.
+ */
+
+.divider {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 var(--hairline);
+  align-self: stretch;
+  width: var(--hairline);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.rule {
+  position: absolute;
+  inset: 0;
+  background: var(--separator);
+  pointer-events: none;
+}
+
+/* The grab area, spilling either side of the rule without displacing anything. */
+.divider::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sp-2) * -1);
+  content: '';
+  width: var(--sp-5);
+}
+
+.divider:focus-visible {
+  outline: none;
+}
+
+.divider:focus-visible .rule {
+  background: var(--accent);
+  box-shadow: var(--focus-ring);
+}

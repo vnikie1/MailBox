@@ -1,0 +1,39 @@
+/* docs/02 §6.1, with the button order corrected against assets/reference/. */
+
+.toolbar {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--sp-5);
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--toolbar-pad-x);
+}
+
+/**
+ * Each group sits on a rounded fill. docs/02 §6.1 draws bare icon buttons and standing
+ * rule 5 would rather hierarchy came from weight and opacity than from boxes — but macOS
+ * 26 groups them onto capsules, and assets/reference/ is unambiguous about it. The fill is
+ * --fill-hover, so it stays inside the greyscale-plus-accent palette rule 2 allows.
+ */
+.group {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--toolbar-gap-within);
+  align-items: center;
+  padding: 0 var(--sp-2);
+  background: var(--fill-hover);
+  border-radius: var(--r-pill);
+}
+
+.separator {
+  height: var(--icon-btn-size);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.search {
+  flex: 0 0 auto;
+}

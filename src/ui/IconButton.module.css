@@ -1,0 +1,57 @@
+/* docs/02 §6.1, docs/01 §13. Ordered by ascending specificity — see Button.module.css. */
+
+.button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--label-2);
+  background: none;
+  border: 0;
+  border-radius: var(--icon-btn-radius);
+  cursor: default;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+
+.md {
+  width: var(--icon-btn-size);
+  height: var(--icon-btn-size);
+}
+
+.sm {
+  width: var(--icon-btn-size-sm);
+  height: var(--icon-btn-size-sm);
+}
+
+.icon {
+  width: var(--icon-btn-icon);
+  height: var(--icon-btn-icon);
+}
+
+.sm .icon {
+  width: var(--icon-btn-icon-sm);
+  height: var(--icon-btn-icon-sm);
+}
+
+.button:disabled {
+  color: var(--label-3);
+  background: none;
+}
+
+.button:hover:not(:disabled) {
+  color: var(--label-1);
+  background: var(--fill-hover);
+}
+
+/* Latched — docs/02 §6.1 says active/toggled is the accent, and it has to outrank hover,
+ * so it carries the same specificity and comes after. */
+.button.toggled:not(:disabled) {
+  color: var(--accent);
+}
+
+.button:active:not(:disabled) {
+  background: var(--fill-pressed);
+}

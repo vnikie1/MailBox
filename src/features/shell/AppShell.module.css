@@ -1,0 +1,67 @@
+/* docs/01 §1. */
+
+.window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/**
+ * Each pane draws its own header at --toolbar-height, and they line up into one band. The
+ * system caption Windows draws sits above that — see src-tauri/src/platform/mod.rs for why
+ * that caption is not ours — and Mica shows through both, which is the nearest this can
+ * get to macOS's unified titlebar.
+ */
+
+.body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* docs/01 §1 "Alternate layout" — full-width list on top, reader below. */
+.classic {
+  flex-wrap: wrap;
+}
+
+.sidebarPane {
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.listPane {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  height: 100%;
+}
+
+.readerPane {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  background: var(--bg-content);
+}
+
+.backBar {
+  display: flex;
+  flex: 0 0 100%;
+  align-items: center;
+  height: var(--sidebar-row-height);
+  padding: 0 var(--sp-4);
+}
+
+.classic .listPane {
+  flex: 0 0 100%;
+  height: 50%;
+}
+
+.classic .readerPane {
+  flex: 0 0 100%;
+  height: 50%;
+  border-top: var(--hairline) solid var(--separator);
+}

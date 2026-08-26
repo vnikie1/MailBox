@@ -6,6 +6,9 @@ import {
   applyWindowActive,
   parseHexColour,
   relativeLuminance,
+  DEFAULT_PREFERENCES,
+  resolveReduceTransparency,
+  resolveTheme,
   type Appearance,
 } from '@/lib/appearance'
 
@@ -79,21 +82,21 @@ describe('applyAppearance', () => {
   })
 
   it('writes theme and backdrop as data attributes', () => {
-    applyAppearance({ ...base, theme: 'dark', backdrop: 'micaAlt' }, root)
+    applyAppearance({ ...base, theme: 'dark', backdrop: 'micaAlt' }, DEFAULT_PREFERENCES, root)
     expect(root.dataset.theme).toBe('dark')
     expect(root.dataset.backdrop).toBe('micaAlt')
   })
 
   it('adds and removes the reduce-transparency flag', () => {
-    applyAppearance({ ...base, reduceTransparency: true }, root)
+    applyAppearance({ ...base, reduceTransparency: true }, DEFAULT_PREFERENCES, root)
     expect(root.dataset.reduceTransparency).toBe('')
 
-    applyAppearance({ ...base, reduceTransparency: false }, root)
+    applyAppearance({ ...base, reduceTransparency: false }, DEFAULT_PREFERENCES, root)
     expect(root.dataset.reduceTransparency).toBeUndefined()
   })
 
   it('sets the accent pair together', () => {
-    applyAppearance({ ...base, accent: '#FFCC00' }, root)
+    applyAppearance({ ...base, accent: '#FFCC00' }, DEFAULT_PREFERENCES, root)
     expect(root.style.getPropertyValue('--accent-system')).toBe('#FFCC00')
     expect(root.style.getPropertyValue('--accent-fg-system')).toBe('#000000')
   })
@@ -101,8 +104,8 @@ describe('applyAppearance', () => {
   it('leaves the accent properties unset when Windows reports no accent', () => {
     // Unset is meaningful: semantic.css then falls back to the Apple blue pair, so the
     // fallback value is never duplicated in two places.
-    applyAppearance({ ...base, accent: '#007AFF' }, root)
-    applyAppearance({ ...base, accent: null }, root)
+    applyAppearance({ ...base, accent: '#007AFF' }, DEFAULT_PREFERENCES, root)
+    applyAppearance({ ...base, accent: null }, DEFAULT_PREFERENCES, root)
     expect(root.style.getPropertyValue('--accent-system')).toBe('')
     expect(root.style.getPropertyValue('--accent-fg-system')).toBe('')
   })
@@ -117,5 +120,44 @@ describe('applyWindowActive', () => {
 
     applyWindowActive(true, root)
     expect(root.dataset.windowInactive).toBeUndefined()
+  })
+})
+
+describe('preference resolution', () => {
+  const os: Appearance = {
+    theme: 'dark',
+    accent: null,
+    reduceTransparency: true,
+    backdrop: 'micaAlt',
+  }
+
+  it('follows the OS by default and obeys a pinned theme', () => {
+    expect(resolveTheme(os, DEFAULT_PREFERENCES)).toBe('dark')
+    expect(resolveTheme(os, { ...DEFAULT_PREFERENCES, theme: 'light' })).toBe('light')
+    expect(resolveTheme(os, { ...DEFAULT_PREFERENCES, theme: 'dark' })).toBe('dark')
+  })
+
+  it('lets the user turn transparency back on when Windows has turned it off', () => {
+    // The Windows setting is system-wide; a user who wants the app translucent should not
+    // have to change it for every app. docs/02 §5 asks for the in-app toggle for this.
+    expect(resolveReduceTransparency(os, DEFAULT_PREFERENCES)).toBe(true)
+    expect(resolveReduceTransparency(os, { ...DEFAULT_PREFERENCES, transparency: 'full' })).toBe(
+      false,
+    )
+
+    const opaqueOs: Appearance = { ...os, reduceTransparency: false }
+    expect(
+      resolveReduceTransparency(opaqueOs, { ...DEFAULT_PREFERENCES, transparency: 'reduce' }),
+    ).toBe(true)
+  })
+
+  it('writes the resolved theme and the density together', () => {
+    const root = document.createElement('html')
+
+    applyAppearance(os, { theme: 'light', density: 'compact', transparency: 'full' }, root)
+
+    expect(root.dataset.theme).toBe('light')
+    expect(root.dataset.density).toBe('compact')
+    expect(root.dataset.reduceTransparency).toBeUndefined()
   })
 })

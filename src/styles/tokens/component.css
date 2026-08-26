@@ -2,9 +2,11 @@
  * Tier 3 — COMPONENT
  * Per-component values. Density swaps ONLY this file. docs/02-design-system.md §1, §6, §7.
  *
- * Phase 0 populates the window chrome only: the toolbar bar itself. The remaining
- * component tokens (§6.2–§6.10) belong to Phase 1, which implements the design system in
- * full, and Phase 2, which builds the panes and the toolbar controls.
+ * Phase 1 fills this out for the whole of docs/02 §6. Tokens for surfaces that Phase 2
+ * builds (sidebar rows, message-list rows, the reader header) are declared here rather
+ * than later, because §7 requires density to be a single-file swap and those are the
+ * three things density actually changes. The components consume them in Phase 2; the
+ * values are the doc's, unverified against `assets/reference/` until that phase.
  */
 
 :root {
@@ -28,21 +30,247 @@
   /* Typographic measure for prose surfaces — the reader body and empty states in
    * docs/02 §6.10 both want one. */
   --measure-prose: 60ch;
+
+  /* ---------- sidebar row — docs/02 §6.2, height measured from the reference ----------
+   * docs/02 §6.2 and §7 say 28. Measured off assets/reference/mail-window-light-active.png
+   * it is 32: six consecutive row pairs are 48px apart in a 2000px-wide render of a
+   * 2664px capture of a 2x display, which is 64 device pixels and so 32 points. The
+   * reference wins over the doc. See docs/PHASE-2-VERIFICATION.md. */
+  --sidebar-row-height: 32px;
+  --sidebar-row-radius: var(--r-md);
+  --sidebar-row-inset: var(--sp-4);
+  --sidebar-row-pad-x: var(--sp-4);
+  --sidebar-row-gap: var(--sp-4);
+  --sidebar-row-icon: 16px;
+  --sidebar-section-height: 28px;
+  --sidebar-section-inset: var(--sp-5);
+  --sidebar-chevron: 10px;
+  --sidebar-badge-inset: var(--sp-6);
+
+  /* ---------- message list row — docs/02 §6.3, heights measured from the reference ----
+   * Three heights, by how many preview lines are shown. §6.3 says 46/62/78 and §7 pins
+   * only the two-line figure per density. Measured off the reference, the two-line row is
+   * 80, not 78 — eight consecutive rows 120px apart in the same render, so 160 device
+   * pixels and 80 points. The 16pt step between preview counts is kept, which puts the
+   * other two at 48 and 64. See docs/PHASE-2-VERIFICATION.md. */
+  --list-row-height-0: 48px;
+  --list-row-height-1: 64px;
+  --list-row-height-2: 80px;
+  --list-row-height: var(--list-row-height-2);
+  --list-row-pad-left: var(--sp-7);
+  --list-row-pad-right: var(--sp-6);
+  --list-row-inset: var(--sp-4);
+  --list-row-radius: var(--r-md);
+  --list-gutter: 22px;
+  --list-photo: 30px;
+  --list-unread-dot: 8px;
+  --list-icon: 14px;
+  --list-date-header-height: 26px;
+
+  /* ---------- reader header — docs/02 §6.4 ---------- */
+  --reader-pad-x: var(--sp-8);
+  --reader-subject-pad-top: var(--sp-8);
+  --reader-subject-pad-bottom: var(--sp-6);
+  --reader-avatar: 32px;
+  --reader-banner-height: 36px;
+  --reader-banner-icon: 14px;
+
+  /* Enough that a one-line message does not look like a rendering failure while the frame
+   * measures itself. docs/03 §6.7. */
+  --reader-frame-min-height: 60px;
+
+  /* ---------- buttons — docs/02 §6.5 ---------- */
+  --btn-height: 28px;
+  --btn-pad-x: 14px;
+  --btn-pad-x-bordered: var(--sp-5);
+  --btn-radius: var(--r-pill);
+  --btn-radius-bordered: var(--r-md);
+  --btn-gap: var(--sp-3);
+  --btn-icon: 14px;
+
+  --icon-btn-size: 28px;
+  --icon-btn-size-sm: 22px;
+  --icon-btn-radius: var(--r-md);
+  --icon-btn-icon: 17px;
+  --icon-btn-icon-sm: 14px;
+  --icon-btn-stroke: 1.5;
+
+  /* ---------- search field — docs/02 §6.6 ---------- */
+  --field-height: 28px;
+  --field-radius: var(--r-md);
+  --field-pad-x: var(--sp-4);
+  --field-gap: var(--sp-3);
+  --field-icon: 14px;
+  --search-width: 200px;
+  --search-width-focused: 320px;
+
+  /* ---------- recipient token field — docs/02 §6.7 ---------- */
+  --tokenfield-row-height: 30px;
+  --tokenfield-label-width: 60px;
+  --tokenfield-gap: var(--sp-2);
+  --chip-height: 20px;
+  --chip-radius: var(--r-pill);
+  --chip-pad-x: var(--sp-3);
+  --chip-gap: var(--sp-2);
+  --chip-avatar: 16px;
+  --chip-remove: 12px;
+
+  /* ---------- avatar ---------- */
+  --avatar-sm: 16px;
+  --avatar-md: 28px;
+  --avatar-lg: 32px;
+
+  /* ---------- badge — docs/02 §6.2 ---------- */
+  --badge-pad-x: var(--sp-2);
+  --badge-min-width: 16px;
+
+  /* ---------- attachment chip — docs/02 §6.8 ---------- */
+  --attachment-height: 44px;
+  --attachment-radius: var(--r-lg);
+  --attachment-pad-x: var(--sp-6);
+  --attachment-gap: var(--sp-4);
+  --attachment-icon: 28px;
+
+  /* ---------- menus and context menus — docs/02 §6.9 ---------- */
+  --menu-min-width: 180px;
+  --menu-max-height: 60vh;
+  --menu-radius: var(--r-lg);
+  --menu-pad: var(--sp-2);
+  --menu-offset: var(--sp-2);
+  --menu-item-height: 26px;
+  --menu-item-radius: var(--r-sm);
+  --menu-item-pad-x: var(--sp-5);
+  --menu-item-gap: var(--sp-4);
+  --menu-shortcut-gap: var(--sp-8);
+  --menu-icon: 14px;
+  --menu-lead-width: 16px;
+  --menu-sep-margin: var(--sp-2) var(--sp-4);
+  --menu-submenu-delay: 150ms;
+
+  /* ---------- popover ---------- */
+  --popover-radius: var(--r-lg);
+  --popover-pad: var(--sp-6);
+  --popover-min-width: 200px;
+  --popover-offset: var(--sp-3);
+  --popover-arrow: 10px;
+
+  /* ---------- tooltip ---------- */
+  --tooltip-radius: var(--r-sm);
+  --tooltip-pad-x: var(--sp-3);
+  --tooltip-pad-y: var(--sp-1);
+  --tooltip-max-width: 260px;
+  --tooltip-offset: var(--sp-2);
+  --tooltip-delay: 500ms;
+  --tooltip-group-timeout: 400ms;
+
+  /* ---------- sheet ---------- */
+  --sheet-radius: var(--r-2xl);
+  --sheet-pad: var(--sp-8);
+  --sheet-gap: var(--sp-7);
+  --sheet-min-width: 300px;
+  --sheet-max-width: 420px;
+  --sheet-enter-scale: 0.96;
+
+  /* ---------- toast ---------- */
+  --toast-radius: var(--r-xl);
+  --toast-pad-x: var(--sp-6);
+  --toast-pad-y: var(--sp-5);
+  --toast-gap: var(--sp-4);
+  --toast-stack-gap: var(--sp-4);
+  --toast-min-width: 260px;
+  --toast-max-width: 360px;
+  --toast-inset: var(--sp-8);
+  --toast-icon: 16px;
+  --toast-dwell: 4000ms;
+  --toast-enter-offset: var(--sp-5);
+
+  /* ---------- skeleton / empty states — docs/02 §6.10 ---------- */
+  --skeleton-bar-height: 10px;
+  --skeleton-radius: var(--r-sm);
+  --skeleton-row-gap: var(--sp-3);
+  --skeleton-width-1: 60%;
+  --skeleton-width-2: 85%;
+  --skeleton-width-3: 95%;
+  --empty-glyph: 22px;
+  --empty-gap: var(--sp-5);
+
+  /* ---------- account assistant — docs/04 Phase 4 ----------
+   * Modelled on Mail's account assistant: a wide sheet, because a diagnostic report and a
+   * pair of server forms do not fit the 420 a confirmation sheet uses, and the alternative
+   * is a report that scrolls in a box too narrow to read. */
+  --assistant-width: 520px;
+  --assistant-min-height: 380px;
+  --assistant-gap: var(--sp-6);
+  --assistant-step-gap: var(--sp-5);
+  --assistant-footer-gap: var(--sp-4);
+
+  --provider-tile-height: 64px;
+  --provider-tile-radius: var(--r-lg);
+  --provider-tile-pad-x: var(--sp-5);
+  --provider-tile-gap: var(--sp-5);
+  --provider-tile-icon: 28px;
+
+  /* Reserved from the start, so choosing a provider does not move the tiles under the
+   * cursor. Sized for the longest note (iCloud's) plus its link. Standing rule 6. */
+  --provider-note-min-height: 148px;
+
+  --diagnostic-row-pad-y: var(--sp-4);
+  --diagnostic-row-gap: var(--sp-4);
+  --diagnostic-icon: 16px;
+  --diagnostic-detail-inset: 26px;
+  --diagnostic-raw-pad: var(--sp-4);
+  --diagnostic-raw-radius: var(--r-md);
+
+  --settings-width: 640px;
+
+  --account-row-height: 44px;
+  --account-row-gap: var(--sp-5);
+  --account-row-radius: var(--r-md);
+  --account-swatch: 12px;
+  --account-swatch-gap: var(--sp-3);
+
+  /* ---------- scroll area — docs/01 §9.8 ----------
+   * Overlay scrollbars, macOS-style: the track is not drawn, the thumb appears while
+   * scrolling or hovering and takes the full gutter width only on hover. */
+  --scrollbar-gutter: 15px;
+  --scrollbar-thumb-size: 7px;
+  --scrollbar-thumb-size-hover: 11px;
+  --scrollbar-thumb-radius: var(--r-pill);
+  --scrollbar-inset: var(--sp-1);
+  --scrollbar-fade-delay: 800ms;
 }
 
-/* ---------- density — docs/02 §7 ---------- */
+/* ---------- density — docs/02 §7 ----------
+ * The only tokens density is allowed to touch. Everything else derives: the type scale
+ * is expressed as offsets from --font-size-base in semantic.css, so one line here moves
+ * the whole scale. */
+
+/* Default is what the reference measures; compact and comfortable keep §7's spacing
+ * either side of it. */
 
 [data-density='compact'] {
   --font-size-base: 12.5px;
   --toolbar-height: 44px;
+  --sidebar-row-height: 28px;
+  --list-row-height-0: 36px;
+  --list-row-height-1: 52px;
+  --list-row-height-2: 68px;
 }
 
 [data-density='default'] {
   --font-size-base: 13px;
   --toolbar-height: 52px;
+  --sidebar-row-height: 32px;
+  --list-row-height-0: 48px;
+  --list-row-height-1: 64px;
+  --list-row-height-2: 80px;
 }
 
 [data-density='comfortable'] {
   --font-size-base: 14px;
   --toolbar-height: 58px;
+  --sidebar-row-height: 36px;
+  --list-row-height-0: 60px;
+  --list-row-height-1: 76px;
+  --list-row-height-2: 92px;
 }

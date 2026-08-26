@@ -35,7 +35,7 @@
   --gray-d: #98989d;
 
   /* ---------- type ---------- */
-  --font-ui: 'Inter', 'Inter var', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-ui: 'Inter Variable', 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', ui-monospace, monospace;
 
   /* SF-alike tuning: cv05 (l with tail), cv08 (upper-case i), ss03 (round quotes). */
@@ -122,11 +122,33 @@
   --dur-base: 200ms; /* disclosure, panel resize */
   --dur-slow: 250ms; /* sidebar collapse */
   --dur-sheet: 320ms; /* popover / compose open */
+  --dur-shimmer: 1200ms; /* skeleton sweep — docs/02 §6.10 */
+
+  --ease-linear: linear; /* the shimmer sweep only; docs/02 §6.10 says linear */
+
+  /* ---------- materials — docs/02 §5 ----------
+   * Raw radii for backdrop-filter. These blur APP content behind the element, which is
+   * what the header and menu materials want; the sidebar's desktop-sampling comes from
+   * the DWM backdrop instead (see semantic.css [data-backdrop='none']). */
+  --blur-sidebar: 30px;
+  --blur-header: 20px;
+  --blur-menu: 30px;
+  --saturate-material: 180%;
+
+  /* ---------- interaction ----------
+   * Scale and opacity constants are sizes too — standing rule 1 covers them. */
+  --press-scale: 0.97;
+  --plain-hover-opacity: 0.75;
+  --focus-ring-width: 3px;
+  --focus-ring-alpha: 40%;
+  --tint-subtle: 12%; /* reader banners — docs/02 §6.4 */
+  --tint-token: 15%; /* search tokens, invalid chips — docs/02 §6.6, §6.7 */
+  --tint-drop: 25%; /* sidebar drop target — docs/02 §6.2 */
 }
 
 /* Definition of done: honour prefers-reduced-motion. Collapsing the duration tokens
  * disables every transition in the app from one place. Anything that must observe a
- * transitionend has to tolerate 0ms — see src/lib/motion.ts. */
+ * transitionend has to tolerate 0ms — see src/lib/tokens.ts. */
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-micro: 0ms;
@@ -134,5 +156,6 @@
     --dur-base: 0ms;
     --dur-slow: 0ms;
     --dur-sheet: 0ms;
+    --dur-shimmer: 0ms;
   }
 }

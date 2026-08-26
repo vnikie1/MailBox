@@ -1,0 +1,12 @@
+# Where ts-rs writes the generated TypeScript bindings for the IPC contract.
+#
+# At the repository root, not in src-tauri/, because cargo reads .cargo/config.toml from the
+# directory it was invoked in and that directory's ancestors — and every cargo command in
+# this project is run from the root via `npm run rust:*`. A config inside src-tauri/ is
+# simply never read.
+#
+# Set here rather than as `#[ts(export_to = ...)]` because ts-rs resolves that attribute
+# relative to the *source file*. A `../../../` path that looked correct from src/db/ wrote
+# eleven files into the parent of the repository instead.
+[env]
+TS_RS_EXPORT_DIR = { value = "src/lib/generated", relative = true }

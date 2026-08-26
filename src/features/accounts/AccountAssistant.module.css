@@ -1,0 +1,242 @@
+/* The account assistant. docs/04 Phase 4. */
+
+/**
+ * Wider than a confirmation sheet. A diagnostic report and a pair of server forms do not
+ * fit 420, and the alternative is a report that scrolls inside a box too narrow to read.
+ */
+.sheet {
+  width: var(--assistant-width);
+  max-width: var(--assistant-width);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--assistant-min-height);
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--assistant-step-gap);
+}
+
+/* ------------------------------------------------------------------ provider step */
+
+.providers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tile {
+  display: flex;
+  gap: var(--provider-tile-gap);
+  align-items: center;
+  width: 100%;
+  height: var(--provider-tile-height);
+  padding: 0 var(--provider-tile-pad-x);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--provider-tile-radius);
+  cursor: pointer;
+  transition: background var(--dur-micro) var(--ease-out);
+}
+
+.tile:hover {
+  background: var(--fill-hover);
+}
+
+.tileActive {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+
+.tileActive:hover {
+  background: var(--accent-hover);
+}
+
+.tileIcon {
+  flex: 0 0 auto;
+  width: var(--provider-tile-icon);
+  height: var(--provider-tile-icon);
+  color: var(--label-2);
+}
+
+.tileActive .tileIcon {
+  color: var(--accent-fg);
+}
+
+.tileText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.tileName {
+  font-weight: 500;
+}
+
+/**
+ * Said on the tile rather than after the click. A provider that cannot sign anyone in yet
+ * should not look identical to one that can.
+ */
+.tileWarning {
+  color: var(--label-3);
+  font-size: 0.85em;
+}
+
+.tileActive .tileWarning {
+  color: var(--accent-fg);
+  opacity: 0.8;
+}
+
+/* ------------------------------------------------------------------------- notes */
+
+/**
+ * Reserved whether or not a note is showing, so choosing a provider does not move the tiles
+ * above it — which, since the sheet is vertically centred, would move them under the
+ * cursor. Standing rule 6.
+ */
+.noteSlot {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--provider-note-min-height);
+}
+
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: flex-start;
+  margin: 0;
+  color: var(--label-2);
+}
+
+.noteText {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ servers step */
+
+.fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.legend {
+  padding: 0;
+  color: var(--label-2);
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.serverRow {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: flex-start;
+}
+
+.host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.port {
+  flex: 0 0 auto;
+  width: var(--sidebar-width);
+  max-width: var(--tokenfield-label-width);
+}
+
+.securityLabel {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: center;
+  color: var(--label-2);
+}
+
+/**
+ * A native select. The design system has no dropdown primitive yet, and a hand-rolled one
+ * here would be a component built in a feature — which docs/02 §6 forbids for good reason.
+ * It is styled to the field tokens so it does not look pasted in.
+ */
+.select {
+  height: var(--field-height);
+  padding: 0 var(--field-pad-x);
+  color: var(--label-1);
+  font: inherit;
+  background: var(--fill-hover);
+  border: none;
+  border-radius: var(--field-radius);
+}
+
+/* ------------------------------------------------------------------ testing step */
+
+.testing {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--assistant-gap);
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.spinner {
+  width: var(--empty-glyph);
+  height: var(--empty-glyph);
+  color: var(--label-3);
+  animation: spin var(--dur-slow) var(--ease-linear) infinite;
+}
+
+/* Standing rule 7: motion is a preference, not a decoration. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.testingText {
+  max-width: var(--measure-prose);
+  margin: 0;
+  color: var(--label-2);
+}
+
+/* ----------------------------------------------------------------------- footer */
+
+.footer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--assistant-footer-gap);
+  width: 100%;
+}
+
+.error {
+  margin: 0;
+  color: var(--destructive);
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: flex-end;
+}

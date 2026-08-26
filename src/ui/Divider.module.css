@@ -1,0 +1,25 @@
+.divider {
+  flex: 0 0 auto;
+  background: var(--separator);
+
+  /* A hairline is decoration, never a hit target or a scroll stop. */
+  pointer-events: none;
+}
+
+.horizontal {
+  width: 100%;
+  height: var(--hairline);
+}
+
+.vertical {
+  align-self: stretch;
+  width: var(--hairline);
+  height: auto;
+}
+
+/* docs/02 §6.9: separator margin 4 8. Applies to the horizontal case; a vertical
+ * separator inside a toolbar group is already inset by the group's own padding. */
+.inset {
+  margin: var(--menu-sep-margin);
+  width: auto;
+}

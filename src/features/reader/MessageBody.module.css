@@ -1,0 +1,54 @@
+/* The rendered message body. docs/03 §6. */
+
+/**
+ * No border and no background of its own: the frame paints its own white card, and a second
+ * surface behind it would show as a rim around every message.
+ */
+.frame {
+  display: block;
+  width: 100%;
+  min-height: var(--reader-frame-min-height);
+  border: none;
+
+  /* The frame is sized from the outside by measuring its document; it must never scroll
+     itself, or a long message gets a scrollbar inside a scrollbar. */
+  overflow: hidden;
+}
+
+/**
+ * The remote-content banner. docs/02 §6.4's banner height, and deliberately at the top of
+ * the body rather than floating: it explains something about the message below it.
+ */
+.banner {
+  display: flex;
+  gap: var(--sp-5);
+  align-items: center;
+  min-height: var(--reader-banner-height);
+  margin-bottom: var(--sp-5);
+  padding: var(--sp-4) var(--sp-5);
+  background: var(--fill-hover);
+  border-radius: var(--r-md);
+}
+
+.bannerIcon {
+  flex: 0 0 auto;
+  width: var(--reader-banner-icon);
+  height: var(--reader-banner-icon);
+  color: var(--label-2);
+}
+
+.bannerText {
+  flex: 1 1 auto;
+  color: var(--label-2);
+  font-size: 0.9em;
+}
+
+/**
+ * Shown while a body is still downloading. Lazy fetching means a message is selected before
+ * its content exists, and an empty white card in that gap reads as the app being broken.
+ */
+.pending {
+  margin: 0;
+  padding: var(--sp-5) 0;
+  color: var(--label-3);
+}

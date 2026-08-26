@@ -1,8 +1,8 @@
-# MailBox — working instructions
+# Halcyon — working instructions
 
 A Windows 11 email client reproducing macOS Mail's look and interaction model.
 `PROMPT.md` is the contract: role, 21 standing rules, definition of done, phase order.
-Read it before doing anything substantive. The specs are `docs/01`–`docs/06`.
+Read it before doing anything substantive. The specs are `docs/01`–`docs/07`.
 
 ---
 
@@ -28,9 +28,21 @@ Commit the changelog with the work it describes, not separately.
 
 ## Build and verify
 
-`CARGO_TARGET_DIR` **must point outside `C:\Users\<user>\Documents`.** Smart App Control is
-enforcing on the dev machine and blocked build-script executables written under `Documents`.
-See `docs/PHASE-0-VERIFICATION.md` §3.
+**Smart App Control was turned off on this machine on 2026-08-25.** Builds are no longer
+blocked, and `CARGO_TARGET_DIR` may be set or unset freely.
+
+Why it had to go: cargo compiles a fresh unsigned `build-script-build.exe` whenever a new
+dependency is added, or the crate name or version changes, and SAC blocked every one with
+`os error 4551`. The Phase 0/1 workaround — reuse the existing `src-tauri/target` so no build
+script recompiles — held only while the dependency set was frozen. It broke the moment the
+crate was renamed to `halcyon`, and would have broken again at Phase 3 (rusqlite), Phase 5
+(async-imap) and every release build. Disabling SAC cannot be undone without reinstalling
+Windows; it was a deliberate call, not an accident.
+
+The Phase 0 and Phase 1 guidance on target directories is now historical. See
+`docs/PHASE-1-VERIFICATION.md` §6 for how those variables were untangled, and
+`docs/07-distribution.md` §0 for what SAC means for end users — it is the same gate that will
+block an unsigned installer on their machines.
 
 ```bash
 npm run dev          # Vite only, port 1420
@@ -60,6 +72,9 @@ errors is a definition-of-done item, not a preference.
   Tauri window never receives `WM_NCHITTEST` for client-area points, so Snap Layouts is
   impossible. Do not reintroduce custom caption buttons. Reasoning is in
   `src-tauri/src/platform/mod.rs`.
+- **Floating layers must set their ARIA after spreading Floating UI props.** `useRole()`
+  adds an `aria-labelledby` pointing at the trigger, and that outranks any `aria-label` a
+  component sets before the spread. See `src/ui/Menu.tsx`.
 - **`assets/reference/` is empty.** Any claim of pixel fidelity is unverifiable until real
   macOS Mail screenshots are in it. Do not assert "matches Mail" without them.
 

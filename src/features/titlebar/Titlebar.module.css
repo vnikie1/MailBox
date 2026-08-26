@@ -1,8 +1,0 @@
-.bar {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  height: var(--toolbar-height);
-  padding: 0 var(--toolbar-pad-x);
-  gap: var(--toolbar-gap-between);
-}

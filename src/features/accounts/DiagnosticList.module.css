@@ -1,0 +1,147 @@
+/* The connection test's report. docs/04 Phase 4. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--assistant-step-gap);
+}
+
+/**
+ * The one line a user reads. It carries the first failure's remedy, so it is set at body
+ * weight rather than as a small caption — standing rule 5 puts hierarchy in weight, and
+ * this is the most important sentence on the sheet.
+ */
+.summary {
+  margin: 0;
+  color: var(--label-1);
+  font-weight: 500;
+}
+
+.summary[data-ok='true'] {
+  color: var(--label-1);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.heading {
+  margin: 0;
+  color: var(--label-2);
+  font-size: 0.85em;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--diagnostic-row-pad-y) 0;
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.head {
+  display: flex;
+  gap: var(--diagnostic-row-gap);
+  align-items: center;
+}
+
+.icon {
+  flex: 0 0 auto;
+  width: var(--diagnostic-icon);
+  height: var(--diagnostic-icon);
+}
+
+.row[data-status='passed'] .icon {
+  color: var(--flag-green);
+}
+
+.row[data-status='failed'] .icon {
+  color: var(--destructive);
+}
+
+.name {
+  color: var(--label-1);
+  font-weight: 500;
+}
+
+.elapsed {
+  margin-left: auto;
+  color: var(--label-3);
+  font-feature-settings: var(--font-feat-num);
+  font-size: 0.85em;
+}
+
+.detail {
+  margin: 0;
+  margin-left: var(--diagnostic-detail-inset);
+  color: var(--label-2);
+}
+
+/* Not hidden. A step that never ran is evidence about where the failure was. */
+.row[data-status='skipped'] .icon,
+.row[data-status='skipped'] .name,
+.row[data-status='skipped'] .detail {
+  color: var(--label-3);
+}
+
+/**
+ * The remedy is what the user acts on, so it is the darkest text in the row — darker than
+ * the detail above it, which only says what happened.
+ */
+.remedy {
+  margin: 0;
+  margin-left: var(--diagnostic-detail-inset);
+  color: var(--label-1);
+}
+
+.raw {
+  margin-left: var(--diagnostic-detail-inset);
+}
+
+.rawToggle {
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.9em;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.rawToggle:hover {
+  text-decoration: underline;
+}
+
+/**
+ * Monospaced and scrollable in its own box. Server responses are long single lines, and
+ * letting one widen the sheet would push the buttons off the edge.
+ */
+.rawBody {
+  margin: var(--sp-3) 0 0;
+  padding: var(--diagnostic-raw-pad);
+  overflow-x: auto;
+  color: var(--label-2);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--fill-hover);
+  border-radius: var(--diagnostic-raw-radius);
+}

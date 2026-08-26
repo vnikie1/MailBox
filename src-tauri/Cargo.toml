@@ -1,13 +1,16 @@
 [package]
-name = "mailbox"
-version = "0.0.0"
+name = "halcyon"
+version = "0.1.0"
 description = "A macOS-Mail-quality email client for Windows 11"
 edition = "2021"
 rust-version = "1.82"
 publish = false
+# Two binaries now exist (the app and the dev seed tool), so `cargo run` and therefore
+# `tauri dev` need to be told which one is the app.
+default-run = "halcyon"
 
 [lib]
-name = "mailbox_lib"
+name = "halcyon_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -22,6 +25,51 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 parking_lot = "0.12"
+
+# ---------------------------------------------------------------- local store
+# rusqlite "bundled" compiles SQLite from source rather than linking whatever the machine
+# happens to have. docs/03 §3 needs FTS5 and WAL, and a bundled build is the only way to
+# know they are there on every Windows box this ships to.
+rusqlite = { version = "0.32", features = ["bundled", "backup", "functions", "limits"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
+
+# Typed TS bindings generated from the Rust types, so the IPC contract in docs/03 §4
+# cannot drift between the two halves.
+ts-rs = { version = "10", features = ["serde-compat"] }
+
+# ---------------------------------------------------------------- accounts and auth
+# Secrets live in the Windows Credential Manager and nowhere else — docs/03 §7, standing
+# rule 12. keyring's windows-native backend is DPAPI-backed and per-user at rest.
+keyring = { version = "3", features = ["windows-native"] }
+
+# OAuth is hand-rolled on top of these rather than pulled from a framework: PKCE is a hash
+# and a redirect, and the loopback listener has to be ours anyway.
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+url = "2"
+
+# native-tls throughout, which on Windows is SChannel — so certificate validation uses the
+# system trust store the user's admin actually manages. docs/05 §6 requires validation on
+# with no user-visible bypass for public hosts.
+reqwest = { version = "0.12", features = ["json"] }
+async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+async-native-tls = { version = "0.5", default-features = false, features = ["runtime-tokio"] }
+futures = "0.3"
+hickory-resolver = "0.24"
+
+# MIME and RFC 2047 decoding. Envelopes arrive from IMAP with encoded words in every
+# human-readable field ("=?UTF-8?B?...?="), and a client that shows those raw is unusable
+# for anyone whose correspondents do not write in ASCII. Also parses bodies in Phase 6.
+mailparse = "0.16"
+charset = "0.1"
+
+# HTML sanitisation. docs/03 §6 names `ammonia` specifically, and it is the right call: it
+# parses with html5ever rather than matching patterns, so it cannot be defeated by the
+# malformed markup that defeats regex-based strippers — which is most of them.
+ammonia = "4"
 
 # This is a Windows application; the platform layer is not conditional.
 windows = { version = "0.61", features = [
@@ -47,3 +95,12 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+[dev-dependencies]
+tempfile = "3"
+
+# Development seed tool. Tauri bundles only the productName binary, so this is built in
+# development and never installed.
+[[bin]]
+name = "seed"
+path = "src/bin/seed.rs"

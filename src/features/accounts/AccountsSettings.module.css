@@ -1,0 +1,198 @@
+/* Settings → Accounts. docs/04 Phase 4. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--assistant-gap);
+  padding: var(--sheet-pad);
+}
+
+.header {
+  display: flex;
+  gap: var(--sp-5);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.title {
+  margin: 0;
+  font-size: 1.15em;
+  font-weight: 600;
+}
+
+.empty {
+  margin: 0;
+  color: var(--label-2);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  gap: var(--account-row-gap);
+  align-items: center;
+  min-height: var(--account-row-height);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--account-row-radius);
+}
+
+.row:hover {
+  background: var(--fill-hover);
+}
+
+.identity {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+/**
+ * The description field fills the column it is in. Without this the input sits at its
+ * intrinsic width, which in the running app collapsed "Northgate" to "North" in a box
+ * narrower than the word — invisible in every test, obvious the moment the window opened.
+ */
+.nameField {
+  width: 100%;
+}
+
+.email {
+  color: var(--label-2);
+  font-size: 0.9em;
+}
+
+/**
+ * docs/03 §7's re-authenticate state, shown in the row rather than as a toast. The account
+ * is not broken and nothing was lost; it needs signing in again, and saying which is the
+ * whole point.
+ */
+.reauth {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  align-items: center;
+  color: var(--flag-orange);
+  font-size: 0.9em;
+}
+
+.reauthIcon {
+  width: var(--diagnostic-icon);
+  height: var(--diagnostic-icon);
+}
+
+/* --------------------------------------------------------------------- colours */
+
+.colors {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--account-swatch-gap);
+}
+
+.swatch {
+  width: var(--account-swatch);
+  height: var(--account-swatch);
+  padding: 0;
+  border: none;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+
+/* A ring rather than a tick: the swatch is too small to hold a glyph legibly. */
+.swatchActive {
+  box-shadow:
+    0 0 0 var(--focus-ring-width) var(--bg-content),
+    0 0 0 calc(var(--focus-ring-width) * 2) var(--label-1);
+}
+
+.swatch[data-color='red'] {
+  background: var(--flag-red);
+}
+
+.swatch[data-color='orange'] {
+  background: var(--flag-orange);
+}
+
+.swatch[data-color='yellow'] {
+  background: var(--flag-yellow);
+}
+
+.swatch[data-color='green'] {
+  background: var(--flag-green);
+}
+
+.swatch[data-color='blue'] {
+  background: var(--flag-blue);
+}
+
+.swatch[data-color='purple'] {
+  background: var(--flag-purple);
+}
+
+.swatch[data-color='gray'] {
+  background: var(--flag-gray);
+}
+
+.rowActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+}
+
+/* ------------------------------------------------------------------ confirmation */
+
+.confirmBody {
+  margin: 0 0 var(--sp-4);
+  color: var(--label-1);
+}
+
+.confirmBody:last-child {
+  margin-bottom: 0;
+  color: var(--label-2);
+}
+
+.confirmActions {
+  display: flex;
+  gap: var(--sp-4);
+  justify-content: flex-end;
+}
+
+/* ------------------------------------------------------------ sign-in applications */
+
+.advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  padding-top: var(--assistant-gap);
+  border-top: var(--hairline) solid var(--separator);
+}
+
+.advancedTitle {
+  margin: 0;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.advancedNote {
+  max-width: var(--measure-prose);
+  margin: 0;
+  color: var(--label-2);
+}
+
+.clientRow {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: flex-end;
+}
+
+.clientField {
+  flex: 1 1 auto;
+  min-width: 0;
+}

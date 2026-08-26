@@ -1,0 +1,151 @@
+/* docs/01 §4, docs/02 §6.3. */
+
+.pane {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  background: var(--bg-content);
+}
+
+.header {
+  composes: materialHeader from global;
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-4);
+  align-items: center;
+  justify-content: space-between;
+  height: var(--toolbar-height);
+  padding: 0 var(--sp-6) 0 var(--sp-7);
+}
+
+.sidebarToggle {
+  flex: 0 0 auto;
+  margin-right: var(--sp-3);
+}
+
+.titles {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-headline-size);
+  font-weight: var(--t-headline-weight);
+  line-height: var(--t-headline-leading);
+  letter-spacing: var(--t-headline-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.subtitle {
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.headerActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-1);
+  align-items: center;
+}
+
+.listWrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/**
+ * The sticky section header. docs/01 §4 — 11pt semibold, tertiary, blurred backdrop, and
+ * explicitly no bottom hairline (docs/02 §6.3), so it reads as the list showing through
+ * rather than as a bar sitting on top of it.
+ *
+ * Drawn over the scroller rather than with position: sticky, which cannot work on the
+ * absolutely-positioned items a virtualiser produces.
+ */
+.sticky {
+  composes: materialHeader from global;
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  height: var(--list-date-header-height);
+  padding: 0 var(--list-row-pad-left);
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+  border-bottom: 0;
+  pointer-events: none;
+}
+
+.scroll {
+  height: 100%;
+  padding: 0 var(--list-row-inset);
+  overflow-x: hidden;
+  overflow-y: auto;
+  outline: none;
+  overscroll-behavior: contain;
+}
+
+.scroll::-webkit-scrollbar {
+  width: var(--scrollbar-gutter);
+}
+
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background-color: var(--scrollbar-thumb);
+  background-clip: padding-box;
+  border: var(--scrollbar-inset) solid transparent;
+  border-radius: var(--scrollbar-thumb-radius);
+}
+
+.inner {
+  position: relative;
+  width: 100%;
+}
+
+/* Absolutely positioned and moved with transform rather than top: the virtualiser updates
+ * this on every scroll frame, and transform is the only one of the two that does not
+ * invalidate layout. */
+.item {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 var(--list-row-pad-left);
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+.scroll::-webkit-scrollbar-thumb:hover {
+  background-color: var(--scrollbar-thumb-hover);
+}

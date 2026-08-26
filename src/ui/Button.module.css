@@ -1,0 +1,107 @@
+/**
+ * docs/02 §6.5.
+ *
+ * Rules are ordered by ascending specificity throughout — base, then :disabled, then
+ * :hover, then :active — because stylelint's no-descending-specificity is on and because
+ * that order is also the one that makes the cascade say what it looks like it says.
+ */
+
+.button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--btn-gap);
+  align-items: center;
+  justify-content: center;
+  height: var(--btn-height);
+  font-family: inherit;
+  font-size: var(--t-headline-size);
+  font-weight: var(--t-headline-weight);
+  line-height: var(--t-headline-leading);
+  letter-spacing: var(--t-headline-tracking);
+  white-space: nowrap;
+  border: 0;
+  cursor: default;
+  user-select: none;
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+}
+
+.fullWidth {
+  width: 100%;
+}
+
+.icon {
+  flex: 0 0 auto;
+  width: var(--btn-icon);
+  height: var(--btn-icon);
+}
+
+.filled {
+  padding: 0 var(--btn-pad-x);
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-radius: var(--btn-radius);
+}
+
+.destructive {
+  padding: 0 var(--btn-pad-x);
+  color: var(--destructive-fg);
+  background: var(--destructive);
+  border-radius: var(--btn-radius);
+}
+
+.bordered {
+  padding: 0 var(--btn-pad-x-bordered);
+  color: var(--label-1);
+  font-weight: var(--t-body-weight);
+  background: var(--bg-raised);
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--btn-radius-bordered);
+}
+
+.plain {
+  padding: 0;
+  color: var(--accent);
+  font-weight: var(--t-body-weight);
+  background: none;
+}
+
+/* Greyed rather than faded: a translucent accent still reads as the primary action,
+ * which is the wrong thing for a control you cannot press. */
+.filled:disabled,
+.destructive:disabled {
+  color: var(--label-3);
+  background: var(--fill-selected-inactive);
+}
+
+.bordered:disabled,
+.plain:disabled {
+  color: var(--label-3);
+}
+
+.filled:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.destructive:hover:not(:disabled) {
+  background: var(--destructive-hover);
+}
+
+.bordered:hover:not(:disabled) {
+  background: var(--fill-hover);
+}
+
+.plain:hover:not(:disabled) {
+  opacity: var(--plain-hover-opacity);
+}
+
+/* docs/02 §6.5 — active scale 0.97. Only the variants with a surface: scaling a plain
+ * button just makes its label wobble. */
+.filled:active:not(:disabled),
+.bordered:active:not(:disabled),
+.destructive:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
