@@ -181,6 +181,88 @@ async fn uid_fetch(
     Err(SyncError::Imap(async_imap::error::Error::ConnectionLost))
 }
 
+/// One message's flags as the server currently holds them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlagChange {
+    pub uid: u32,
+    pub flags: Flags,
+}
+
+/// Flags for every message changed since `modseq`. RFC 7162's `CHANGEDSINCE`.
+///
+/// This is the whole point of CONDSTORE. Without it, noticing that a message was read on a
+/// phone means re-fetching the flags of every message in the mailbox and comparing — which is
+/// why most clients only reconcile the newest page and quietly miss the rest. With it the
+/// server sends only what actually changed, so the answer is both complete and nearly free.
+///
+/// Deliberately asks for `FLAGS` and nothing else: envelopes do not change, and re-fetching
+/// them would turn a cheap reconciliation back into an expensive one.
+pub async fn flags_changed_since(
+    session: &mut ImapSession,
+    modseq: u64,
+) -> Result<Vec<FlagChange>, SyncError> {
+    let command = format!("UID FETCH 1:* (UID FLAGS) (CHANGEDSINCE {modseq})");
+    let request = session.run_command(&command).await?;
+
+    let mut changes = Vec::new();
+
+    while let Some(response) = session.read_response().await {
+        let response = response?;
+
+        match response.parsed() {
+            Response::Fetch(_, attributes) => {
+                let mut uid = None;
+                let mut names: Vec<String> = Vec::new();
+
+                for attribute in attributes {
+                    match attribute {
+                        AttributeValue::Uid(value) => uid = Some(*value),
+                        AttributeValue::Flags(values) => {
+                            names = values.iter().map(|flag| flag.to_string()).collect();
+                        }
+                        _ => {}
+                    }
+                }
+
+                // No UID means the row cannot be matched to anything stored. Skipped rather
+                // than guessed at — standing rule 13, degrade visibly.
+                if let Some(uid) = uid {
+                    changes.push(FlagChange {
+                        uid,
+                        flags: Flags::read(&names),
+                    });
+                }
+            }
+
+            Response::Done { tag, status, .. } if *tag == request => {
+                return match status {
+                    Status::Ok => Ok(changes),
+                    _ => Err(SyncError::Imap(async_imap::error::Error::Bad(
+                        "UID FETCH CHANGEDSINCE failed".to_string(),
+                    ))),
+                };
+            }
+
+            _ => {}
+        }
+    }
+
+    Err(SyncError::Imap(async_imap::error::Error::ConnectionLost))
+}
+
+/// The UIDs delivered since the last sync, as a range.
+///
+/// `None` when the mailbox has had nothing new: `uid_next` is where the *next* message will
+/// land, so a server whose `uid_next` has not moved has delivered nothing at all.
+pub fn arrivals_range(stored_uid_next: u32, uid_next: u32) -> Option<String> {
+    if uid_next <= stored_uid_next || stored_uid_next == 0 {
+        return None;
+    }
+
+    let highest = uid_next.saturating_sub(1);
+    Some(format!("{stored_uid_next}:{highest}"))
+}
+
 /// Reads one FETCH response's attributes into a `Fetched`.
 ///
 /// Returns `None` only when there is no UID, which makes the row unstorable — everything
@@ -448,6 +530,29 @@ mod tests {
         let mut sorted = uids.to_vec();
         sorted.sort_unstable_by(|a, b| b.cmp(a));
         sorted
+    }
+
+    #[test]
+    fn arrivals_are_the_uids_between_the_two_uid_nexts() {
+        // `uid_next` is where the *next* message will land, so the messages delivered since
+        // the last sync are the ones from the old `uid_next` up to one below the new.
+        assert_eq!(arrivals_range(100, 104).as_deref(), Some("100:103"));
+        assert_eq!(arrivals_range(100, 101).as_deref(), Some("100:100"));
+    }
+
+    #[test]
+    fn nothing_new_produces_no_fetch_at_all() {
+        // The common case on 45 of an account's 46 mailboxes. Asking anyway would cost a round
+        // trip per mailbox per sync to be told nothing, which is what the incremental path
+        // exists to avoid.
+        assert_eq!(arrivals_range(100, 100), None);
+
+        // A `uid_next` that went backwards is a server that has reset; the caller falls back
+        // to a full pass rather than computing a nonsense range here.
+        assert_eq!(arrivals_range(100, 90), None);
+
+        // Never synced before: there is no "since" to be relative to.
+        assert_eq!(arrivals_range(0, 500), None);
     }
 
     #[test]

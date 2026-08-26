@@ -443,20 +443,16 @@ async fn sync_mailbox(
     path: &str,
     backfill: bool,
 ) -> Result<usize, SyncError> {
-    let (stored, backfilled_to): (Option<u32>, Option<u32>) = db
-        .read(move |conn| {
-            let row: Option<(Option<i64>, Option<i64>)> = conn
-                .query_row(
-                    "SELECT uid_validity, backfill_uid FROM mailbox WHERE id = ?1",
-                    rusqlite::params![mailbox_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .ok();
-
-            let (validity, backfill) = row.unwrap_or((None, None));
-            Ok((validity.map(|v| v as u32), backfill.map(|v| v as u32)))
-        })
+    let stored_state = db
+        .read(move |conn| Ok(StoredState::read(conn, mailbox_id)))
         .await?;
+
+    let StoredState {
+        uid_validity: stored,
+        backfill_uid: backfilled_to,
+        uid_next: stored_uid_next,
+        highest_modseq: stored_modseq,
+    } = stored_state;
 
     let selected = match fetch::select(session, path, stored, caps).await {
         Ok(selected) => selected,
@@ -492,6 +488,51 @@ async fn sync_mailbox(
         backfill,
         "syncing mailbox"
     );
+
+    // ---- the incremental path ------------------------------------------------------------
+    // RFC 7162. When the server keeps modification sequences and we have seen this mailbox
+    // before, it can tell us exactly what changed instead of us re-reading the newest page and
+    // hoping. Two things follow, and the second is the one that matters:
+    //
+    //   * a mailbox whose MODSEQ has not moved needs no work at all — no fetch, nothing;
+    //   * a flag changed on a phone is reported *wherever it is in the mailbox*, not only in
+    //     the part we happen to re-read. Reconciling by re-fetching the newest page is why
+    //     most clients silently miss a message read on another device last month.
+    //
+    // Falls through to the full path whenever anything is missing: no CONDSTORE, or a mailbox
+    // this install has not stored state for yet.
+    if let (true, Some(stored_modseq), Some(stored_uid_next), Some(server_modseq)) = (
+        caps.has_modseq(),
+        stored_modseq,
+        stored_uid_next,
+        selected.highest_modseq,
+    ) {
+        if server_modseq >= stored_modseq {
+            return incremental(
+                app,
+                db,
+                session,
+                caps,
+                account_id,
+                mailbox_id,
+                path,
+                &selected,
+                stored_modseq,
+                stored_uid_next,
+            )
+            .await;
+        }
+
+        // A MODSEQ that went *backwards* means the server has lost or reset its modification
+        // sequences — RFC 7162 §3.1.2.2 allows this after a restore from backup. Everything we
+        // would ask "what changed since" is now meaningless, so fall through to the full path.
+        tracing::warn!(
+            path,
+            stored = stored_modseq,
+            found = server_modseq,
+            "MODSEQ went backwards; falling back to a full pass"
+        );
+    }
 
     let first_page = if backfill { FIRST_PAGE } else { 200 };
     let range = fetch::newest_range(selected.uid_next, first_page);
@@ -667,6 +708,133 @@ async fn sync_mailbox(
     tracing::debug!(path, total, "backfill complete");
 
     Ok(total)
+}
+
+/// What the last sync recorded about a mailbox.
+///
+/// All four are optional and independently so: a mailbox may have been seen but never
+/// backfilled, or seen on a server that had no CONDSTORE. Every field being absent is the
+/// ordinary state of a mailbox this install has not touched yet, not an error.
+#[derive(Debug, Clone, Copy, Default)]
+struct StoredState {
+    uid_validity: Option<u32>,
+    backfill_uid: Option<u32>,
+    uid_next: Option<u32>,
+    highest_modseq: Option<u64>,
+}
+
+impl StoredState {
+    fn read(conn: &rusqlite::Connection, mailbox_id: i64) -> Self {
+        let row = conn.query_row(
+            "SELECT uid_validity, backfill_uid, uid_next, highest_modseq
+               FROM mailbox WHERE id = ?1",
+            rusqlite::params![mailbox_id],
+            |row| {
+                Ok(Self {
+                    uid_validity: row.get::<_, Option<i64>>(0)?.map(|v| v as u32),
+                    backfill_uid: row.get::<_, Option<i64>>(1)?.map(|v| v as u32),
+                    uid_next: row.get::<_, Option<i64>>(2)?.map(|v| v as u32),
+                    highest_modseq: row.get::<_, Option<i64>>(3)?.map(|v| v as u64),
+                })
+            },
+        );
+
+        row.unwrap_or_default()
+    }
+}
+
+/// The CONDSTORE path: fetch what arrived, reconcile what changed, and nothing else.
+///
+/// Split out rather than nested in `sync_mailbox` because the two paths share almost nothing:
+/// this one never reads an envelope it already holds, and never walks a page.
+#[allow(clippy::too_many_arguments)]
+async fn incremental(
+    app: &AppHandle,
+    db: &Db,
+    session: &mut ImapSession,
+    caps: Caps,
+    account_id: i64,
+    mailbox_id: i64,
+    path: &str,
+    selected: &fetch::Selected,
+    stored_modseq: u64,
+    stored_uid_next: u32,
+) -> Result<usize, SyncError> {
+    let server_modseq = selected.highest_modseq.unwrap_or(stored_modseq);
+
+    // Nothing has happened here since the last look. This is the common case across 45 of an
+    // account's 46 mailboxes, and skipping it is the difference between a sync that costs one
+    // round trip per mailbox and one that costs a fetch per mailbox.
+    if server_modseq == stored_modseq && selected.uid_next == stored_uid_next {
+        tracing::debug!(
+            path,
+            modseq = server_modseq,
+            "unchanged since the last sync"
+        );
+        return Ok(0);
+    }
+
+    // ---- what arrived ---------------------------------------------------------------------
+    let mut inserted = 0usize;
+
+    if let Some(range) = fetch::arrivals_range(stored_uid_next, selected.uid_next) {
+        let batch = fetch::envelopes(session, &range, caps).await?;
+
+        if !batch.is_empty() {
+            let written = {
+                let batch = batch.clone();
+                db.write(move |tx| {
+                    let written = persist::write_batch(tx, account_id, mailbox_id, &batch)?;
+                    persist::rethread(tx, account_id, RETHREAD_WINDOW)?;
+                    Ok(written)
+                })
+                .await?
+            };
+
+            inserted = written.inserted;
+            tracing::debug!(path, range, inserted, "incremental: new messages stored");
+        }
+    }
+
+    // ---- what changed ---------------------------------------------------------------------
+    // Asked for even when nothing arrived: a flag changing is a change, and it is the half of
+    // "stays correct" that a UID-range sync cannot see at all.
+    let changes = fetch::flags_changed_since(session, stored_modseq).await?;
+    let changed = changes.len();
+
+    if changed > 0 {
+        db.write(move |tx| persist::apply_flag_changes(tx, mailbox_id, &changes))
+            .await?;
+        tracing::debug!(path, changed, "incremental: flags reconciled");
+    }
+
+    // Counts and state last, and in the same order as the full path: the badge is a cache of
+    // rows that have now all been written.
+    let uid_validity = selected.uid_validity;
+    let uid_next = selected.uid_next;
+
+    db.write(move |tx| {
+        persist::recount(tx, mailbox_id)?;
+        persist::record_mailbox_state(tx, mailbox_id, uid_validity, uid_next, Some(server_modseq))?;
+        Ok(())
+    })
+    .await?;
+
+    if inserted > 0 || changed > 0 {
+        let _ = app.emit(
+            "sync:progress",
+            Progress {
+                account_id,
+                mailbox: path.to_string(),
+                written: inserted,
+                usable: true,
+                done: false,
+            },
+        );
+        let _ = app.emit("messages:added", mailbox_id);
+    }
+
+    Ok(inserted)
 }
 
 /// Fetches one message's body, caches the `.eml`, and stores what was parsed out of it.

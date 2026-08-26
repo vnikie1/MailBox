@@ -304,6 +304,49 @@ pub fn record_mailbox_state(
     Ok(())
 }
 
+/// Applies server-side flag changes to messages already stored.
+///
+/// Envelopes are deliberately untouched: a flag change is the only thing CONDSTORE reported,
+/// and rewriting the envelope would fire the FTS triggers for every message whose read state
+/// changed — turning "someone read three hundred messages on their phone" into three hundred
+/// search-index rewrites.
+///
+/// A UID we do not hold is skipped rather than inserted. It means the message exists on the
+/// server and has not been fetched yet, and inserting a row with flags and no envelope would
+/// put a blank line in the message list.
+pub fn apply_flag_changes(
+    tx: &Transaction<'_>,
+    mailbox_id: i64,
+    changes: &[crate::sync::fetch::FlagChange],
+) -> Result<usize, DbError> {
+    if changes.is_empty() {
+        return Ok(0);
+    }
+
+    let mut statement = tx.prepare(
+        "UPDATE message
+            SET flag_seen = ?3, flag_answered = ?4, flag_flagged = ?5,
+                flag_draft = ?6, flag_deleted = ?7
+          WHERE mailbox_id = ?1 AND uid = ?2",
+    )?;
+
+    let mut updated = 0;
+
+    for change in changes {
+        updated += statement.execute(params![
+            mailbox_id,
+            change.uid,
+            change.flags.seen,
+            change.flags.answered,
+            change.flags.flagged,
+            change.flags.draft,
+            change.flags.deleted,
+        ])?;
+    }
+
+    Ok(updated)
+}
+
 /// Records how far down the UID space the backfill has walked.
 ///
 /// Written after every batch rather than once at the end, because the interesting case is
@@ -836,6 +879,86 @@ mod tests {
         assert_eq!(
             write_batch(&tx, 1, 1, &[]).expect("write"),
             Written::default()
+        );
+    }
+
+    #[test]
+    fn a_flag_changed_elsewhere_is_applied_without_touching_the_envelope() {
+        // The half of "stays correct" a UID-range sync cannot see: a message read on a phone,
+        // anywhere in the mailbox. The envelope must survive untouched, or every such change
+        // would rewrite the search index for a message whose text did not change.
+        use crate::sync::fetch::{FlagChange, Flags};
+
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        write_batch(&tx, 1, 1, &[fetched(7, "<a@x>", "Original subject")]).expect("write");
+
+        let updated = apply_flag_changes(
+            &tx,
+            1,
+            &[FlagChange {
+                uid: 7,
+                flags: Flags {
+                    seen: true,
+                    answered: false,
+                    flagged: true,
+                    draft: false,
+                    deleted: false,
+                },
+            }],
+        )
+        .expect("apply");
+
+        assert_eq!(updated, 1);
+
+        let (seen, flagged, subject): (bool, bool, String) = tx
+            .query_row(
+                "SELECT flag_seen, flag_flagged, subject FROM message WHERE mailbox_id = 1 AND uid = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read back");
+
+        assert!(seen);
+        assert!(flagged);
+        assert_eq!(
+            subject, "Original subject",
+            "the envelope must be untouched"
+        );
+    }
+
+    #[test]
+    fn a_flag_change_for_a_message_we_do_not_hold_is_ignored() {
+        // It means the message is on the server and has not been fetched yet. Inserting a row
+        // from flags alone would put a line with no sender and no subject in the list.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        use crate::sync::fetch::{FlagChange, Flags};
+
+        let updated = apply_flag_changes(
+            &tx,
+            1,
+            &[FlagChange {
+                uid: 999,
+                flags: Flags {
+                    seen: true,
+                    answered: false,
+                    flagged: false,
+                    draft: false,
+                    deleted: false,
+                },
+            }],
+        )
+        .expect("apply");
+
+        assert_eq!(updated, 0);
+        assert_eq!(
+            tx.query_row("SELECT COUNT(*) FROM message", [], |row| row
+                .get::<_, i64>(0))
+                .expect("count"),
+            0
         );
     }
 
