@@ -544,10 +544,14 @@ pub fn render(
     let clean = sanitise(html);
     let (rewritten, blocked_remote, inlined) = rewrite_images(&clean, inline, load_remote, remote);
 
+    // Detected *before* folding, so a tracking number in the quoted part is still a link when
+    // the quote is opened. Folding only wraps; it does not change any text.
+    let detected = super::detect::mark(&rewritten);
+
     // Folded *after* the images are rewritten, so the counts in the banner describe the whole
     // message rather than only the part that is showing. A quote full of blocked images is
     // still a message with blocked images.
-    let folded = fold_quote(&rewritten);
+    let folded = fold_quote(&detected);
 
     Rendered {
         html: folded,

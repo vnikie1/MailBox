@@ -253,17 +253,37 @@ pub async fn message_body(
 /// `visible_text` is what the message *displayed* as the link. When that looks like a URL and
 /// its host differs from where the link actually goes, the caller is told to confirm first.
 /// That is the oldest trick in mail and the cheapest to catch.
+/// Whether a URL from a message may be handed to the shell at all.
+///
+/// A short allow-list. A message must not be able to launch an arbitrary scheme handler —
+/// `ms-msdt:`, `search-ms:` and friends have all been used to run code from a link, and the
+/// shell will happily resolve any scheme something on the machine has registered.
+///
+/// `tel:` is permitted **only in the reduced form the data detectors produce**: `+` and
+/// digits, nothing else. The reader never passes a sender's `tel:` through — it builds one
+/// from digits it recognised — so a `tel:` carrying anything else did not come from the
+/// detector and has no business being opened.
+fn scheme_permitted(target: &str) -> bool {
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("mailto:")
+    {
+        return true;
+    }
+
+    match target.strip_prefix("tel:") {
+        Some(number) => {
+            !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '+')
+        }
+        None => false,
+    }
+}
+
 #[tauri::command]
 pub async fn open_external(url: String, visible_text: String) -> Result<LinkOutcome, AppError> {
     let target = url.trim();
 
-    // Only these two. A message must not be able to launch an arbitrary scheme handler —
-    // `ms-msdt:`, `search-ms:` and friends have all been used to run code from a link.
-    let permitted = target.starts_with("http://")
-        || target.starts_with("https://")
-        || target.starts_with("mailto:");
-
-    if !permitted {
+    if !scheme_permitted(target) {
         return Ok(LinkOutcome {
             opened: false,
             mismatch: None,
@@ -397,6 +417,45 @@ mod tests {
         assert!(mismatched_host("https://example.test/path", "https://example.test").is_none());
         assert!(mismatched_host("https://example.test/path", "example.test").is_none());
         assert!(mismatched_host("https://www.example.test/x", "example.test").is_none());
+    }
+
+    #[test]
+    fn a_message_cannot_launch_an_arbitrary_scheme_handler() {
+        // Each of these resolves to something on a Windows machine, and several have been
+        // used to run code from a link. The allow-list is the only thing standing between a
+        // message body and the shell.
+        for hostile in [
+            "ms-msdt:/id PCWDiagnostic",
+            "search-ms:query=x",
+            "file:///C:/Windows/System32/cmd.exe",
+            "javascript:alert(1)",
+            "vbscript:msgbox",
+            "data:text/html,<script>alert(1)</script>",
+            "ms-officecmd:{}",
+            "\\\\evil.test\\share",
+        ] {
+            assert!(!scheme_permitted(hostile), "{hostile}");
+        }
+    }
+
+    #[test]
+    fn only_the_detectors_reduced_tel_form_is_permitted() {
+        // The detector hands over `+` and digits. Anything else in a `tel:` did not come from
+        // it, and `tel:` is only on the list because of it.
+        assert!(scheme_permitted("tel:+442079460958"));
+        assert!(scheme_permitted("tel:02079460958"));
+
+        assert!(!scheme_permitted("tel:"));
+        assert!(!scheme_permitted("tel:+44 20 7946 0958"));
+        assert!(!scheme_permitted("tel:*99#"));
+        assert!(!scheme_permitted("tel:x@evil.test"));
+    }
+
+    #[test]
+    fn the_ordinary_schemes_still_open() {
+        assert!(scheme_permitted("https://example.test"));
+        assert!(scheme_permitted("http://example.test"));
+        assert!(scheme_permitted("mailto:ada@example.test"));
     }
 
     #[test]

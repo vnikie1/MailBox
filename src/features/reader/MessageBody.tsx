@@ -75,6 +75,13 @@ function frameDocument(html: string, plainText: boolean): string {
   summary.halcyon-quote-toggle:hover { background: #ebebef; }
   details.halcyon-quote[open] summary.halcyon-quote-toggle { margin-bottom: 8px; }
   .halcyon-quote-body { color: #3c3c43; }
+  /* A data detector. Marked with a dotted underline rather than a link colour, because the
+     sender did not put a link here and it must not look as though they did. */
+  a.halcyon-detected {
+    color: inherit; text-decoration: none;
+    border-bottom: 1px dashed #9a9aa0; cursor: pointer;
+  }
+  a.halcyon-detected:hover { border-bottom-color: #0a58ca; color: #0a58ca; }
   ${plainText ? '' : 'body > :first-child { margin-top: 0; }'}
 </style>
 </head><body>${html}</body></html>`
@@ -168,6 +175,25 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
       if (href === null || href === undefined) return
 
       event.preventDefault()
+
+      // A data detector — a tracking number or a phone number the core recognised. These
+      // are not links the sender wrote, so they resolve to an action rather than to a URL,
+      // and the action still goes out through `openExternal` like any other.
+      const detected = anchor?.getAttribute('data-detected')
+      if (detected !== null && detected !== undefined) {
+        const value = anchor?.getAttribute('data-value') ?? ''
+        const target =
+          detected === 'phone'
+            ? `tel:${value.replace(/[^\d+]/g, '')}`
+            : // Searched rather than sent to one carrier's site: the format says which
+              // carrier it probably is, not which it certainly is, and guessing wrong sends
+              // the user to a page that says the parcel does not exist.
+              `https://www.google.com/search?q=${encodeURIComponent(value)}`
+
+        void openExternal(target, value)
+        return
+      }
+
       if (/^https?:/i.test(href) || href.startsWith('mailto:')) {
         void openExternal(href, anchor?.textContent ?? '')
       }
