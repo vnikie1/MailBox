@@ -56,6 +56,13 @@ pub enum DbError {
     #[error("the database writer has stopped")]
     WriterGone,
 
+    /// A value could not be turned into the text a column stores.
+    ///
+    /// Its own variant rather than a stringly-typed `Sqlite` error because the caller can act
+    /// on it: this is our bug, not the database's, and retrying it in a loop cannot help.
+    #[error("could not encode {what}: {detail}")]
+    Encode { what: &'static str, detail: String },
+
     #[error("{0}")]
     Io(#[from] std::io::Error),
 }

@@ -8,6 +8,7 @@ use tauri::{AppHandle, State};
 
 use crate::db::Db;
 use crate::sync::engine::SyncEngine;
+use crate::sync::idle::Watchers;
 
 use super::mail::AppError;
 
@@ -89,6 +90,25 @@ pub async fn bodies_ensure(
             tracing::warn!(account_id, %error, "body fetch failed");
         }
     });
+
+    Ok(())
+}
+
+/// Starts (or stops) the per-account IDLE watchers to match the current account list.
+///
+/// Idempotent, so the UI calls it on launch and again whenever accounts change rather than
+/// tracking what is already running. docs/03 §5 — freshness arrives without being asked for.
+#[tauri::command]
+pub async fn sync_watch(
+    app: AppHandle,
+    db: State<'_, Db>,
+    engine: State<'_, SyncEngine>,
+    watchers: State<'_, Watchers>,
+) -> Result<(), AppError> {
+    watchers
+        .inner()
+        .reconcile(&app, db.inner(), engine.inner())
+        .await;
 
     Ok(())
 }

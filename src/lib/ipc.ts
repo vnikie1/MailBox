@@ -399,6 +399,12 @@ export interface SyncAccountError {
   needsReauth: boolean
 }
 
+export interface SyncActivity {
+  accountId: number
+  /** True for a real IDLE notification, false for a tick of the polling fallback. */
+  live: boolean
+}
+
 /**
  * The sync commands. docs/06 Phase 5.
  *
@@ -418,6 +424,32 @@ export async function syncNow(accountId: number): Promise<void> {
 export async function syncAll(): Promise<void> {
   if (!runningInTauri) return
   await invoke('sync_all')
+}
+
+/**
+ * Starts the per-account IDLE watchers, so new mail arrives without being asked for.
+ *
+ * Idempotent: call it on launch and again whenever accounts change rather than tracking what
+ * is already running. Starting a second watcher for an account would double every
+ * notification and hold a connection the account's budget does not have — the core checks,
+ * but the caller should not rely on that being the only guard.
+ */
+export async function syncWatch(): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('sync_watch')
+}
+
+/**
+ * Fires when the server itself reports a change — a real IDLE notification, or a tick of the
+ * polling fallback on a server without IDLE.
+ */
+export async function onSyncActivity(
+  handler: (activity: SyncActivity) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<SyncActivity>('sync:activity', (event) => {
+    handler(event.payload)
+  })
 }
 
 export async function onSyncProgress(

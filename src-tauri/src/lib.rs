@@ -54,6 +54,7 @@ pub fn run() {
             ipc::sync::sync_now,
             ipc::sync::sync_all,
             ipc::sync::bodies_ensure,
+            ipc::sync::sync_watch,
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,
@@ -69,6 +70,7 @@ pub fn run() {
             tracing::info!(path = %path.display(), "opening mail store");
             app.manage(db::Db::open(&path)?);
             app.manage(sync::engine::SyncEngine::new());
+            app.manage(sync::idle::Watchers::new());
 
             platform::install(app.handle(), &main)?;
 

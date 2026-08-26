@@ -18,6 +18,7 @@ use crate::db::{
     },
     query, write, Db, DbError,
 };
+use crate::sync::ops;
 
 /// What a failed command looks like to the UI.
 ///
@@ -146,6 +147,22 @@ pub async fn msg_set_flags(
 
     let (changed, mailboxes) = db
         .write(move |tx| {
+            // Located before the write and queued inside the same transaction: the local
+            // change and the obligation to tell the server are one unit, so closing the lid
+            // between them cannot lose the change. See `sync::ops`.
+            for group in ops::locate(tx, &affected)? {
+                ops::enqueue(
+                    tx,
+                    group.account_id,
+                    &ops::Op::Flag {
+                        mailbox: group.mailbox,
+                        uids: group.uids,
+                        seen: patch.seen,
+                        flagged: patch.flagged,
+                    },
+                )?;
+            }
+
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
             Ok((changed, mailboxes))
@@ -170,6 +187,28 @@ pub async fn msg_move(
             // Source mailboxes have to be read before the move, or the event only names
             // the destination and the source badge never updates.
             let mut mailboxes = write::mailboxes_of(tx, &affected)?;
+
+            // Same reason, and the stronger one: after the move every row names the
+            // destination, so a queued operation built afterwards would ask the server to
+            // move messages out of the mailbox they had already been moved into.
+            if let Some(destination) = ops::mailbox_path(tx, mailbox_id)? {
+                for group in ops::locate(tx, &affected)? {
+                    if group.mailbox == destination {
+                        continue;
+                    }
+
+                    ops::enqueue(
+                        tx,
+                        group.account_id,
+                        &ops::Op::Move {
+                            from: group.mailbox,
+                            to: destination.clone(),
+                            uids: group.uids,
+                        },
+                    )?;
+                }
+            }
+
             let changed = write::move_to(tx, &affected, mailbox_id)?;
             if !mailboxes.contains(&mailbox_id) {
                 mailboxes.push(mailbox_id);
@@ -206,6 +245,33 @@ pub async fn msg_delete(
                 if !mailboxes.contains(&trash_id) {
                     mailboxes.push(trash_id);
                 }
+            }
+
+            // A non-permanent delete is a move to Trash, and is queued as one — the server
+            // must not be told to expunge mail the user expects to be recoverable.
+            let destination = match trash {
+                Some(trash_id) if !permanent => ops::mailbox_path(tx, trash_id)?,
+                _ => None,
+            };
+
+            for group in ops::locate(tx, &affected)? {
+                let op = match &destination {
+                    Some(to) if group.mailbox != *to => ops::Op::Move {
+                        from: group.mailbox,
+                        to: to.clone(),
+                        uids: group.uids,
+                    },
+                    Some(_) => continue,
+                    None if permanent => ops::Op::Delete {
+                        mailbox: group.mailbox,
+                        uids: group.uids,
+                    },
+                    // No Trash and not permanent: `write::delete` refuses too, so there is
+                    // nothing local to mirror.
+                    None => continue,
+                };
+
+                ops::enqueue(tx, group.account_id, &op)?;
             }
 
             let changed = write::delete(tx, &affected, permanent, trash)?;

@@ -28,6 +28,7 @@ use super::backoff::Backoff;
 use super::bodies;
 use super::fetch::{self, BACKFILL_BATCH, FIRST_PAGE};
 use super::mailboxes;
+use super::ops;
 use super::persist;
 use super::session::{self, Caps, Credential, ImapSession, SyncError};
 
@@ -219,7 +220,10 @@ fn describe(error: &SyncError) -> String {
 }
 
 /// Loads the account's credential, refreshing an OAuth token if it is close to expiring.
-async fn credential_for(db: &Db, account: &AccountDetail) -> Result<Credential, SyncError> {
+pub(crate) async fn credential_for(
+    db: &Db,
+    account: &AccountDetail,
+) -> Result<Credential, SyncError> {
     let reference = credentials::reference_for(&account.email);
 
     match account.auth_kind {
@@ -305,6 +309,12 @@ async fn run_once(app: &AppHandle, db: &Db, account_id: i64) -> Result<(), SyncE
     let (mut session, caps) = session::connect(&imap, &account.email, &credential).await?;
 
     tracing::info!(account_id, "connected");
+
+    // ---- 0. push what the user changed while we were away --------------------------------
+    // Before anything is fetched, and that order is load-bearing. Pulling first would
+    // overwrite the local change with the stale value the server still holds, and the queued
+    // operation would then push a value the user had already watched revert.
+    ops::drain(db, &mut session, account_id, caps.move_command).await?;
 
     // ---- 1. the mailbox tree -----------------------------------------------------------
     let discovered = mailboxes::discover(&mut session).await?;

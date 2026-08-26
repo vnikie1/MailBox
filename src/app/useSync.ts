@@ -3,11 +3,13 @@ import { useQueryClient } from '@tanstack/react-query'
 
 import {
   onAccountError,
+  onAccountsChanged,
   onMailboxesChanged,
   onMessagesAdded,
   onSyncProgress,
   runningInTauri,
   syncAll,
+  syncWatch,
   type SyncAccountError,
 } from '@/lib/ipc'
 
@@ -88,9 +90,23 @@ export function useSync(): SyncState {
       }),
     )
 
+    // Adding or removing an account changes who should be watched. The core reconciles
+    // rather than starting blindly, so calling this more often than necessary is safe.
+    track(
+      onAccountsChanged(() => {
+        void syncWatch()
+      }),
+    )
+
     // Sync on launch. Mail that arrived while the app was closed is the first thing anyone
     // opens a mail client to see.
-    if (runningInTauri) void syncAll()
+    //
+    // Then hand over to IDLE: after this one pass the server tells us when something changes,
+    // so there is no timer here and never should be (standing rule 14).
+    if (runningInTauri) {
+      void syncAll()
+      void syncWatch()
+    }
 
     return () => {
       cancelled = true
