@@ -1,0 +1,41 @@
+# Dovecot for the Phase 5 exit gate. docs/04 §Phase 5.
+#
+# Runs on the Mac Studio rather than this machine so the soak test can run for twelve hours
+# without the development machine having to stay awake and idle.
+#
+# TLS is not optional here, and that is the point rather than an inconvenience: Halcyon
+# refuses a plaintext IMAP port outright (`SyncError::Insecure`, docs/05 §6, no user-visible
+# bypass), so a test server without TLS would only ever exercise the refusal path. `certs.sh`
+# generates a small CA and a server certificate for it; the CA has to be trusted on the
+# machine running Halcyon, which is a deliberate, reversible step the developer takes once.
+#
+#   docker compose up -d
+#   docker compose exec dovecot doveadm mailbox list -u tester@halcyon.test
+#
+# Everything here is disposable. The volume is named so `docker compose down -v` really does
+# reset the server, which the UIDVALIDITY test depends on.
+
+services:
+  dovecot:
+    image: dovecot/dovecot:2.3-latest
+    container_name: halcyon-dovecot
+    restart: unless-stopped
+    ports:
+      # 993 implicit TLS, which is what the account is configured for.
+      - '9993:993'
+      # 143 with STARTTLS, exposed so the "refuses plaintext" path can be tested explicitly
+      # rather than assumed.
+      - '9143:143'
+    volumes:
+      - ./conf:/etc/dovecot/conf.d:ro
+      - ./certs:/etc/dovecot/certs:ro
+      - ./users:/etc/dovecot/users:ro
+      - maildata:/srv/mail
+    environment:
+      # Dovecot logs to stdout so `docker compose logs` is the whole story. The soak test
+      # reads these to count connections, which is how "no connection storm" is measured
+      # rather than guessed at.
+      - DOVECOT_LOG_LEVEL=info
+
+volumes:
+  maildata:
