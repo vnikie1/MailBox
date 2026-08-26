@@ -61,6 +61,20 @@ function frameDocument(html: string, plainText: boolean): string {
   pre.halcyon-plain {
     margin: 0; font: inherit; white-space: pre-wrap; word-break: break-word;
   }
+  /* The quoted reply, folded. The core wraps it in a <details> because that is the one
+     interactive control HTML has that needs no script — and this frame runs none. */
+  details.halcyon-quote { margin: 8px 0 0; }
+  summary.halcyon-quote-toggle {
+    cursor: pointer; display: inline-block; list-style: none;
+    padding: 2px 8px; margin: 4px 0;
+    border: 1px solid #d0d0d5; border-radius: 10px;
+    background: #f5f5f7; color: #3c3c43;
+    font-size: 12px; line-height: 1.5; user-select: none;
+  }
+  summary.halcyon-quote-toggle::-webkit-details-marker { display: none; }
+  summary.halcyon-quote-toggle:hover { background: #ebebef; }
+  details.halcyon-quote[open] summary.halcyon-quote-toggle { margin-bottom: 8px; }
+  .halcyon-quote-body { color: #3c3c43; }
   ${plainText ? '' : 'body > :first-child { margin-top: 0; }'}
 </style>
 </head><body>${html}</body></html>`
@@ -110,7 +124,28 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
       setHeight((current) => (next > current + 1 ? next : current))
     }
 
+    /**
+     * Re-measures allowing the frame to *shrink*.
+     *
+     * Only ever called from a real user action — closing the quoted-text fold — because that
+     * is the one case where the document legitimately gets shorter. `measure` refuses to
+     * shrink on purpose, since a spontaneous shrink is almost always scrollbar jitter, and
+     * following it produces a frame that oscillates.
+     */
+    const remeasure = () => {
+      // After the fold's own layout, not during it.
+      requestAnimationFrame(() => {
+        setHeight(doc.documentElement.scrollHeight)
+      })
+    }
+
     measure()
+
+    // The core folds quoted replies into a <details>. The frame runs no script, so nothing
+    // inside can tell us it opened — this side has to listen for it.
+    doc.querySelectorAll('details').forEach((fold) => {
+      fold.addEventListener('toggle', remeasure)
+    })
 
     // Images finish after load, and each one changes the height.
     doc.querySelectorAll('img').forEach((image) => {

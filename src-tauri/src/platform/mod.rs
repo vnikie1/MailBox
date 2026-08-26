@@ -34,6 +34,7 @@
 
 pub mod appearance;
 pub mod backdrop;
+pub mod files;
 
 use std::ffi::c_void;
 

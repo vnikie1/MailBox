@@ -1,11 +1,13 @@
 import { useMemo, useState } from 'react'
 import { ChevronDown, Forward, Mail, Paperclip, Reply, ReplyAll, ShieldAlert } from 'lucide-react'
 
+import type { AttachmentRow } from '@/lib/generated/AttachmentRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import { cx } from '@/lib/cx'
 import { formatFileSize, formatReaderDate } from '@/lib/date'
 import { useThread } from '@/app/queries'
 
+import { AttachmentPreview } from './AttachmentPreview'
 import { MessageBody } from './MessageBody'
 import { storeNow } from '@/lib/ipc'
 import { useMailStore } from '@/store/mail'
@@ -52,6 +54,9 @@ interface MessageViewProps {
 
 function MessageView({ message, now, expanded, onToggle, collapsible }: MessageViewProps) {
   const [recipientsOpen, setRecipientsOpen] = useState(false)
+  // Per message rather than per thread: opening an attachment on one message in a
+  // conversation should not close one already open on another.
+  const [previewing, setPreviewing] = useState<AttachmentRow | null>(null)
   const sender = message.fromName ?? message.fromAddr ?? 'Unknown sender'
 
   return (
@@ -164,7 +169,14 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
           {message.attachments.length > 0 && (
             <div className={styles.attachments}>
               {message.attachments.map((attachment) => (
-                <button key={attachment.id} type="button" className={styles.attachment}>
+                <button
+                  key={attachment.id}
+                  type="button"
+                  className={styles.attachment}
+                  onClick={() => {
+                    setPreviewing(attachment)
+                  }}
+                >
                   <Paperclip
                     className={styles.attachmentIcon}
                     aria-hidden="true"
@@ -181,6 +193,16 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
                 </button>
               ))}
             </div>
+          )}
+
+          {previewing !== null && (
+            <AttachmentPreview
+              attachmentId={previewing.id}
+              filename={previewing.filename ?? 'Attachment'}
+              onClose={() => {
+                setPreviewing(null)
+              }}
+            />
           )}
         </>
       )}

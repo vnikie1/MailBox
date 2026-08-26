@@ -1,0 +1,37 @@
+/* The built-in attachment previewer. docs/04 Phase 6. */
+
+/**
+ * Wider and taller than a confirmation sheet, because this shows a document. A scanned
+ * invoice at the 420px a sheet uses is not a preview; it is a thumbnail with a scrollbar.
+ * Sized as a share of the viewport so it never exceeds the window on a small display.
+ */
+.sheet {
+  width: var(--preview-width);
+  max-width: var(--preview-max-width);
+  height: var(--preview-height);
+}
+
+/**
+ * No background of its own. The frame's own document paints white, for the same reason the
+ * message frame does: everything shown here is a document — a scan, a PDF, a screenshot —
+ * and documents are authored for paper. A second background behind it would only show
+ * through at the edges during load.
+ */
+.frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--r-md);
+}
+
+.message {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  min-height: 0;
+  color: var(--label-2);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  text-align: center;
+}

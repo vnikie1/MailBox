@@ -58,6 +58,8 @@ pub fn run() {
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,
+            ipc::attachments::attachment_preview,
+            ipc::attachments::attachment_save,
         ])
         .setup(move |app| {
             let main = app

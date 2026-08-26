@@ -171,6 +171,18 @@
   --sheet-max-width: 420px;
   --sheet-enter-scale: 0.96;
 
+  /* ---------- attachment previewer — docs/04 Phase 6 ----------
+   * Larger than a sheet on purpose: this shows a document, and a scanned invoice at 420px
+   * wide is not a preview, it is a thumbnail with a scrollbar. Capped as a share of the
+   * viewport so it never exceeds the window on a small display. */
+  --preview-width: 76vw;
+  --preview-height: 82vh;
+  --preview-max-width: 1100px;
+  --preview-radius: var(--r-2xl);
+  --preview-header-height: 44px;
+  --preview-header-pad-x: var(--sp-5);
+  --preview-header-gap: var(--sp-3);
+
   /* ---------- toast ---------- */
   --toast-radius: var(--r-xl);
   --toast-pad-x: var(--sp-6);

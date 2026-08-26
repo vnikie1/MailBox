@@ -164,6 +164,15 @@ fn sanitise(html: &str) -> String {
         // unformatted text. The CSP on the frame is what makes them safe: no scripting, and
         // no loading of anything the rewriter has not already resolved.
         .add_generic_attributes(["style", "class", "align", "valign", "bgcolor"])
+        // `id` on the two elements Outlook marks its quote boundary with, and nowhere else.
+        // Without it `divRplyFwdMsg` is stripped before the quote folder ever sees it, and
+        // every reply from Outlook shows its full history — which is most business mail.
+        //
+        // Safe because the frame is inert: no script to collide with, and the only thing an
+        // `id` can do on its own is be a link target within the message. Kept to `div` and
+        // `hr` rather than allowed generically so it stays a fix for a named problem.
+        .add_tag_attributes("div", ["id"])
+        .add_tag_attributes("hr", ["id"])
         .add_tag_attributes("img", ["src", "alt", "width", "height", "title"])
         .add_tag_attributes("table", ["cellpadding", "cellspacing", "border", "width"])
         .add_tag_attributes("td", ["colspan", "rowspan", "width", "height"])
@@ -283,17 +292,224 @@ pub fn remote_urls(html: &str) -> Vec<String> {
     urls
 }
 
+/// HTML void elements — they have no closing tag, so they must not change nesting depth.
+///
+/// Getting this list wrong is not cosmetic here: the depth counter below decides where it is
+/// safe to cut the document, and a `<br>` counted as an open tag would push everything after
+/// it to a depth it never returns from, so no top-level boundary would ever be found again.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
+
+/// Whether an element at the top level begins the quoted reply.
+///
+/// Every mail client marks its quotes, and no two mark them the same way. These are the
+/// markers the four clients most people use actually emit; anything unrecognised simply stays
+/// visible, which is the right way to be wrong.
+fn begins_quote(tag: &str, open_tag: &str) -> bool {
+    let lowered = open_tag.to_ascii_lowercase();
+
+    // Apple Mail, Thunderbird and most standards-following clients: a bare top-level
+    // blockquote *is* the quote.
+    if tag == "blockquote" {
+        return true;
+    }
+
+    // Gmail wraps in `<div class="gmail_quote">`; Yahoo uses `yahoo_quoted`; Thunderbird
+    // labels its attribution line `moz-cite-prefix`.
+    if lowered.contains("gmail_quote")
+        || lowered.contains("yahoo_quoted")
+        || lowered.contains("moz-cite-prefix")
+    {
+        return true;
+    }
+
+    // Outlook marks the divider before a forwarded or replied-to message by id.
+    lowered.contains("divrplyfwdmsg") || lowered.contains("appendonsend")
+}
+
+/// Splits sanitised HTML into the new message and the quoted reply below it.
+///
+/// Returns `None` when there is no quote, or when the quote is the whole message — collapsing
+/// everything would leave the reader looking at an empty card and a disclosure triangle.
+///
+/// **The cut is only ever made at the top level.** The quoted part is wrapped in a `<details>`
+/// afterwards, and cutting inside an open element would put the closing tags of that element
+/// inside the wrapper and its opening tag outside — mangling the message rather than folding
+/// it. Tracking depth is what makes the split safe, and it is safe to track depth by scanning
+/// because this runs on *sanitised* markup: html5ever has already balanced the tags, so what
+/// is scanned here is well-formed by construction. On raw input none of this would hold.
+fn split_quoted(html: &str) -> Option<(String, String)> {
+    let bytes = html.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    let mut cut: Option<usize> = None;
+
+    while index < bytes.len() {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+
+        let Some(end) = html[index..].find('>').map(|offset| index + offset) else {
+            break;
+        };
+
+        let open_tag = &html[index..=end];
+        let inner = open_tag.trim_start_matches('<').trim_end_matches('>');
+        let closing = inner.starts_with('/');
+        let name: String = inner
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+
+        if name.is_empty() {
+            // A comment or a doctype. Neither nests, so neither moves the depth.
+            index = end + 1;
+            continue;
+        }
+
+        if closing {
+            depth = depth.saturating_sub(1);
+        } else if !VOID_ELEMENTS.contains(&name.as_str()) && !inner.ends_with('/') {
+            // The check happens before the depth increases, so it only ever fires on an
+            // element that starts at the top level.
+            if depth == 0 && cut.is_none() && begins_quote(&name, open_tag) {
+                cut = Some(index);
+            }
+
+            depth += 1;
+        } else if depth == 0 && cut.is_none() && begins_quote(&name, open_tag) {
+            cut = Some(index);
+        }
+
+        index = end + 1;
+    }
+
+    let cut = cut?;
+
+    let visible = html[..cut].to_string();
+    let quoted = html[cut..].to_string();
+
+    // "Is there anything left?" measured on the text, not the markup: a reply whose visible
+    // part is three empty divs and a signature separator has nothing above the quote, and
+    // hiding the only content in the message is worse than showing the quote.
+    if strip_tags(&visible).trim().is_empty() || strip_tags(&quoted).trim().is_empty() {
+        return None;
+    }
+
+    Some((visible, quoted))
+}
+
+/// The text content of some markup, for "is there anything here" questions.
+fn strip_tags(html: &str) -> String {
+    let mut text = String::new();
+    let mut inside = false;
+
+    for character in html.chars() {
+        match character {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => text.push(character),
+            _ => {}
+        }
+    }
+
+    text
+}
+
+/// Folds the quoted reply into a `<details>` the reader can open.
+///
+/// `<details>` rather than a class the app toggles from outside, because the frame runs no
+/// script and never will (docs/03 §6.1, standing rule 11). It is the one interactive control
+/// in HTML that needs none, which makes it exactly the right tool here: the message stays
+/// completely inert and the quote still folds.
+fn fold_quote(html: &str) -> String {
+    match split_quoted(html) {
+        Some((visible, quoted)) => format!(
+            "{visible}<details class=\"halcyon-quote\">\
+             <summary class=\"halcyon-quote-toggle\">Show quoted text</summary>\
+             <div class=\"halcyon-quote-body\">{quoted}</div></details>"
+        ),
+        None => html.to_string(),
+    }
+}
+
 /// Wraps plain text as HTML, for messages with no HTML part.
 ///
 /// Escaped, not sanitised: the input is text, and treating it as markup would turn a message
 /// that happens to contain `<b>` into bold rather than showing what the sender typed.
 fn from_plain(text: &str) -> String {
-    let escaped = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
 
-    format!("<pre class=\"halcyon-plain\">{escaped}</pre>")
+    match split_plain_quote(text) {
+        Some((visible, quoted)) => format!(
+            "<pre class=\"halcyon-plain\">{}</pre>\
+             <details class=\"halcyon-quote\">\
+             <summary class=\"halcyon-quote-toggle\">Show quoted text</summary>\
+             <pre class=\"halcyon-plain halcyon-quote-body\">{}</pre></details>",
+            escape(visible.trim_end()),
+            escape(&quoted)
+        ),
+        None => format!("<pre class=\"halcyon-plain\">{}</pre>", escape(text)),
+    }
+}
+
+/// Finds where a plain-text reply stops being new and starts being quoted.
+///
+/// Two markers, in the order they appear. The attribution line ("On Tuesday, X wrote:") is
+/// preferred when both are present, because it belongs to the quote rather than to the reply —
+/// splitting below it would leave a dangling half-sentence at the bottom of the visible part.
+fn split_plain_quote(text: &str) -> Option<(&str, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+
+    let attribution = lines.iter().position(|line| {
+        let trimmed = line.trim();
+        // Deliberately narrow. "On" and "wrote:" on one line is the near-universal form; a
+        // looser rule would fold ordinary sentences that happen to contain the word "wrote".
+        (trimmed.starts_with("On ") && trimmed.ends_with("wrote:"))
+            || trimmed.starts_with("-----Original Message-----")
+            || trimmed.starts_with("________________________________")
+    });
+
+    // A run of quoted lines that continues to the end of the message. Anything shorter is
+    // someone quoting a line mid-reply to answer it, which must stay where it is.
+    let quoted_run = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('>'));
+    let quoted_run = quoted_run.filter(|start| {
+        lines[*start..]
+            .iter()
+            .all(|line| line.trim().is_empty() || line.trim_start().starts_with('>'))
+    });
+
+    let cut = match (attribution, quoted_run) {
+        (Some(a), Some(q)) => a.min(q),
+        (Some(a), None) => a,
+        (None, Some(q)) => q,
+        (None, None) => return None,
+    };
+
+    if cut == 0 {
+        return None;
+    }
+
+    let visible_end: usize = lines[..cut].iter().map(|line| line.len() + 1).sum();
+    let visible = text.get(..visible_end.min(text.len()))?;
+
+    if visible.trim().is_empty() {
+        return None;
+    }
+
+    Some((visible, lines[cut..].join("\n")))
 }
 
 /// Prepares a message for the reader.
@@ -328,8 +544,13 @@ pub fn render(
     let clean = sanitise(html);
     let (rewritten, blocked_remote, inlined) = rewrite_images(&clean, inline, load_remote, remote);
 
+    // Folded *after* the images are rewritten, so the counts in the banner describe the whole
+    // message rather than only the part that is showing. A quote full of blocked images is
+    // still a message with blocked images.
+    let folded = fold_quote(&rewritten);
+
     Rendered {
-        html: rewritten,
+        html: folded,
         blocked_remote,
         inlined,
         from_plain_text: false,
@@ -724,6 +945,147 @@ mod tests {
                 "handler survived {attack}: {rendered}"
             );
         }
+    }
+
+    /* ------------------------------------------------------------------ quoted replies */
+
+    #[test]
+    fn a_quoted_reply_is_folded_behind_a_disclosure() {
+        let rendered =
+            render_html("<p>My answer.</p><blockquote><p>Their question.</p></blockquote>");
+
+        assert!(rendered.html.contains("halcyon-quote"), "{}", rendered.html);
+        assert!(rendered.html.contains("<details"), "{}", rendered.html);
+
+        // Folded, not discarded — the quote is still there for anyone who opens it.
+        assert!(rendered.html.contains("Their question."));
+
+        // And the reply itself is above the fold, where it belongs.
+        let fold = rendered.html.find("<details").expect("fold");
+        let answer = rendered.html.find("My answer.").expect("answer");
+        assert!(answer < fold, "the reply must be above the fold");
+    }
+
+    #[test]
+    fn the_common_clients_quote_markers_are_all_recognised() {
+        // Every client marks its quotes and no two do it alike. A marker we miss is a wall of
+        // quoted text in the reader; there is no harm in a marker we do not need.
+        let markers = [
+            r#"<div class="gmail_quote"><p>old</p></div>"#,
+            r#"<div class="yahoo_quoted"><p>old</p></div>"#,
+            r#"<div class="moz-cite-prefix">On x wrote:</div><blockquote>old</blockquote>"#,
+            r#"<div id="divRplyFwdMsg"><p>old</p></div>"#,
+            "<blockquote><p>old</p></blockquote>",
+        ];
+
+        for markup in markers {
+            let rendered = render_html(&format!("<p>new</p>{markup}"));
+            assert!(
+                rendered.html.contains("halcyon-quote"),
+                "not folded: {markup} -> {}",
+                rendered.html
+            );
+        }
+    }
+
+    #[test]
+    fn a_message_that_is_only_a_quote_is_left_alone() {
+        // Folding everything leaves the reader looking at an empty card and a triangle, which
+        // reads as the message having failed to load.
+        let rendered = render_html("<blockquote><p>Only the quote.</p></blockquote>");
+
+        assert!(!rendered.html.contains("<details"), "{}", rendered.html);
+        assert!(rendered.html.contains("Only the quote."));
+    }
+
+    #[test]
+    fn a_quote_nested_inside_the_reply_does_not_split_the_markup() {
+        // The important one. Cutting inside an open element would put that element's closing
+        // tag inside the <details> and its opening tag outside, mangling the message. The
+        // split is only ever made at the top level, so a blockquote inside a div is not a
+        // split point.
+        let rendered =
+            render_html("<div><p>Answer</p><blockquote><p>Question</p></blockquote></div>");
+
+        assert!(
+            !rendered.html.contains("<details"),
+            "must not cut inside an open element: {}",
+            rendered.html
+        );
+
+        // Nothing was lost by declining to fold.
+        assert!(rendered.html.contains("Answer"));
+        assert!(rendered.html.contains("Question"));
+    }
+
+    #[test]
+    fn a_void_element_does_not_confuse_the_depth_counter() {
+        // `<br>` and `<img>` have no closing tag. Counting them as open would push everything
+        // after them to a depth that never returns to zero, so no quote would ever be folded
+        // again — a silent failure that only shows up on real mail.
+        let rendered = render_html(
+            "<p>Answer</p><br><hr><img src=\"data:image/gif;base64,R0lGOD\">\
+             <blockquote><p>Question</p></blockquote>",
+        );
+
+        assert!(rendered.html.contains("<details"), "{}", rendered.html);
+    }
+
+    #[test]
+    fn plain_text_quotes_fold_on_the_attribution_line() {
+        let rendered = render(
+            None,
+            Some("Yes, that works.\n\nOn Tuesday, Ada wrote:\n> Does this work?\n"),
+            &HashMap::new(),
+            false,
+            &HashMap::new(),
+        );
+
+        assert!(rendered.from_plain_text);
+        assert!(rendered.html.contains("halcyon-quote"), "{}", rendered.html);
+        assert!(rendered.html.contains("Yes, that works."));
+
+        // The attribution belongs to the quote, not the reply: splitting below it would leave
+        // "On Tuesday, Ada wrote:" dangling under the visible text with nothing after it.
+        let fold = rendered.html.find("<details").expect("fold");
+        let attribution = rendered.html.find("On Tuesday").expect("attribution");
+        assert!(attribution > fold, "{}", rendered.html);
+    }
+
+    #[test]
+    fn a_quoted_line_answered_inline_is_not_folded() {
+        // Someone quoting one line to reply underneath it. The quote is not a trailing block,
+        // and folding from the first ">" would hide the reply that follows it.
+        let rendered = render(
+            None,
+            Some("> Does this work?\nYes.\n> And this?\nAlso yes.\n"),
+            &HashMap::new(),
+            false,
+            &HashMap::new(),
+        );
+
+        assert!(!rendered.html.contains("<details"), "{}", rendered.html);
+        assert!(rendered.html.contains("Also yes."));
+    }
+
+    #[test]
+    fn plain_text_in_a_fold_is_still_escaped() {
+        // The fold moves text into a second <pre>; the escaping must move with it. A quote
+        // containing markup is extremely ordinary — it is usually the previous HTML mail.
+        let rendered = render(
+            None,
+            Some("Reply.\n\nOn Tuesday, Ada wrote:\n> <script>alert(1)</script>\n"),
+            &HashMap::new(),
+            false,
+            &HashMap::new(),
+        );
+
+        assert!(!rendered.html.contains("<script"), "{}", rendered.html);
+        assert!(
+            rendered.html.contains("&lt;script&gt;"),
+            "{}",
+            rendered.html
+        );
     }
 
     #[test]

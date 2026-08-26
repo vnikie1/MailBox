@@ -505,6 +505,7 @@ export async function bodiesEnsure(accountId: number, messageIds: number[]): Pro
 import type { HostMismatch } from './generated/HostMismatch'
 import type { LinkOutcome } from './generated/LinkOutcome'
 import type { Rendered } from './generated/Rendered'
+import type { AttachmentData } from './generated/AttachmentData'
 
 /**
  * A message body, sanitised and ready for the sandboxed frame. docs/03 §6.
@@ -550,4 +551,29 @@ export async function openExternalConfirmed(mismatch: HostMismatch): Promise<voi
     return
   }
   await invoke('open_external_confirmed', { url: mismatch.url })
+}
+
+/* ------------------------------------------------------------------- attachments */
+
+/**
+ * An attachment's bytes, as a `data:` URI the previewer can show directly.
+ *
+ * Only ever a type the core considers previewable — an image, text, JSON or a PDF. Anything
+ * else is refused there rather than here: the decision about what the app will render is a
+ * security decision, and it belongs on the side of the boundary that cannot be bypassed.
+ */
+export async function attachmentPreview(attachmentId: number): Promise<AttachmentData> {
+  if (!runningInTauri) throw new Error('Attachments are only available in the app.')
+  return invoke<AttachmentData>('attachment_preview', { attachmentId })
+}
+
+/**
+ * Saves an attachment, asking the user where. Resolves to `null` if they cancelled.
+ *
+ * There is deliberately no "open" — see `ipc/attachments.rs`. Saving puts the file where the
+ * user chose, with the shell's own warnings intact when they open it themselves.
+ */
+export async function attachmentSave(attachmentId: number): Promise<string | null> {
+  if (!runningInTauri) return null
+  return invoke<string | null>('attachment_save', { attachmentId })
 }
