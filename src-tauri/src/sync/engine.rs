@@ -896,6 +896,15 @@ pub async fn fetch_body(
         .await?
     };
 
+    // Logged before the connect, for the reason the module header gives: a call that hangs or
+    // returns nothing must still leave a trace, or it looks as though the UI never asked.
+    tracing::debug!(
+        account_id,
+        asked = message_ids.len(),
+        needed = wanted.len(),
+        "body fetch: starting"
+    );
+
     if wanted.is_empty() {
         return Ok(0);
     }
@@ -945,6 +954,8 @@ pub async fn fetch_body(
     }
 
     let _ = session.logout().await;
+
+    tracing::debug!(account_id, stored, "body fetch: finished");
 
     if stored > 0 {
         let _ = app.emit("messages:updated", message_ids);

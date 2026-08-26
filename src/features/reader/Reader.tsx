@@ -9,6 +9,7 @@ import { useThread } from '@/app/queries'
 
 import { AttachmentPreview } from './AttachmentPreview'
 import { MessageBody } from './MessageBody'
+import { useThreadBodies } from './useBodyPrefetch'
 import { storeNow } from '@/lib/ipc'
 import { useMailStore } from '@/store/mail'
 import { Avatar, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
@@ -237,6 +238,11 @@ export function Reader() {
   // message, and thread_get returns exactly that. The reader is written for the general
   // case either way, so nothing here changes when real threads arrive.
   const { data: messages = [] } = useThread(only ?? null)
+
+  // Whatever the reader shows must be what gets fetched. The list prefetch cannot cover this:
+  // a thread reaches across mailboxes, so a message in the conversation may never appear as a
+  // row. See `useThreadBodies`.
+  useThreadBodies(messages)
 
   const newestId = messages[messages.length - 1]?.id
 

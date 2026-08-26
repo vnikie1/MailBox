@@ -19,6 +19,43 @@ import type { MessageRow } from '@/lib/generated/MessageRow'
  */
 const PREFETCH_AHEAD = 3
 
+/**
+ * Downloads the bodies of every message the reader is actually showing.
+ *
+ * Separate from the list prefetch above, and needed because the two do not see the same
+ * messages. The list prefetch works from the rows on screen; the reader shows a *thread*, and
+ * a thread reaches across mailboxes — a reply that also carries a Gmail label appears in the
+ * conversation while living in a different mailbox entirely, so the list never mentions it.
+ *
+ * Without this, such a message sat on "Downloading this message…" forever: nothing had asked
+ * for it, and nothing ever would. Found by running the app against a real Gmail account,
+ * where labels make it the common case rather than an edge one.
+ *
+ * Grouped by account because a thread can span them, and the core's fetch is per account.
+ */
+export function useThreadBodies(messages: { id: number; accountId: number }[]): void {
+  const lastRequested = useRef('')
+
+  useEffect(() => {
+    if (messages.length === 0) return
+
+    const key = messages.map((message) => message.id).join(',')
+    if (key === lastRequested.current) return
+    lastRequested.current = key
+
+    const byAccount = new Map<number, number[]>()
+    for (const message of messages) {
+      const existing = byAccount.get(message.accountId)
+      if (existing === undefined) byAccount.set(message.accountId, [message.id])
+      else existing.push(message.id)
+    }
+
+    for (const [accountId, ids] of byAccount) {
+      void bodiesEnsure(accountId, ids)
+    }
+  }, [messages])
+}
+
 export function useBodyPrefetch(selectedId: number | undefined, visibleRows: MessageRow[]): void {
   // The last set requested, so that re-renders from unrelated state — a flag change, a
   // window resize — do not re-issue the same fetch.
