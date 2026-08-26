@@ -305,8 +305,21 @@ pub fn render(
     remote: &HashMap<String, String>,
 ) -> Rendered {
     let Some(html) = html.filter(|value| !value.trim().is_empty()) else {
+        // Nothing stored at all. Distinct from "a message whose text happens to be empty":
+        // bodies are fetched lazily *after* selection (docs/03 §5), so this is the ordinary
+        // state of every message for the second or two before its body lands.
+        //
+        // It must return an empty string rather than an empty `<pre>` wrapper. The reader
+        // decides between "here is the message" and "this one is still downloading" by
+        // asking whether there is any HTML, and a 33-byte wrapper answers yes — which put a
+        // blank white card on screen for the whole of the download instead of a line of
+        // text saying what was happening.
+        let Some(plain) = plain.filter(|value| !value.trim().is_empty()) else {
+            return Rendered::default();
+        };
+
         return Rendered {
-            html: from_plain(plain.unwrap_or_default()),
+            html: from_plain(plain),
             from_plain_text: true,
             ..Rendered::default()
         };
@@ -714,14 +727,21 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_body_renders_to_an_empty_message_rather_than_failing() {
-        // An empty HTML part falls through to the plain-text path, which wraps nothing —
-        // so the frame shows an empty message rather than the reader showing an error.
-        let from_empty_html = render_html("");
-        assert!(from_empty_html.from_plain_text);
-        assert!(!from_empty_html.html.contains("script"));
+    fn a_body_that_has_not_been_downloaded_yet_renders_to_nothing_at_all() {
+        // Not a cosmetic point. Bodies arrive lazily after selection, so between the click
+        // and the download every message passes through this state. The reader tells "still
+        // downloading" apart from "here it is" by asking whether there is any HTML, so
+        // anything non-empty here — even an empty `<pre>` wrapper — puts a blank white card
+        // on screen instead of a line of text saying what is happening.
+        for (html, plain) in [(None, None), (Some(""), None), (Some("   "), Some("\n \t"))] {
+            let rendered = render(html, plain, &HashMap::new(), false, &HashMap::new());
 
-        assert!(render(None, None, &HashMap::new(), false, &HashMap::new()).from_plain_text);
+            assert!(
+                rendered.html.is_empty(),
+                "rendered {:?} bytes for html={html:?} plain={plain:?}",
+                rendered.html.len()
+            );
+        }
     }
 
     #[test]

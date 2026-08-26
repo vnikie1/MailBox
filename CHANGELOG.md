@@ -1249,3 +1249,84 @@ formatting and images is not showing the message. docs/03 §6 in full.
 - **The HTML part is now served, sanitised, and only through `message_body`.** There is
   deliberately no command returning the stored HTML unprocessed — the sanitiser cannot be
   forgotten because there is nothing else to call.
+
+---
+
+## 2026-08-26 — Phase 6 (early): rendering confirmed in the real window
+
+The reboot cleared the WebView2 failure recorded in the previous entry. Running the app then
+found the two things a green test suite could not: an environment conflict that had nothing
+to do with this code, and a rendering state the tests had encoded backwards.
+
+### Fixed
+
+- **A message whose body has not downloaded yet now shows "Downloading this message…"
+  instead of a blank white card.** `render()` fell through to the plain-text path whenever
+  there was no HTML, and `from_plain("")` returns a 33-byte `<pre class="halcyon-plain">`
+  wrapper. That is not empty, so `MessageBody`'s "is there any HTML?" test said yes and
+  mounted an iframe around nothing.
+
+  It matters more than it sounds. Bodies are fetched lazily *after* selection (docs/03 §5),
+  so **every** message passes through this state on first open — and only 10 of 431 messages
+  in the real account had bodies at the time, so nearly every click produced a blank card
+  that filled in fifteen seconds later with no explanation. From the user's side this is
+  indistinguishable from "the mail does not render", which is exactly how it was reported.
+
+  `render()` now returns `Rendered::default()` when there is neither HTML nor text. An empty
+  HTML part with a real text part still falls back to the text, as before.
+
+- **The test that covered this asserted the wrong contract.**
+  `an_empty_body_renders_to_an_empty_message_rather_than_failing` asserted
+  `from_plain_text == true` for a body with nothing in it, which is precisely the behaviour
+  that caused the bug — it was written to describe what the code did rather than what the
+  reader needs. Replaced with
+  `a_body_that_has_not_been_downloaded_yet_renders_to_nothing_at_all`, which asserts the
+  rendered HTML is empty across `(None, None)`, `(Some(""), None)` and whitespace-only parts,
+  and says in the comment why non-empty output breaks the reader.
+
+### Incidents
+
+- **The blank window was RivaTuner Statistics Server, not our code.** After the reboot the
+  app still painted nothing and logged `0x8007139F` every ~21 seconds. The webview was in
+  fact running — it made IPC calls and rendered a body — and then died 11 seconds in.
+
+  Diagnosed by parsing the WebView2 minidump directly
+  (`EBWebView/Crashpad/reports/*.dmp`): exception `0xC0000005` at `0x1801490AF`, and the
+  module list puts that address inside `RTSSHooks64.dll` — the overlay hook RivaTuner
+  Statistics Server (shipped with MSI Afterburner) injects into every process that presents
+  a frame. Closing RTSS fixed it completely: zero WebView2 errors, webview stable.
+
+  Worth recording for two reasons. First, it will recur on this machine every time RTSS is
+  running, and the symptom — blank window, `0x8007139F` — looks exactly like the profile
+  corruption in the previous entry, which sent the first hour of debugging the wrong way.
+  Second, it is a real end-user failure mode: any Tauri or Electron app can be crashed by a
+  third-party overlay injector, and the crash surfaces with no attribution whatsoever. The
+  permanent fix is an RTSS per-application profile with `EnableHooking=0` — the same shape
+  as the `warp.exe.cfg` and `RustDesk.exe.cfg` already in that machine's `Profiles/`
+  directory, which suggests other apps hit this too.
+
+- **A blanket process kill was avoided this time.** Stopping the app needed its WebView2
+  children gone. Rather than killing by name — the mistake recorded in the previous entry —
+  the parent chain of every `msedgewebview2.exe` was walked first and only descendants of
+  `halcyon.exe` were touched. Twelve belonging to other applications were left alone. The
+  correction from that incident held.
+
+### Notes
+
+- **Verified in the running window, against the real account, end to end.** A 50,905-byte
+  Economic Times newsletter sanitises to 49,728 with 22 remote images blocked and renders
+  with its masthead, serif headings, rules and buttons intact; "Load Images" then fetches
+  through the Rust proxy and re-renders at 391,491 bytes with 0 blocked and the photographs
+  in place. A Mojo Times newsletter renders its full colour layout, background panels and
+  call-to-action buttons. The Pi-hole on this network did not interfere with the proxied
+  fetches, so the bypass setting offered earlier is still not needed.
+
+- **The real account is syncing but says nothing while it does.** `sync_mailbox` logs nothing
+  between "discovered mailboxes" and "sync finished", so a 46-mailbox account looks stalled
+  for minutes at a time; the message count climbed 215 → 431 during this session, so it is
+  working. Per-mailbox progress logging is worth adding before this is ever debugged again.
+
+- **Capabilities now report `condstore=false qresync=false idle=false gmail=false`** on a
+  connection that previously advertised `IDLE MOVE CONDSTORE X-GM-EXT-1 UIDPLUS`. Not chased
+  this session; recorded because it is a change, and because Phase 5's remaining work
+  (IDLE, CONDSTORE incremental sync) depends on reading those correctly.
