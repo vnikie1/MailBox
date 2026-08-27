@@ -12,6 +12,8 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { HeadingNode, QuoteNode } from '@lexical/rich-text'
 import { $getRoot, $insertNodes, type EditorState, type LexicalEditor } from 'lexical'
 
+import { FormatBar } from './FormatBar'
+
 import styles from './Editor.module.css'
 
 /**
@@ -125,6 +127,10 @@ export function Editor({ initialHtml = '', onChange, ariaLabel }: EditorProps) {
       }}
     >
       <div className={styles.shell}>
+        {/* Inside the composer, because it needs the editor context. Above the text, as
+            docs/01 §6 draws it. */}
+        <FormatBar />
+
         <RichTextPlugin
           contentEditable={<ContentEditable className={styles.content} aria-label={ariaLabel} />}
           ErrorBoundary={LexicalErrorBoundary}

@@ -1,0 +1,22 @@
+/* The compose format bar. docs/01 §6. */
+
+.bar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--toolbar-gap-within);
+  align-items: center;
+  height: var(--compose-format-bar-height);
+  padding: 0 var(--compose-header-pad-x);
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+/**
+ * Between groups rather than between every button. docs/02 §6.1 uses the same rhythm in the
+ * main toolbar: text styling is one thought, block structure is another.
+ */
+.divider {
+  width: var(--hairline);
+  height: var(--compose-format-divider-height);
+  margin: 0 var(--sp-3);
+  background: var(--separator);
+}
