@@ -2204,3 +2204,54 @@ against memory, and found the engines were largely built with nothing able to in
   measuring it. The verdict is due around 22:15; the decision after it is whether to make that
   ceiling explicit rather than an accident of a default times however many connections happen
   to exist.
+
+---
+
+## 2026-08-27 (night) — Phase 8: the exit gate
+
+The gate asks four things, and `src-tauri/tests/phase8_gate.rs` now measures three of them; the
+fourth was already measured by `junkgate`. All four pass.
+
+### Results
+
+| gate                                                                        | result                                                  |
+| --------------------------------------------------------------------------- | ------------------------------------------------------- |
+| a rule created in the UI fires on arrival and on manual run                 | **pass**                                                |
+| a 5-predicate smart mailbox agrees with hand-written SQL over the 100k seed | **pass** — 101,282 messages, both forms returned 15,694 |
+| undo restores exact prior state for every action type                       | **pass** — 11 action types                              |
+| the junk classifier exceeds 90% on a labelled corpus                        | **pass** — 91.08% balanced                              |
+
+### What each one was made to mean
+
+- **"Created in the UI"** is taken to mean the rule goes in through `rule_save` — the function
+  the editor's OK button calls — and comes back out through `rules_list`. A synthesised `Rule`
+  value would skip the JSON round-trip, which is exactly where a serialisation bug would hide.
+
+- **Gate 2 was checked for sensitivity before being believed.** Agreement between two queries
+  proves nothing if neither can disagree. Flipping the unread clause on the compiled side alone
+  moved the count from 15,694 to 71,317 and failed the assertion, which is what makes the
+  passing run evidence. A first attempt at this probe — raising the size threshold from 100 to
+  1000 bytes — changed nothing, because every matching message is over 1000 bytes anyway; a
+  probe that cannot fail is as useless as the test it is checking.
+
+  The test also refuses to pass if the hand-written query matches nothing, since a predicate
+  that matches nothing agrees with a query that matches nothing and neither of them works.
+
+- **Undo covers eleven action types**, including the compound case: one step spanning mailbox,
+  seen, flagged and junk at once, which is what "Apply Rules" captures. A per-field undo would
+  pass all ten single-field tests and still lose three quarters of that one. Each test starts
+  from a deliberately awkward state — flagged blue, read, junk, snoozed, thread muted — so
+  "restored" cannot be mistaken for "reset to the defaults".
+
+- **Send is undone by a different mechanism, and there is a test that says so.** Everything else
+  restores a row to a prior value; a send has no prior value, because once the bytes have left
+  no local change brings them back. Undo Send is a hold in the outbox instead. The gate lists
+  send among the actions undo must cover, so the omission is documented rather than left
+  looking like one.
+
+### What the gate does not prove
+
+Gate 1 exercises `run_on_arrival` — the function the incremental sync calls with the ids it has
+just written — and does not open a socket. That new mail arrives at all and reaches that path is
+what the Dovecot gate already covers; duplicating it here would test the rig rather than the
+rules.
