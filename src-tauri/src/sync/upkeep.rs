@@ -147,10 +147,11 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64) -> Result<usize, DbError> 
 
 /// Runs the tick forever, telling the UI when something comes due.
 ///
-/// Spawned once at startup. It holds only a `Db` and an `Events`, so it cannot be the thing
-/// keeping anything else alive.
-pub fn spawn(db: Db, events: Arc<dyn Events>) {
-    tokio::spawn(async move {
+/// Returns the loop rather than spawning it, for the reason spelled out in `sender::run`:
+/// `tokio::spawn` panics unless it is called from inside a runtime, and Tauri's `setup` is not
+/// one. It holds only a `Db` and an `Events`, so it cannot be what keeps anything else alive.
+pub fn run(db: Db, events: Arc<dyn Events>) -> impl std::future::Future<Output = ()> + Send + 'static {
+    async move {
         let mut count: u64 = 0;
 
         loop {
@@ -184,7 +185,7 @@ pub fn spawn(db: Db, events: Arc<dyn Events>) {
                 }
             }
         }
-    });
+    }
 }
 
 #[cfg(test)]

@@ -78,11 +78,20 @@ impl Sender {
         self.wake.notify_one();
     }
 
-    /// Starts the loop. Returns immediately.
-    pub fn start(&self, events: Arc<dyn Events>, db: Db, root: PathBuf) {
+    /// The loop itself. Never returns.
+    ///
+    /// Deliberately **not** a spawn. `tokio::spawn` panics with "there is no reactor running"
+    /// unless it is called from inside a runtime, and Tauri's `setup` — where this is started —
+    /// is not. It panicked exactly that way the first time the app was launched after Phase 7,
+    /// taking the webview down with it; the whole of Phase 7 had been written and verified
+    /// without the app ever being run.
+    ///
+    /// Returning the future instead lets the caller spawn it on a runtime it actually has, and
+    /// keeps this module free of Tauri, which is what `Events` exists for.
+    pub fn run(&self, events: Arc<dyn Events>, db: Db, root: PathBuf) -> impl std::future::Future<Output = ()> + Send + 'static {
         let wake = Arc::clone(&self.wake);
 
-        tokio::spawn(async move {
+        async move {
             // Before anything is sent: resolve whatever a previous run left in doubt. Doing
             // this first means a message that did go out is marked sent before the loop could
             // consider sending it again.
@@ -100,7 +109,7 @@ impl Sender {
                     _ = wake.notified() => {}
                 }
             }
-        });
+        }
     }
 }
 

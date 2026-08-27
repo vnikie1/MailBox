@@ -133,7 +133,9 @@ pub fn run() {
                     .parent()
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_default();
-                sender.start(events, db, root);
+                // `tauri::async_runtime::spawn` rather than `tokio::spawn`: `setup` does not run
+                // inside a runtime, and the bare form panics there.
+                tauri::async_runtime::spawn(sender.run(events, db, root));
             }
             app.manage(sender);
 
@@ -144,7 +146,7 @@ pub fn run() {
                 let events: std::sync::Arc<dyn sync::events::Events> =
                     std::sync::Arc::new(app.handle().clone());
                 let db: db::Db = app.state::<db::Db>().inner().clone();
-                sync::upkeep::spawn(db, events);
+                tauri::async_runtime::spawn(sync::upkeep::run(db, events));
             }
 
             platform::install(app.handle(), &main)?;
