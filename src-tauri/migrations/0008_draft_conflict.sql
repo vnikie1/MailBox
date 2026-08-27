@@ -1,0 +1,11 @@
+-- Phase 7: draft conflict detection. docs/06 Phase 7 — *conflict handling if the same draft
+-- changed remotely.*
+--
+-- Set when an APPEND finds a copy of this draft on the server that we did not put there, which
+-- means another device edited the same draft. Nothing is discarded on either side: the local
+-- copy is appended as usual and this column is what tells the compose window to say so.
+--
+-- Resolving a conflict by picking a winner automatically is the one thing that must not happen
+-- here. Whichever copy loses is work somebody did, and the person who did it is the only one
+-- who can say which version matters.
+ALTER TABLE draft ADD COLUMN conflict_at INTEGER;

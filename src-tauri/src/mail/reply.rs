@@ -23,6 +23,15 @@ pub enum Kind {
     ReplyAll,
     /// To nobody yet; the user chooses.
     Forward,
+    /// Passed on **unaltered** to someone else, as if they had been on it originally.
+    ///
+    /// Not a forward. A forward is a new message from the user that quotes the original; a
+    /// redirect keeps the original's `From`, `Date`, `Subject` and body exactly as they were,
+    /// so a reply to it goes back to the original sender rather than to the person who passed
+    /// it on. RFC 5322 §3.6.6 covers this with the `Resent-*` headers, which is what makes it
+    /// honest rather than forgery: the trail says who passed it on and when, while the
+    /// authorship stays with whoever wrote it.
+    Redirect,
 }
 
 /// The recipients a reply should start with.
@@ -89,10 +98,11 @@ fn push_unique(
 /// one address because a reply-all on a message that reached two of the user's own accounts
 /// would otherwise put one of them in the Cc.
 pub fn recipients(envelope: &Envelope, kind: Kind, mine: &[String]) -> Recipients {
-    if kind == Kind::Forward {
-        // A forward starts empty on purpose. Pre-filling it from the original is how a private
-        // thread gets forwarded to the people who were already on it, which is at best noise
-        // and at worst a disclosure.
+    if kind == Kind::Forward || kind == Kind::Redirect {
+        // Both start empty on purpose. Pre-filling from the original is how a private thread
+        // reaches the people who were already on it, which is at best noise and at worst a
+        // disclosure. A redirect in particular must not inherit the original recipients: the
+        // whole point is to send it to somebody *new*.
         return Recipients::default();
     }
 
@@ -149,6 +159,9 @@ pub fn subject(original: &str, kind: Kind) -> String {
     let prefix = match kind {
         Kind::Reply | Kind::ReplyAll => "Re: ",
         Kind::Forward => "Fwd: ",
+        // Deliberately none. A redirect is the original message, and rewriting its subject
+        // would be the one visible sign that it had been tampered with.
+        Kind::Redirect => return trimmed.to_string(),
     };
 
     // Recognised case-insensitively, and `Fw:` as well as `Fwd:` — Outlook sends the former.
@@ -157,6 +170,7 @@ pub fn subject(original: &str, kind: Kind) -> String {
         match kind {
             Kind::Reply | Kind::ReplyAll => lowered.starts_with("re:"),
             Kind::Forward => lowered.starts_with("fwd:") || lowered.starts_with("fw:"),
+            Kind::Redirect => true,
         }
     };
 

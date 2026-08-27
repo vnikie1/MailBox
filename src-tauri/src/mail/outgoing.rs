@@ -60,6 +60,13 @@ pub struct Attachment {
     pub filename: String,
     pub mime: String,
     pub bytes: Vec<u8>,
+    /// Set when this file is displayed *inside* the message rather than listed beside it.
+    ///
+    /// The value is the `Content-ID`, without angle brackets, and the HTML refers to it as
+    /// `<img src="cid:THAT">`. An image dragged into the body is one of these; a file the user
+    /// attached is not. The difference is not cosmetic — an inline image sent as an ordinary
+    /// attachment shows up as a paperclip and a broken-image icon in the body.
+    pub content_id: Option<String>,
 }
 
 /// What most providers will accept in one message.
@@ -292,12 +299,64 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
     // nesting is the part clients disagree about least: a flat mixed part containing both a
     // text and an HTML body is read by some clients as two attachments and by others as a
     // message with the HTML shown as a file.
-    let body = if draft.attachments.is_empty() {
+    // Inline images wrap the alternative in a `multipart/related` (RFC 2387). The nesting is
+    // load-bearing and the order of the two wrappers is not interchangeable:
+    //
+    //     multipart/mixed          <- files listed beside the message
+    //       multipart/related      <- the message and the images it refers to
+    //         multipart/alternative
+    //           text/plain
+    //           text/html          <- <img src="cid:...">
+    //         image/png            <- Content-ID: <...>
+    //       application/pdf
+    //
+    // Put the related part *outside* the mixed one and the ordinary attachments become part of
+    // the body's resource set, which Outlook renders as neither an attachment nor an image.
+    let inline: Vec<&Attachment> = draft
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.content_id.is_some())
+        .collect();
+
+    let separate: Vec<&Attachment> = draft
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.content_id.is_none())
+        .collect();
+
+    let body = if inline.is_empty() {
+        body
+    } else {
+        let mut related = MultiPart::related().multipart(body);
+
+        for attachment in &inline {
+            let content_type = ContentType::parse(&attachment.mime).unwrap_or_else(|_| {
+                ContentType::parse("application/octet-stream").unwrap_or(ContentType::TEXT_PLAIN)
+            });
+
+            let cid = attachment.content_id.as_deref().unwrap_or_default();
+
+            related = related.singlepart(
+                SinglePart::builder()
+                    .header(content_type)
+                    // Angle brackets here and none in the `cid:` URL. RFC 2392 is explicit
+                    // about the asymmetry, and clients that get it wrong show a broken image.
+                    .header(header::ContentId::from(format!("<{cid}>")))
+                    .header(header::ContentDisposition::inline())
+                    .header(header::ContentTransferEncoding::Base64)
+                    .body(attachment.bytes.clone()),
+            );
+        }
+
+        related
+    };
+
+    let body = if separate.is_empty() {
         body
     } else {
         let mut mixed = MultiPart::mixed().multipart(body);
 
-        for attachment in &draft.attachments {
+        for attachment in &separate {
             let content_type = ContentType::parse(&attachment.mime).unwrap_or_else(|_| {
                 ContentType::parse("application/octet-stream").unwrap_or(ContentType::TEXT_PLAIN)
             });
@@ -325,6 +384,163 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
         bytes: message.formatted(),
         message_id,
     })
+}
+
+/// A message being passed on unaltered. docs/01 §6, RFC 5322 §3.6.6.
+///
+/// Not a forward. A forward is a **new** message from the user that quotes the original; a
+/// redirect is the original itself, sent on to somebody else, so a reply to it goes back to
+/// whoever wrote it rather than to the person who passed it on.
+///
+/// That distinction only survives if the original bytes survive. Rebuilding the message from
+/// the stored HTML would produce something that claims to be from the original sender while
+/// being, byte for byte, our reconstruction of it — different encoding, different boundaries,
+/// signatures broken, and no way for the recipient to tell. So a redirect works on the cached
+/// raw source or it does not happen at all.
+pub struct Redirect<'a> {
+    /// The original message, exactly as it arrived.
+    pub original: &'a [u8],
+    /// Who is passing it on.
+    pub from: Address,
+    pub to: Vec<Address>,
+    pub cc: Vec<Address>,
+    /// Present for the delivery envelope; deliberately never written as a header.
+    pub bcc: Vec<Address>,
+    /// RFC 5322 date for the `Resent-Date` header.
+    pub date: String,
+    /// A fresh id for this act of resending. The message keeps its original `Message-ID`.
+    pub resent_message_id: Option<String>,
+}
+
+/// Formats an address list for a header.
+fn header_list(addresses: &[Address]) -> String {
+    addresses
+        .iter()
+        .map(|address| match address.name.as_deref().map(str::trim) {
+            // Quoted, and any quote or backslash inside escaped. A display name is arbitrary
+            // text from an arbitrary sender, and an unescaped one can close the quoting early
+            // and inject a second address into the header — which for a redirect would mean
+            // silently sending someone's mail somewhere they never named.
+            Some(name) if !name.is_empty() => {
+                let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+                format!("\"{escaped}\" <{}>", address.email.trim())
+            }
+            _ => address.email.trim().to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Builds the redirected message: the original, with a `Resent-` block on the front.
+///
+/// **Prepended, not appended, and that is the specification rather than a shortcut.** RFC 5322
+/// §3.6.6 says each new resent block goes at the top, so the most recent hop reads first and
+/// the trail of who passed it on stays in order.
+///
+/// `Resent-Bcc` is never written, for the same reason `Bcc` never is: a blind recipient named
+/// in a header is not blind. The blind addresses reach the transport through the delivery
+/// envelope instead.
+pub fn redirect(request: &Redirect<'_>) -> Result<Built, BuildError> {
+    if request.to.is_empty() && request.cc.is_empty() && request.bcc.is_empty() {
+        return Err(BuildError::NoRecipients);
+    }
+
+    if request.original.is_empty() {
+        return Err(BuildError::Assembly(
+            "the original message is not in the local cache, so it cannot be redirected              unaltered"
+                .into(),
+        ));
+    }
+
+    // Validated by round-tripping through the same parser the builder uses, so a redirect
+    // cannot put an address into a header that an ordinary send would have rejected.
+    mailbox("Resent-From", &request.from)?;
+    for address in &request.to {
+        mailbox("Resent-To", address)?;
+    }
+    for address in &request.cc {
+        mailbox("Resent-Cc", address)?;
+    }
+    for address in &request.bcc {
+        mailbox("Resent-Bcc", address)?;
+    }
+
+    let resent_id = match request.resent_message_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => generate_message_id(&request.from),
+    };
+
+    let mut block = String::new();
+    block.push_str(&format!(
+        "Resent-From: {}
+",
+        header_list(std::slice::from_ref(&request.from))
+    ));
+
+    if !request.to.is_empty() {
+        block.push_str(&format!(
+            "Resent-To: {}
+",
+            header_list(&request.to)
+        ));
+    }
+    if !request.cc.is_empty() {
+        block.push_str(&format!(
+            "Resent-Cc: {}
+",
+            header_list(&request.cc)
+        ));
+    }
+
+    block.push_str(&format!(
+        "Resent-Date: {}
+",
+        request.date.trim()
+    ));
+    block.push_str(&format!(
+        "Resent-Message-ID: {resent_id}
+"
+    ));
+
+    let mut bytes = Vec::with_capacity(block.len() + request.original.len());
+    bytes.extend_from_slice(block.as_bytes());
+    bytes.extend_from_slice(request.original);
+
+    // The message keeps its **original** `Message-ID`, which is what makes it the same message
+    // rather than a copy. That is also the id the outbox searches the Sent mailbox for when
+    // resolving an interrupted send, and it still works: the search is scoped to Sent, and the
+    // original arrived in the Inbox.
+    let message_id = original_message_id(request.original).unwrap_or(resent_id);
+
+    Ok(Built { bytes, message_id })
+}
+
+/// Reads the `Message-ID` out of a raw message's headers.
+///
+/// Stops at the blank line. A `Message-ID:` occurring in the body — quoted in a reply, say —
+/// is not this message's identity, and treating it as such would have the outbox looking for
+/// the wrong message when deciding whether a send completed.
+fn original_message_id(raw: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(raw);
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            break;
+        }
+
+        if let Some(value) = line
+            .strip_prefix("Message-ID:")
+            .or_else(|| line.strip_prefix("Message-Id:"))
+            .or_else(|| line.strip_prefix("message-id:"))
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -552,11 +768,23 @@ mod attachment_tests {
         String::from_utf8_lossy(&build(draft).expect("build").bytes).to_string()
     }
 
+    fn address(name: Option<&str>, email: &str) -> Address {
+        Address {
+            name: name.map(str::to_string),
+            email: email.to_string(),
+        }
+    }
+
+    fn draft() -> Draft {
+        draft_with(Vec::new())
+    }
+
     #[test]
     fn an_attachment_nests_the_alternative_inside_a_mixed_part() {
         // The nesting clients disagree about least. A flat mixed part holding both bodies is
         // read by some as two attachments and by others as a message whose HTML is a file.
         let output = rendered(&draft_with(vec![Attachment {
+            content_id: None,
             filename: "notes.txt".into(),
             mime: "text/plain".into(),
             bytes: b"hello".to_vec(),
@@ -590,6 +818,7 @@ mod attachment_tests {
         // folder. Traversal and right-to-left overrides matter identically on the way out, and
         // this app must not be the thing that sends them.
         let output = rendered(&draft_with(vec![Attachment {
+            content_id: None,
             filename: "../../evil\u{202E}fdp.exe".into(),
             mime: "application/octet-stream".into(),
             bytes: b"x".to_vec(),
@@ -618,6 +847,7 @@ mod attachment_tests {
         // Standing rule 13. A file whose type could not be guessed is still a file the user
         // asked to send, and octet-stream is what every client falls back to anyway.
         let output = rendered(&draft_with(vec![Attachment {
+            content_id: None,
             filename: "mystery.bin".into(),
             mime: "not/a/valid/type".into(),
             bytes: b"x".to_vec(),
@@ -630,11 +860,13 @@ mod attachment_tests {
     fn several_attachments_all_travel() {
         let output = rendered(&draft_with(vec![
             Attachment {
+                content_id: None,
                 filename: "one.txt".into(),
                 mime: "text/plain".into(),
                 bytes: b"1".to_vec(),
             },
             Attachment {
+                content_id: None,
                 filename: "two.txt".into(),
                 mime: "text/plain".into(),
                 bytes: b"2".to_vec(),
@@ -643,5 +875,225 @@ mod attachment_tests {
 
         assert!(output.contains("one.txt"), "{output}");
         assert!(output.contains("two.txt"), "{output}");
+    }
+
+    /* ------------------------------------------------------- inline images and redirect */
+
+    fn image(cid: Option<&str>) -> Attachment {
+        Attachment {
+            filename: "chart.png".into(),
+            mime: "image/png".into(),
+            bytes: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a],
+            content_id: cid.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_inline_image_travels_in_a_related_part_wrapping_the_body() {
+        // The nesting is the whole feature. An image sent as an ordinary attachment shows the
+        // recipient a paperclip and a broken-image icon where the picture should be.
+        let mut draft = draft();
+        draft.html = r#"<p>See <img src="cid:chart-1"></p>"#.into();
+        draft.attachments = vec![image(Some("chart-1"))];
+
+        let output = rendered(&draft);
+
+        assert!(output.contains("multipart/related"), "{output}");
+        assert!(output.contains("Content-ID: <chart-1>"), "{output}");
+        assert!(output.contains("multipart/alternative"), "{output}");
+
+        // Angle brackets on the header, none in the URL. RFC 2392 is explicit about the
+        // asymmetry and clients that get it wrong show nothing at all.
+        assert!(output.contains("cid:chart-1"), "{output}");
+        assert!(!output.contains("cid:<chart-1>"), "{output}");
+    }
+
+    #[test]
+    fn an_inline_image_is_marked_inline_rather_than_as_an_attachment() {
+        let mut draft = draft();
+        draft.attachments = vec![image(Some("chart-1"))];
+
+        let output = rendered(&draft);
+        assert!(output.contains("Content-Disposition: inline"), "{output}");
+    }
+
+    #[test]
+    fn an_ordinary_attachment_still_travels_in_a_mixed_part() {
+        // The regression this guards: adding the related wrapper must not swallow files the
+        // user attached, which would leave them displayed nowhere and downloadable nowhere.
+        let mut draft = draft();
+        draft.attachments = vec![image(None)];
+
+        let output = rendered(&draft);
+
+        assert!(output.contains("multipart/mixed"), "{output}");
+        assert!(!output.contains("multipart/related"), "{output}");
+        assert!(
+            output.contains("Content-Disposition: attachment"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_message_with_both_nests_related_inside_mixed() {
+        // Order matters and is not interchangeable. Related outside mixed makes the ordinary
+        // attachments part of the body's resource set, which Outlook renders as neither an
+        // attachment nor an image.
+        let mut draft = draft();
+        draft.attachments = vec![image(Some("chart-1")), image(None)];
+
+        let output = rendered(&draft);
+
+        let mixed = output.find("multipart/mixed").expect("mixed part");
+        let related = output.find("multipart/related").expect("related part");
+
+        assert!(
+            mixed < related,
+            "related was not nested inside mixed:\n{output}"
+        );
+    }
+
+    fn original() -> Vec<u8> {
+        concat!(
+            "From: Ada Lovelace <ada@example.test>\r\n",
+            "To: Vishal Singh <me@halcyon.test>\r\n",
+            "Subject: The quarterly figures\r\n",
+            "Date: Mon, 25 Aug 2026 09:00:00 +0000\r\n",
+            "Message-ID: <original-1@example.test>\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "Here they are.\r\n",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    fn redirect_request(raw: &[u8]) -> Redirect<'_> {
+        Redirect {
+            original: raw,
+            from: address(Some("Vishal Singh"), "me@halcyon.test"),
+            to: vec![address(Some("Grace Hopper"), "grace@example.test")],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            date: "Thu, 27 Aug 2026 12:00:00 +0000".into(),
+            resent_message_id: Some("<resent-1@halcyon.test>".into()),
+        }
+    }
+
+    #[test]
+    fn a_redirect_keeps_the_original_message_byte_for_byte() {
+        // This is what separates a redirect from a forward. Rebuilding the message would give
+        // the recipient something that claims to be from the original sender while being our
+        // reconstruction of it — different encoding, broken signatures, and no way to tell.
+        let raw = original();
+        let built = redirect(&redirect_request(&raw)).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes);
+
+        assert!(
+            output.ends_with(&String::from_utf8_lossy(&raw).to_string()),
+            "the original was altered:\n{output}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_prepends_its_resent_block() {
+        // RFC 5322 §3.6.6: each new resent block goes at the *top*, so the most recent hop
+        // reads first and the trail stays in order.
+        let raw = original();
+        let built = redirect(&redirect_request(&raw)).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes);
+
+        assert!(output.starts_with("Resent-From:"), "{output}");
+
+        let resent = output.find("Resent-From:").expect("resent block");
+        let from = output.find("From: Ada").expect("original From");
+        assert!(resent < from, "the resent block is not first:\n{output}");
+
+        assert!(
+            output.contains("Resent-To: \"Grace Hopper\" <grace@example.test>"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Resent-Date: Thu, 27 Aug 2026 12:00:00 +0000"),
+            "{output}"
+        );
+        assert!(
+            output.contains("Resent-Message-ID: <resent-1@halcyon.test>"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_keeps_the_original_authorship() {
+        // A reply to a redirected message must go back to whoever wrote it, not to the person
+        // who passed it on. That only holds if the original `From` survives untouched.
+        let raw = original();
+        let built = redirect(&redirect_request(&raw)).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes);
+
+        assert!(
+            output.contains("From: Ada Lovelace <ada@example.test>"),
+            "{output}"
+        );
+        assert_eq!(built.message_id, "<original-1@example.test>");
+    }
+
+    #[test]
+    fn a_redirect_never_writes_a_resent_bcc_header() {
+        // Same reason `Bcc` is never written: a blind recipient named in a header is not blind.
+        let raw = original();
+        let mut request = redirect_request(&raw);
+        request.bcc = vec![address(None, "secret@example.test")];
+
+        let built = redirect(&request).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes);
+
+        assert!(!output.contains("Resent-Bcc"), "{output}");
+        assert!(!output.contains("secret@example.test"), "{output}");
+    }
+
+    #[test]
+    fn a_redirect_with_no_cached_original_is_refused() {
+        // Rather than silently sending a rebuilt approximation that claims to be the original.
+        let mut request = redirect_request(&[]);
+        request.original = &[];
+
+        assert!(matches!(redirect(&request), Err(BuildError::Assembly(_))));
+    }
+
+    #[test]
+    fn a_display_name_cannot_inject_a_second_recipient() {
+        // A display name is arbitrary text from an arbitrary sender. Unescaped, a quote in it
+        // closes the quoting early and everything after is read as another address — which for
+        // a redirect means silently sending someone's mail to an address they never named.
+        let raw = original();
+        let mut request = redirect_request(&raw);
+        request.to = vec![address(
+            Some("Grace\" <attacker@evil.test>, \"x"),
+            "grace@example.test",
+        )];
+
+        let built = redirect(&request).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes);
+
+        let header_line = output
+            .lines()
+            .find(|line| line.starts_with("Resent-To:"))
+            .expect("resent-to");
+
+        assert!(
+            !header_line.contains("<attacker@evil.test>")
+                || header_line.contains("\\\" <attacker@evil.test>"),
+            "an unescaped quote injected an address: {header_line}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_needs_somebody_to_send_to() {
+        let raw = original();
+        let mut request = redirect_request(&raw);
+        request.to = Vec::new();
+
+        assert!(matches!(redirect(&request), Err(BuildError::NoRecipients)));
     }
 }

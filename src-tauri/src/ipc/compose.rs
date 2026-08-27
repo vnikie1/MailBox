@@ -216,6 +216,9 @@ pub async fn compose_send(
             mime: mime_for(&filename),
             filename,
             bytes,
+            // Files the user attached, so they are listed beside the message. An image dragged
+            // into the body arrives by a different route and carries a `Content-ID`.
+            content_id: None,
         });
     }
 
@@ -712,6 +715,12 @@ pub struct DraftState {
     pub text: String,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// True when this draft was also edited somewhere else.
+    ///
+    /// Surfaced rather than resolved. Whichever copy an automatic merge discarded would be work
+    /// somebody did, and the person who did it is the only one who can say which version
+    /// matters — so both are kept on the server and the window says so.
+    pub conflict: bool,
 }
 
 fn now_seconds() -> i64 {
@@ -883,6 +892,9 @@ pub async fn compose_save_draft(
                 .await?;
 
             let eml_path = path.to_string_lossy().to_string();
+            // The draft's stable identity, so the drain can tell our own copy on the server
+            // from one another device wrote.
+            let message_id_for_op = built.message_id.clone();
             db.write(move |tx| {
                 crate::sync::ops::enqueue(
                     tx,
@@ -891,6 +903,7 @@ pub async fn compose_save_draft(
                         mailbox,
                         eml_path,
                         replaces,
+                        message_id: message_id_for_op,
                     },
                 )
             })
@@ -898,7 +911,25 @@ pub async fn compose_save_draft(
         }
     }
 
+    // Read after the queue was written, so a conflict the drain found while this save was in
+    // flight is reported by this save rather than waiting thirty seconds for the next one.
+    let conflict = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT conflict_at FROM draft WHERE id = ?1",
+                    rusqlite::params![stored],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .ok()
+                .flatten()
+                .is_some())
+        })
+        .await
+        .unwrap_or(false);
+
     Ok(DraftState {
+        conflict,
         id: stored,
         account_id,
         message_id: identity,

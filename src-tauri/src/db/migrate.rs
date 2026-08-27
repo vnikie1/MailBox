@@ -58,6 +58,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "vips_snooze_flags",
         sql: include_str!("../../migrations/0007_vips_snooze_flags.sql"),
     },
+    Migration {
+        version: 8,
+        name: "draft_conflict",
+        sql: include_str!("../../migrations/0008_draft_conflict.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.

@@ -4,4 +4,12 @@ import type { ComposeAddress } from "./ComposeAddress";
 /**
  * A draft as it is stored and restored.
  */
-export type DraftState = { id: number, accountId: number, messageId: string, to: Array<ComposeAddress>, cc: Array<ComposeAddress>, bcc: Array<ComposeAddress>, subject: string, html: string, text: string, inReplyTo: string | null, references: Array<string>, };
+export type DraftState = { id: number, accountId: number, messageId: string, to: Array<ComposeAddress>, cc: Array<ComposeAddress>, bcc: Array<ComposeAddress>, subject: string, html: string, text: string, inReplyTo: string | null, references: Array<string>, 
+/**
+ * True when this draft was also edited somewhere else.
+ *
+ * Surfaced rather than resolved. Whichever copy an automatic merge discarded would be work
+ * somebody did, and the person who did it is the only one who can say which version
+ * matters — so both are kept on the server and the window says so.
+ */
+conflict: boolean, };
