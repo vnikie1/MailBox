@@ -41,6 +41,44 @@ pub struct Draft {
     pub references: Vec<String>,
     /// The immediate parent, for `In-Reply-To`.
     pub in_reply_to: Option<String>,
+    /// This message's own `Message-ID`. Generated when absent.
+    ///
+    /// Ours rather than the library's, and that matters for one specific reason: it is how a
+    /// send interrupted by a crash is resolved. On restart the outbox looks for this id in the
+    /// account's Sent mailbox — present means it went, absent means it did not — which is the
+    /// only way to avoid choosing between silently losing a message and silently sending it
+    /// twice. See `sync::outbox`.
+    pub message_id: Option<String>,
+}
+
+/// A built message and the identity it will be known by.
+#[derive(Debug, Clone)]
+pub struct Built {
+    pub bytes: Vec<u8>,
+    pub message_id: String,
+}
+
+/// Generates an RFC 5322 `Message-ID`.
+///
+/// The domain half comes from the sender's address rather than the machine's hostname. A
+/// hostname would leak the name of the user's computer to every recipient, which standing rule
+/// 16 rules out just as firmly as a tracking header would be.
+fn generate_message_id(from: &Address) -> String {
+    use base64::Engine;
+    use rand::RngCore;
+
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let unique = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+
+    let domain = from
+        .email
+        .rsplit('@')
+        .next()
+        .filter(|domain| !domain.trim().is_empty())
+        .unwrap_or("halcyon.invalid");
+
+    format!("<{unique}@{domain}>")
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,13 +205,19 @@ pub fn quote_text(body: &str) -> String {
 }
 
 /// Builds the RFC 5322 bytes for a draft.
-pub fn build(draft: &Draft) -> Result<Vec<u8>, BuildError> {
+pub fn build(draft: &Draft) -> Result<Built, BuildError> {
     if draft.to.is_empty() && draft.cc.is_empty() && draft.bcc.is_empty() {
         return Err(BuildError::NoRecipients);
     }
 
+    let message_id = match draft.message_id.as_deref().map(str::trim) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => generate_message_id(&draft.from),
+    };
+
     let mut builder = Message::builder()
         .from(mailbox("From", &draft.from)?)
+        .message_id(Some(message_id.clone()))
         .subject(draft.subject.trim());
 
     for address in &draft.to {
@@ -229,7 +273,10 @@ pub fn build(draft: &Draft) -> Result<Vec<u8>, BuildError> {
         .multipart(body)
         .map_err(|error| BuildError::Assembly(error.to_string()))?;
 
-    Ok(message.formatted())
+    Ok(Built {
+        bytes: message.formatted(),
+        message_id,
+    })
 }
 
 #[cfg(test)]
@@ -254,7 +301,7 @@ mod tests {
     }
 
     fn rendered(draft: &Draft) -> String {
-        String::from_utf8_lossy(&build(draft).expect("build")).to_string()
+        String::from_utf8_lossy(&build(draft).expect("build").bytes).to_string()
     }
 
     #[test]

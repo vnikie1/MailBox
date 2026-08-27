@@ -9,8 +9,10 @@ pub mod fetch;
 pub mod idle;
 pub mod mailboxes;
 pub mod ops;
+pub mod outbox;
 pub mod persist;
 pub mod session;
+pub mod smtp;
 pub mod threading;
 
 #[cfg(test)]

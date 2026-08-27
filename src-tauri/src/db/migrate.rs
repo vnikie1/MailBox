@@ -38,6 +38,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "thread_rollup_indexes",
         sql: include_str!("../../migrations/0003_thread_rollup_indexes.sql"),
     },
+    Migration {
+        version: 4,
+        name: "outbox_identity",
+        sql: include_str!("../../migrations/0004_outbox_identity.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.
