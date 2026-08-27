@@ -186,6 +186,19 @@
   --compose-toolbar-height: 44px;
   --compose-toolbar-gap: var(--sp-2);
 
+  /* ---------- outbox banner — docs/01 §6 ----------
+   * Bottom-centre and floating, never in the layout: it comes and goes on its own schedule,
+   * and a banner that pushed the list up and down as mail was sent would break standing rule 6
+   * several times a minute. */
+  --outbox-banner-inset: var(--sp-8);
+  --outbox-banner-gap: var(--sp-4);
+  --outbox-banner-pad-x: var(--sp-6);
+  --outbox-banner-pad-y: var(--sp-4);
+  --outbox-banner-radius: var(--r-xl);
+  --outbox-banner-min-width: 380px;
+  --outbox-banner-max-width: 620px;
+  --outbox-banner-icon: 16px;
+
   /* ---------- attachment previewer — docs/04 Phase 6 ----------
    * Larger than a sheet on purpose: this shows a document, and a scanned invoice at 420px
    * wide is not a preview, it is a thumbnail with a scrollbar. Capped as a share of the

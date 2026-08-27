@@ -656,3 +656,21 @@ export interface OutboxProgress {
   state: string
   error: string | null
 }
+
+/** Puts a failed message back in the queue. The Try Again button on the failure banner. */
+export async function outboxRetry(id: number): Promise<boolean> {
+  if (!runningInTauri) return false
+  return invoke<boolean>('outbox_retry', { id })
+}
+
+/**
+ * Holds a message until a chosen time. Send Later.
+ *
+ * `sendAt` is absolute epoch seconds and is computed here rather than in the core: "Tonight
+ * 9 PM" means nine in the evening where the user is, and the window knows the timezone the
+ * core would have to guess at.
+ */
+export async function outboxSchedule(id: number, sendAt: number): Promise<boolean> {
+  if (!runningInTauri) return false
+  return invoke<boolean>('outbox_schedule', { id, sendAt })
+}

@@ -1,0 +1,75 @@
+/* The Undo Send and send-failure banner. docs/01 §6. */
+
+/**
+ * Bottom-centre, floating above the panes rather than in the layout. It appears and disappears
+ * on its own schedule, and a banner that pushed the message list up and down as messages were
+ * sent would violate standing rule 6 several times a minute.
+ */
+.stack {
+  position: fixed;
+  right: 0;
+  bottom: var(--outbox-banner-inset);
+  left: 0;
+
+  /* Above the panes, and level with the toast stack: neither outranks the other, and they
+     occupy different corners anyway. */
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--outbox-banner-gap);
+  align-items: center;
+  pointer-events: none;
+}
+
+.banner {
+  display: flex;
+  gap: var(--outbox-banner-gap);
+  align-items: center;
+  min-width: var(--outbox-banner-min-width);
+  max-width: var(--outbox-banner-max-width);
+  padding: var(--outbox-banner-pad-y) var(--outbox-banner-pad-x);
+  color: var(--label-1);
+  background: var(--bg-menu-opaque);
+  border-radius: var(--outbox-banner-radius);
+
+  /* Standing rule 4 permits a shadow here: this is a floating layer. */
+  box-shadow: var(--shadow-popover);
+  pointer-events: auto;
+}
+
+.icon {
+  flex: 0 0 auto;
+  width: var(--outbox-banner-icon);
+  height: var(--outbox-banner-icon);
+  color: var(--label-2);
+}
+
+.text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+}
+
+/**
+ * Tabular figures, so a countdown from 10 to 9 does not change the width of everything to its
+ * left. Standing rule 6 — nothing moves that the user did not move.
+ */
+.count {
+  font-variant-numeric: tabular-nums;
+}
+
+.reason {
+  color: var(--label-2);
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-3);
+  align-items: center;
+}
+
+.banner[data-tone='failed'] .icon {
+  color: var(--destructive);
+}

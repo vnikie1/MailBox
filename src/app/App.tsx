@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { AccountsGate, useAccountsGate } from '@/features/accounts'
+import { OutboxBanner } from '@/features/outbox/OutboxBanner'
 import { AppShell } from '@/features/shell/AppShell'
 import { ToastProvider } from '@/ui'
 
@@ -43,6 +44,10 @@ function Shell() {
   return (
     <ToastProvider>
       <AppShell onOpenSettings={openSettings} />
+
+      {/* Bottom-centre, floating over the panes. Undo Send only means anything while the
+          message is still held, so the banner has to be visible from wherever the user is. */}
+      <OutboxBanner />
 
       {/* Inside the provider, because the assistant reports what it did with a toast. */}
       <AccountsGate

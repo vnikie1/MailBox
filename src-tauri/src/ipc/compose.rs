@@ -168,6 +168,7 @@ pub async fn compose_reply(
 /// hold nothing has been transmitted and undo is still honest.
 #[tauri::command]
 pub async fn compose_send(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     sender: State<'_, Sender>,
     message: OutgoingMessage,
@@ -233,6 +234,23 @@ pub async fn compose_send(
         hold_seconds(db.inner()).await,
     )
     .await?;
+
+    // Told to the main window immediately, not when the sender picks it up. The compose window
+    // is a *different* window, so without this the Undo Send banner would not appear until the
+    // hold had already expired — which is the entire period it exists to cover.
+    {
+        use crate::sync::events::{payload, Events};
+        let events: &dyn Events = &app;
+        events.emit(
+            "outbox:progress",
+            payload(&crate::sync::sender::Progress {
+                id,
+                account_id: message.account_id,
+                state: "holding".to_string(),
+                error: None,
+            }),
+        );
+    }
 
     // Wake the sender when the hold expires, rather than leaving it to the idle tick. Undo
     // Send's timer should decide when a message goes, not a polling interval.
@@ -345,4 +363,33 @@ pub async fn compose_open(
         })?;
 
     Ok(label)
+}
+
+/// Puts a failed message back in the queue. The Retry button on the failure banner.
+#[tauri::command]
+pub async fn outbox_retry(
+    db: State<'_, Db>,
+    sender: State<'_, Sender>,
+    id: i64,
+) -> Result<bool, AppError> {
+    let retried = db.write(move |tx| outbox::retry(tx, id)).await?;
+
+    if retried {
+        // Now, not at the next idle tick. The user has just pressed a button and is watching.
+        sender.inner().poke();
+    }
+
+    Ok(retried)
+}
+
+/// Holds a message until a chosen time. **Send Later**. docs/01 §6.
+///
+/// `send_at` is absolute epoch seconds, computed by the UI: "Tonight 9 PM" means nine in the
+/// evening where the user is, and the core has no business guessing at a timezone the window
+/// already knows.
+#[tauri::command]
+pub async fn outbox_schedule(db: State<'_, Db>, id: i64, send_at: i64) -> Result<bool, AppError> {
+    Ok(db
+        .write(move |tx| outbox::reschedule(tx, id, send_at))
+        .await?)
 }
