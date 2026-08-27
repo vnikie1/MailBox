@@ -68,3 +68,58 @@
 .disabled .input {
   color: var(--label-3);
 }
+
+/**
+ * The suggestion list. docs/06 Phase 7 — autocomplete from previous correspondents.
+ *
+ * Absolutely positioned so it overlays whatever is beneath rather than pushing the subject
+ * field and the body down every time someone types a letter, which standing rule 6 forbids.
+ */
+.suggestions {
+  position: absolute;
+  z-index: 3;
+  width: 100%;
+  max-width: var(--tokenfield-suggest-width);
+  max-height: var(--tokenfield-suggest-max-height);
+  margin: 0;
+  padding: var(--menu-pad);
+  overflow-y: auto;
+  list-style: none;
+  background: var(--bg-menu-opaque);
+  border-radius: var(--menu-radius);
+
+  /* Standing rule 4 permits a shadow: this is a floating layer. */
+  box-shadow: var(--shadow-popover);
+}
+
+.suggestion {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--sp-2) var(--menu-item-pad-x);
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--menu-item-radius);
+  cursor: pointer;
+}
+
+.suggestionLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestionDetail {
+  margin-left: auto;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+}
+
+.suggestion:hover,
+.highlighted {
+  background: var(--fill-hover);
+}

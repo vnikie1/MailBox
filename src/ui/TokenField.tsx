@@ -16,6 +16,16 @@ export interface Token {
   invalid?: boolean
 }
 
+/** One row of the suggestion list. */
+export interface Suggestion {
+  /** What is committed when it is chosen. */
+  value: string
+  /** The person's name, where there is one. */
+  label: string
+  /** The address, shown beneath the name so two people with one name can be told apart. */
+  detail?: string
+}
+
 export interface TokenFieldProps {
   /** The row label, "To:" or "Cc:". docs/02 §6.7 — fixed 60 wide, right-aligned. */
   label: string
@@ -24,6 +34,17 @@ export interface TokenFieldProps {
   placeholder?: string
   /** Decides whether a committed value is usable. Anything else renders as invalid. */
   validate?: (value: string) => boolean
+  /**
+   * Suggestions for what is being typed, newest query first.
+   *
+   * Optional, and the field is unchanged without it: the mailbox is the only address book this
+   * app has, so only compose supplies them. The field asks via  rather than
+   * fetching itself, because a shared primitive that knew how to query contacts would be a
+   * primitive that could only ever be used for recipients.
+   */
+  suggestions?: Suggestion[]
+  /** Called as the typed text changes, so the caller can fetch suggestions. */
+  onDraftChange?: (value: string) => void
   /** Show a 16px avatar on each chip, as the compose window does. */
   showAvatars?: boolean
   disabled?: boolean
@@ -73,6 +94,8 @@ export function TokenField({
   onTokensChange,
   placeholder,
   validate,
+  suggestions = [],
+  onDraftChange,
   showAvatars = false,
   disabled = false,
   className,
@@ -80,6 +103,9 @@ export function TokenField({
   const [draft, setDraft] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [announcement, setAnnouncement] = useState('')
+  // Which suggestion is highlighted. -1 means none, so Enter commits what was typed rather
+  // than whatever happens to be first in a list the user has not looked at.
+  const [highlighted, setHighlighted] = useState(-1)
 
   const inputRef = useRef<HTMLInputElement>(null)
   const labelId = useId()
@@ -130,7 +156,38 @@ export function TokenField({
       event.currentTarget.selectionStart === 0 && event.currentTarget.selectionEnd === 0
     const atEmptyStart = draft.length === 0
 
+    const open = suggestions.length > 0 && draft.trim().length > 0
+
+    if (open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+      event.preventDefault()
+      setHighlighted((current) => {
+        const step = event.key === 'ArrowDown' ? 1 : -1
+        const next = current + step
+        // Wraps, so holding one arrow key reaches everything without having to change hands.
+        if (next < 0) return suggestions.length - 1
+        if (next >= suggestions.length) return 0
+        return next
+      })
+      return
+    }
+
+    if (open && event.key === 'Escape') {
+      event.preventDefault()
+      setHighlighted(-1)
+      return
+    }
+
     if (event.key === 'Enter' || SEPARATORS.has(event.key)) {
+      // A highlighted suggestion wins over the typed text; nothing highlighted means the user
+      // is typing an address the mailbox has never seen, which must still work.
+      const chosen = open && highlighted >= 0 ? suggestions[highlighted] : undefined
+      if (chosen !== undefined) {
+        event.preventDefault()
+        commit(chosen.value)
+        setHighlighted(-1)
+        return
+      }
+
       if (commit(draft)) event.preventDefault()
       return
     }
@@ -253,15 +310,45 @@ export function TokenField({
           onChange={(event) => {
             setDraft(event.target.value)
             setSelectedId(null)
+            setHighlighted(-1)
+            onDraftChange?.(event.target.value)
           }}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           onBlur={() => {
             commit(draft)
             setSelectedId(null)
+            setHighlighted(-1)
           }}
         />
       </div>
+
+      {suggestions.length > 0 && draft.trim().length > 0 && (
+        <ul className={styles.suggestions} role="listbox" aria-label={`${label} suggestions`}>
+          {suggestions.map((suggestion, index) => (
+            <li key={suggestion.value}>
+              <button
+                type="button"
+                className={cx(styles.suggestion, index === highlighted && styles.highlighted)}
+                role="option"
+                aria-selected={index === highlighted}
+                // Pointer-down rather than click: the input's blur fires first on a click and
+                // would commit the half-typed text, closing the list before the choice lands.
+                onPointerDown={(event) => {
+                  event.preventDefault()
+                  commit(suggestion.value)
+                  setHighlighted(-1)
+                }}
+              >
+                <span className={styles.suggestionLabel}>{suggestion.label}</span>
+                {suggestion.detail !== undefined && (
+                  <span className={styles.suggestionDetail}>{suggestion.detail}</span>
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
 
       <span id={hintId} className="srOnly">
         Type an address and press Enter. Press Backspace to select the previous recipient.

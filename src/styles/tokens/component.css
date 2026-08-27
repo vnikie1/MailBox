@@ -108,6 +108,8 @@
   --tokenfield-row-height: 30px;
   --tokenfield-label-width: 60px;
   --tokenfield-gap: var(--sp-2);
+  --tokenfield-suggest-width: 340px;
+  --tokenfield-suggest-max-height: 240px;
   --chip-height: 20px;
   --chip-radius: var(--r-pill);
   --chip-pad-x: var(--sp-3);

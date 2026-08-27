@@ -924,3 +924,77 @@ pub async fn compose_discard_draft(db: State<'_, Db>, id: i64) -> Result<(), App
 
     Ok(())
 }
+
+/// One suggested recipient.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Contact {
+    pub name: Option<String>,
+    pub email: String,
+    /// How many messages this address appears on. Drives the ordering.
+    #[ts(type = "number")]
+    pub seen: i64,
+}
+
+/// Suggests recipients from the people already in the mailbox.
+///
+/// docs/06 Phase 7 — *autocomplete from contacts + previous recipients.* There is no address
+/// book to read on Windows that every user has, so the mailbox is the address book: the people
+/// who have written to the user, and the people the user has written to.
+///
+/// Ranked by how often an address appears rather than how recently. Recency puts whoever sent
+/// the last newsletter at the top of every field; frequency puts the people actually
+/// corresponded with there, which is what the feature is for.
+#[tauri::command]
+pub async fn contacts_suggest(
+    db: State<'_, Db>,
+    prefix: String,
+    limit: Option<i64>,
+) -> Result<Vec<Contact>, AppError> {
+    let needle = prefix.trim().to_lowercase();
+
+    // Nothing typed yet means no suggestion. A dropdown that opens on focus with the twenty
+    // most-mailed people covers the field the moment it is clicked.
+    if needle.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limit = limit.unwrap_or(8).clamp(1, 25);
+
+    let rows = db
+        .read(move |conn| {
+            // Senders only. The `to_all` column is a denormalised search string rather than a
+            // parsed list, so mining it for addresses would produce fragments; the people the
+            // user writes to are overwhelmingly also people who write back, and Phase 8's
+            // contact work can widen this properly.
+            let mut statement = conn.prepare(
+                "SELECT from_addr,
+                        MAX(from_name) AS display_name,
+                        COUNT(*)       AS seen
+                   FROM message
+                  WHERE from_addr IS NOT NULL
+                    AND from_addr <> ''
+                    AND (LOWER(from_addr) LIKE ?1 OR LOWER(COALESCE(from_name, '')) LIKE ?1)
+                  GROUP BY LOWER(from_addr)
+                  ORDER BY seen DESC, display_name ASC
+                  LIMIT ?2",
+            )?;
+
+            let pattern = format!("%{needle}%");
+            let found = statement
+                .query_map(rusqlite::params![pattern, limit], |row| {
+                    Ok(Contact {
+                        email: row.get::<_, String>(0)?,
+                        name: row.get::<_, Option<String>>(1)?,
+                        seen: row.get::<_, i64>(2)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+
+            Ok(found)
+        })
+        .await?;
+
+    Ok(rows)
+}

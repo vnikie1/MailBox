@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Paperclip, Send, X } from 'lucide-react'
 
+import type { AccountRow } from '@/lib/generated/AccountRow'
 import type { ComposeAddress } from '@/lib/generated/ComposeAddress'
 import type { PickedFile } from '@/lib/generated/PickedFile'
 import type { ReplyDraft } from '@/lib/generated/ReplyDraft'
@@ -13,13 +14,14 @@ import {
   composeBlank,
   composeSizeLimit,
 } from '@/lib/ipc'
-import { Button, IconButton, TextField, TokenField, type Token } from '@/ui'
+import { Button, IconButton, TextField, type Token } from '@/ui'
 
 import { formatFileSize as formatSize } from '@/lib/date'
 
 import type { OutgoingMessage } from '@/lib/generated/OutgoingMessage'
 
 import { Editor } from './Editor'
+import { RecipientField } from './RecipientField'
 import { useAutosave } from './useAutosave'
 import styles from './ComposeWindow.module.css'
 
@@ -91,6 +93,7 @@ export function ComposeWindow() {
   const replyTo = parameters.get('message')
   const replyKind = parameters.get('kind') ?? 'reply'
 
+  const [accounts, setAccounts] = useState<AccountRow[]>([])
   const [accountId, setAccountId] = useState<number | null>(null)
   const [to, setTo] = useState<Token[]>([])
   const [cc, setCc] = useState<Token[]>([])
@@ -120,6 +123,9 @@ export function ComposeWindow() {
   // builder actually enforces.
   useEffect(() => {
     void composeSizeLimit().then(setSizeLimit)
+    // Loaded regardless of how the window opened: the From picker appears whenever there is
+    // more than one identity, including on a reply.
+    void accountsList().then(setAccounts)
   }, [])
 
   useEffect(() => {
@@ -261,29 +267,26 @@ export function ComposeWindow() {
       </header>
 
       <div className={styles.fields}>
-        <TokenField
+        <RecipientField
           label="To:"
           tokens={to}
           onTokensChange={setTo}
           validate={looksLikeAddress}
-          showAvatars
         />
 
         {showCopies ? (
           <>
-            <TokenField
+            <RecipientField
               label="Cc:"
               tokens={cc}
               onTokensChange={setCc}
               validate={looksLikeAddress}
-              showAvatars
             />
-            <TokenField
+            <RecipientField
               label="Bcc:"
               tokens={bcc}
               onTokensChange={setBcc}
               validate={looksLikeAddress}
-              showAvatars
             />
           </>
         ) : (
@@ -296,6 +299,28 @@ export function ComposeWindow() {
           >
             Cc/Bcc
           </button>
+        )}
+
+        {/* docs/01 §6 — the From picker appears only with more than one identity. With one
+            account it is a control that can only ever say the same thing. */}
+        {accounts.length > 1 && (
+          <div className={styles.subjectRow}>
+            <span className={styles.subjectLabel}>From:</span>
+            <select
+              className={styles.from}
+              aria-label="Send from"
+              value={accountId ?? ''}
+              onChange={(event) => {
+                setAccountId(Number(event.target.value))
+              }}
+            >
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.displayName} — {account.email}
+                </option>
+              ))}
+            </select>
+          </div>
         )}
 
         <div className={styles.subjectRow}>

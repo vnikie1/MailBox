@@ -510,6 +510,7 @@ import type { OutgoingMessage } from './generated/OutgoingMessage'
 import type { PickedFile } from './generated/PickedFile'
 import type { OutboxRow } from './generated/OutboxRow'
 import type { ReplyDraft } from './generated/ReplyDraft'
+import type { Contact } from './generated/Contact'
 import type { DraftState } from './generated/DraftState'
 import type { Signature } from './generated/Signature'
 
@@ -736,4 +737,16 @@ export async function composeSaveDraft(
 export async function composeDiscardDraft(id: number): Promise<void> {
   if (!runningInTauri) return
   await invoke('compose_discard_draft', { id })
+}
+
+/**
+ * Suggests recipients from people already in the mailbox.
+ *
+ * There is no address book on Windows that every user has, so the mailbox is the address book.
+ * Ranked by how often an address appears rather than how recently — recency puts whoever sent
+ * the last newsletter at the top of every field.
+ */
+export async function contactsSuggest(prefix: string, limit?: number): Promise<Contact[]> {
+  if (!runningInTauri) return []
+  return invoke<Contact[]>('contacts_suggest', { prefix, limit: limit ?? null })
 }

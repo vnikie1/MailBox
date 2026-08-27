@@ -137,3 +137,20 @@
   color: var(--destructive);
   font-size: var(--t-footnote-size);
 }
+
+/**
+ * The From picker. A native select rather than the app's Menu: it is a one-line choice among a
+ * handful of identities, and the platform control is keyboard-navigable, screen-reader-correct
+ * and familiar without any of it having to be rebuilt here.
+ */
+.from {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--compose-row-height);
+  padding: 0 var(--sp-2);
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  font-family: inherit;
+  background: none;
+  border: 0;
+}

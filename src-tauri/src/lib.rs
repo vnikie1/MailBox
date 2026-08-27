@@ -69,6 +69,7 @@ pub fn run() {
             ipc::compose::compose_blank,
             ipc::compose::compose_save_draft,
             ipc::compose::compose_discard_draft,
+            ipc::compose::contacts_suggest,
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,
