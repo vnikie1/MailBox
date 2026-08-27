@@ -17,6 +17,7 @@ import type { FlagName } from '@/lib/generated/FlagName'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
 import type { Predicate } from '@/lib/generated/Predicate'
 import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
+import type { Vip } from '@/lib/generated/Vip'
 
 /**
  * The sidebar tree. docs/01 §3.
@@ -143,6 +144,38 @@ function colourPredicate(color: string): Predicate {
 }
 
 /**
+ * VIPs, as a mailbox. docs/01 §8.
+ *
+ * A saved search over the VIP addresses rather than a folder, so nothing is moved and a VIP's
+ * mail still appears in the Inbox where they expect it.
+ *
+ * Absent when there are no VIPs. An empty row that can never fill is worse than no row: it
+ * reads as a feature that is broken rather than one that has not been used.
+ */
+function vipNode(vips: Vip[]): SidebarNode | null {
+  if (vips.length === 0) return null
+
+  return {
+    id: 'vips',
+    label: 'VIPs',
+    icon: Star,
+    mailboxIds: [],
+    // One `any` over the addresses. Matching on `from` rather than `anyText` so a message that
+    // merely *mentions* a VIP does not qualify — the row means "from these people".
+    predicate: {
+      type: 'any',
+      value: vips.map((vip) => ({
+        type: 'is' as const,
+        value: { field: 'from' as const, op: 'contains' as const, value: vip.address },
+      })),
+    },
+    unreadCount: 0,
+    children: [],
+    depth: 0,
+  }
+}
+
+/**
  * Flagged, with one child per colour. docs/01 §8.
  *
  * Children are only offered when a colour has been renamed or used, because seven identical
@@ -175,12 +208,16 @@ export function buildSidebar(
   mailboxes: MailboxRow[],
   smart: SmartMailbox[] = [],
   flagNames: FlagName[] = [],
+  vips: Vip[] = [],
 ): SidebarSection[] {
+  const vip = vipNode(vips)
+
   const favourites: SidebarSection = {
     id: 'favourites',
     title: 'Favourites',
     nodes: [
       unifiedNode(mailboxes, accounts, 'all-inboxes', 'All Inboxes', 'inbox'),
+      ...(vip === null ? [] : [vip]),
       flaggedNode(flagNames),
       unifiedNode(mailboxes, accounts, 'all-drafts', 'All Drafts', 'drafts'),
       unifiedNode(mailboxes, accounts, 'all-sent', 'All Sent', 'sent'),

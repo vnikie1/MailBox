@@ -94,6 +94,27 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64) -> Result<usize, DbError> 
         return Ok(0);
     }
 
+    // Training mode: score everything, file nothing. docs/06 Phase 8.
+    //
+    // It exists because the first weeks of a Bayesian filter are its worst, and the damage it
+    // can do in those weeks — a real message quietly moved out of the Inbox — is exactly the
+    // damage that makes someone switch the filter off and never switch it back on. Training
+    // mode lets it be watched before it is trusted.
+    let training_only = db
+        .read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM setting WHERE key = 'junk.trainingMode'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok())
+        })
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+
     db.write(move |tx| {
         let candidates = {
             let mut statement = tx.prepare(
@@ -127,15 +148,18 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64) -> Result<usize, DbError> 
                 continue;
             };
 
-            // The score is stored even below the threshold. It is what lets someone see *why* a
-            // message was filed, and it is also the marker that stops the next pass rescoring
-            // mail nothing has changed about.
+            // The score is stored even below the threshold, and in training mode it is the
+            // *only* thing stored. It is what lets someone see why a message was filed, and it
+            // is also the marker that stops the next pass rescoring mail nothing has changed
+            // about.
+            let file_it = verdict.is_junk() && !training_only;
+
             tx.execute(
                 "UPDATE message SET junk_score = ?2, is_junk = ?3 WHERE id = ?1",
-                rusqlite::params![id, score, i64::from(verdict.is_junk())],
+                rusqlite::params![id, score, i64::from(file_it)],
             )?;
 
-            if verdict.is_junk() {
+            if file_it {
                 filed += 1;
             }
         }

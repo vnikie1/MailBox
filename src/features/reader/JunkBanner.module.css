@@ -1,0 +1,33 @@
+/* The junk banner. docs/01 §8. */
+
+.banner {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: center;
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--fill-hover);
+  border-radius: var(--r-md);
+}
+
+.icon {
+  flex: 0 0 auto;
+  width: var(--reader-banner-icon);
+  height: var(--reader-banner-icon);
+
+  /* The one warning colour in the reader. Junk is the only thing here the app has an opinion
+   * about, and the opinion should read as a caution rather than as an error. */
+  color: var(--flag-orange);
+}
+
+.text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+}
+
+.score {
+  color: var(--label-2);
+}

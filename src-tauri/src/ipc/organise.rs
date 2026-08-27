@@ -448,6 +448,39 @@ pub async fn junk_scan(app: AppHandle, db: State<'_, Db>, mailbox_id: i64) -> Re
     Ok(filed)
 }
 
+/// Whether the filter only marks and never files. docs/06 Phase 8.
+#[tauri::command]
+pub async fn junk_training_mode(db: State<'_, Db>) -> Response<bool> {
+    let stored: Option<String> = db
+        .read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM setting WHERE key = 'junk.trainingMode'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok())
+        })
+        .await?;
+
+    Ok(stored.is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true")))
+}
+
+#[tauri::command]
+pub async fn junk_set_training_mode(db: State<'_, Db>, enabled: bool) -> Response<()> {
+    db.write(move |tx| {
+        tx.execute(
+            "INSERT INTO setting (key, value) VALUES ('junk.trainingMode', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![if enabled { "1" } else { "0" }],
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
+}
+
 /* ---------------------------------------------------------------------- blocked senders */
 
 #[tauri::command]

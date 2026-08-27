@@ -3,7 +3,14 @@ import { ChevronRight, PanelLeft, Settings } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { useLayoutStore } from '@/store/layout'
-import { useMailboxes, useAccounts, useMoveMessages } from '@/app/queries'
+import {
+  useAccounts,
+  useFlagNames,
+  useMailboxes,
+  useMoveMessages,
+  useSmartMailboxes,
+  useVips,
+} from '@/app/queries'
 import { useMailStore } from '@/store/mail'
 import { Badge, IconButton, ScrollArea, Tooltip } from '@/ui'
 
@@ -155,12 +162,26 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
 
-  const sections = useMemo(() => buildSidebar(accounts, mailboxes), [accounts, mailboxes])
+  const { data: smart = [] } = useSmartMailboxes()
+  const { data: flagNames = [] } = useFlagNames()
+  const { data: vips = [] } = useVips()
+
+  const sections = useMemo(
+    () => buildSidebar(accounts, mailboxes, smart, flagNames, vips),
+    [accounts, mailboxes, smart, flagNames, vips],
+  )
   const collapsed = useMemo(() => new Set(collapsedSections), [collapsedSections])
 
   const onSelect = (node: SidebarNode) => {
     if (node.mailboxIds.length === 0) return
-    selectMailbox({ nodeId: node.id, label: node.label, mailboxIds: node.mailboxIds })
+    selectMailbox({
+      nodeId: node.id,
+      label: node.label,
+      mailboxIds: node.mailboxIds,
+      // Spread rather than set to `undefined`: with `exactOptionalPropertyTypes` an explicit
+      // undefined is not the same as an absent key, and the list branches on absence.
+      ...(node.predicate === undefined ? {} : { predicate: node.predicate }),
+    })
   }
 
   return (

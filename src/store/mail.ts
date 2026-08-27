@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 
+import type { Predicate } from '@/lib/generated/Predicate'
+
 /**
  * What is selected. Nothing else.
  *
@@ -25,6 +27,15 @@ export interface MailboxSelection {
   nodeId: string
   label: string
   mailboxIds: number[]
+  /**
+   * Set when the row is a saved search — a smart mailbox, Flagged, or a flag colour — rather
+   * than a folder. The list queries by this instead of by mailbox id.
+   *
+   * A selection has one or the other, never both. Carrying both would leave two ways to ask
+   * the same question with no rule about which wins, which is the bug the `mailboxIds` comment
+   * above already records once.
+   */
+  predicate?: Predicate
 }
 
 interface MailState {

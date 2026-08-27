@@ -90,6 +90,8 @@ pub fn run() {
             ipc::organise::junk_status,
             ipc::organise::junk_mark,
             ipc::organise::junk_scan,
+            ipc::organise::junk_training_mode,
+            ipc::organise::junk_set_training_mode,
             ipc::organise::blocked_list,
             ipc::organise::block_sender,
             ipc::organise::unblock_sender,

@@ -13,6 +13,11 @@ import type { FlagPatch } from '@/lib/generated/FlagPatch'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import type { MessageRow } from '@/lib/generated/MessageRow'
+import type { Predicate } from '@/lib/generated/Predicate'
+import type { FlagName } from '@/lib/generated/FlagName'
+import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
+import type { Vip } from '@/lib/generated/Vip'
+import { flagNames, smartList, smartMessages, vipsList } from '@/lib/organise'
 import * as ipc from '@/lib/ipc'
 
 /**
@@ -35,6 +40,9 @@ export const keys = {
   mailboxes: ['mailboxes'] as const,
   messages: (mailboxIds: number[], unreadOnly: boolean) =>
     ['messages', [...mailboxIds].sort((a, b) => a - b), unreadOnly] as const,
+  // Keyed on the predicate itself, so editing a smart mailbox refetches and two smart
+  // mailboxes with the same conditions share one cache entry.
+  smart: (predicate: unknown) => ['messages', 'smart', predicate] as const,
   message: (id: number) => ['message', id] as const,
   thread: (threadId: number) => ['thread', threadId] as const,
   search: (text: string, mailboxIds: number[]) => ['search', text, mailboxIds] as const,
@@ -72,6 +80,57 @@ export function useMessages(mailboxIds: number[], unreadOnly: boolean) {
         unreadOnly,
       }),
     getNextPageParam: (lastPage) => lastPage.nextCursor,
+  })
+}
+
+/**
+ * The messages a saved search matches. docs/01 §8.
+ *
+ * Offset paging rather than the keyset cursor the folder list uses. A smart mailbox is an
+ * arbitrary predicate over an arbitrary set of mailboxes, so there is no single
+ * `(date_received, id)` ordering the server side can seek into cheaply — and the result sets
+ * are small enough that it does not matter. The folder list keeps its cursor precisely because
+ * it is the one that has to page through fifty thousand rows.
+ */
+export function useSmartMessages(predicate: Predicate | undefined) {
+  return useInfiniteQuery({
+    queryKey: keys.smart(predicate ?? null),
+    enabled: predicate !== undefined,
+    initialPageParam: 0,
+    queryFn: ({ pageParam }) =>
+      predicate === undefined
+        ? Promise.resolve([])
+        : smartMessages(predicate, PAGE_SIZE, pageParam),
+    getNextPageParam: (lastPage: MessageRow[], allPages: MessageRow[][]) =>
+      lastPage.length < PAGE_SIZE ? undefined : allPages.length * PAGE_SIZE,
+  })
+}
+
+/**
+ * The saved searches in the sidebar, and the flag names under Flagged.
+ *
+ * Their own queries rather than part of `useMailboxes`, because they change for entirely
+ * different reasons: a mailbox list changes when the server's folders do, and these change when
+ * the user edits them. Invalidating one should not refetch the other.
+ */
+export function useSmartMailboxes() {
+  return useQuery<SmartMailbox[]>({
+    queryKey: ['smartMailboxes'],
+    queryFn: smartList,
+  })
+}
+
+export function useVips() {
+  return useQuery<Vip[]>({
+    queryKey: ['vips'],
+    queryFn: vipsList,
+  })
+}
+
+export function useFlagNames() {
+  return useQuery<FlagName[]>({
+    queryKey: ['flagNames'],
+    queryFn: flagNames,
   })
 }
 

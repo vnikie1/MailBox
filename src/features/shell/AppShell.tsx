@@ -1,14 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronLeft } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { LIST_MAX, LIST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, useLayoutStore } from '@/store/layout'
-import { useMailboxes } from '@/app/queries'
+import { useAccounts, useMailboxes, useMoveMessages } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
-import { Button } from '@/ui'
+import { Button, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
 import { Reader } from '@/features/reader/Reader'
 import { Sidebar } from '@/features/sidebar/Sidebar'
+import { MailboxPicker, useOrganiseShortcuts, useUndo } from '@/features/organise'
+import { rulesRun } from '@/lib/organise'
 
 import { PaneDivider } from './PaneDivider'
 import { useBreakpoint } from './useBreakpoint'
@@ -51,6 +53,42 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
   const selectMailbox = useMailStore((state) => state.selectMailbox)
 
   const { data: mailboxes = [] } = useMailboxes()
+  const { data: accounts = [] } = useAccounts()
+  const move = useMoveMessages()
+  const toast = useToast()
+
+  const [movingTo, setMovingTo] = useState(false)
+
+  // Called for its effect: the hook owns the Ctrl+Z handler and raises its own toast. The
+  // return value describes what undo would do, which the menu bar will want in Phase 10 and
+  // nothing needs yet.
+  useUndo()
+
+  // Registered here rather than in the list: both act on the selection, and the selection
+  // stays put while focus moves between the three panes.
+  useOrganiseShortcuts({
+    hasSelection: selectedMessageIds.length > 0,
+    onMoveTo: useCallback(() => {
+      setMovingTo(true)
+    }, []),
+    onRunRules: useCallback(() => {
+      void rulesRun(selectedMessageIds)
+        .then((report) => {
+          toast.show({
+            title:
+              report.matched === 0
+                ? 'No rules matched'
+                : `${String(report.matched)} of ${String(report.examined)} messages matched`,
+          })
+        })
+        .catch((error: unknown) => {
+          toast.show({
+            title: 'The rules could not be run',
+            description: error instanceof Error ? error.message : String(error),
+          })
+        })
+    }, [selectedMessageIds, toast]),
+  })
 
   // Open on the first account's inbox once the mailboxes arrive. The store starts with no
   // selection because it no longer owns the data and cannot know what exists.
@@ -169,6 +207,21 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
           </div>
         )}
       </div>
+
+      <MailboxPicker
+        open={movingTo}
+        onOpenChange={setMovingTo}
+        mailboxes={mailboxes}
+        accounts={accounts}
+        title={
+          selectedMessageIds.length === 1
+            ? 'Move message to…'
+            : `Move ${String(selectedMessageIds.length)} messages to…`
+        }
+        onChoose={(mailboxId) => {
+          move.mutate({ ids: selectedMessageIds, mailboxId })
+        }}
+      />
     </div>
   )
 }

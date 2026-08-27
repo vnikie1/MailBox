@@ -113,6 +113,16 @@ pub struct MessageFull {
     pub answered: bool,
     pub flagged: bool,
     pub flag_color: Option<String>,
+    /// Whether the message is filed as junk.
+    pub is_junk: bool,
+    /// True when a person made that call, rather than the filter.
+    ///
+    /// The reader needs the difference: "we think this is junk" invites a correction, while
+    /// "you marked this as junk" is a statement, and a banner that argued with the user about
+    /// their own decision would be the fastest way to make them turn the filter off.
+    pub junk_by_user: bool,
+    /// The filter's confidence, when it had an opinion. `null` before it has been scored.
+    pub junk_score: Option<f64>,
     pub attachments: Vec<AttachmentRow>,
 }
 

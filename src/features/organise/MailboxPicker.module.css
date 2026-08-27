@@ -1,0 +1,54 @@
+/* The Ctrl+Shift+M mailbox picker. docs/01 §8. */
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: var(--picker-max-height);
+  padding: 0;
+  margin: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.result {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: baseline;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--label-1);
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--r-sm);
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Dimmer and smaller: it disambiguates, it is not what the user is reading for. */
+.account {
+  flex: 0 0 auto;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+}
+
+/* Keyboard and pointer share one highlight, so the row Enter will take is always the row
+ * that looks chosen — two different affordances here is how people press Enter on one row
+ * while looking at another. */
+.highlighted {
+  background: var(--fill-selected-inactive);
+}
+
+.empty {
+  padding: var(--sp-3);
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+}

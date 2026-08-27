@@ -17,6 +17,7 @@ import { formatFileSize, formatReaderDate } from '@/lib/date'
 import { useThread } from '@/app/queries'
 
 import { AttachmentPreview } from './AttachmentPreview'
+import { JunkBanner } from './JunkBanner'
 import { MessageBody } from './MessageBody'
 import { useThreadBodies } from './useBodyPrefetch'
 import { composeOpen, storeNow } from '@/lib/ipc'
@@ -219,6 +220,10 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
 
       {expanded && (
         <>
+          {/* Above the body, not below it. The point of the banner is to be read *before* the
+              message it is about — a warning underneath a phishing attempt has already lost. */}
+          <JunkBanner message={message} />
+
           {/* docs/03 §6. The body is rendered in a sandboxed frame from HTML the core has
               sanitised — never interpolated into this document, where it would inherit the
               app's own origin and privileges. */}

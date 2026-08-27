@@ -4,6 +4,8 @@ import { Sheet } from '@/ui'
 
 import { AccountAssistant } from './AccountAssistant'
 import { ComposingSettings } from '@/features/compose/ComposingSettings'
+import { JunkSettings } from '@/features/organise/JunkSettings'
+import { OrganiseSettings } from '@/features/organise/OrganiseSettings'
 
 import { AccountsSettings } from './AccountsSettings'
 import styles from './AccountsGate.module.css'
@@ -45,6 +47,8 @@ export function AccountsGate({ firstRun, settingsOpen, onCloseSettings }: Accoun
       >
         <AccountsSettings />
         <ComposingSettings />
+        <JunkSettings />
+        <OrganiseSettings />
       </Sheet>
     </>
   )

@@ -182,6 +182,11 @@ function build(): Store {
       answered: rng.chance(0.18),
       flagged,
       flagColor: flagged ? 'orange' : null,
+      // The browser gallery has no classifier behind it, so nothing is junk and nothing has a
+      // score. Inventing one would make the banner look implemented when it is not wired here.
+      isJunk: false,
+      junkByUser: false,
+      junkScore: null,
       attachments: Array.from({ length: attachmentCount }, (_, index) => {
         const file = rng.pick(ATTACHMENT_NAMES)
         return {

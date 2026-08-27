@@ -144,3 +144,65 @@ describe('sidebar', () => {
     ).toEqual([])
   })
 })
+
+describe('VIP mailbox', () => {
+  it('appears only once there is a VIP', () => {
+    // An empty row that can never fill reads as a broken feature rather than an unused one.
+    const without = buildSidebar([ACCOUNT], [INBOX], [], [], [])
+    expect(without.find((s) => s.id === 'favourites')?.nodes.some((n) => n.id === 'vips')).toBe(
+      false,
+    )
+
+    const withVip = buildSidebar(
+      [ACCOUNT],
+      [INBOX],
+      [],
+      [],
+      [{ address: 'ada@example.test', addedAt: 0 }],
+    )
+    expect(withVip.find((s) => s.id === 'favourites')?.nodes.some((n) => n.id === 'vips')).toBe(
+      true,
+    )
+  })
+
+  it('matches on the sender rather than anywhere in the text', () => {
+    // "From these people", not "mentions these people" — otherwise a newsletter quoting a VIP's
+    // address lands in the row meant for mail they actually sent.
+    const sections = buildSidebar(
+      [ACCOUNT],
+      [INBOX],
+      [],
+      [],
+      [
+        { address: 'ada@example.test', addedAt: 0 },
+        { address: 'grace@example.test', addedAt: 0 },
+      ],
+    )
+
+    const vips = sections.find((s) => s.id === 'favourites')?.nodes.find((n) => n.id === 'vips')
+    const predicate = vips?.predicate
+
+    expect(predicate?.type).toBe('any')
+    if (predicate?.type !== 'any') throw new Error('expected an any group')
+
+    expect(predicate.value).toHaveLength(2)
+    for (const child of predicate.value) {
+      expect(child.type).toBe('is')
+      if (child.type !== 'is') throw new Error('expected a condition')
+      expect(child.value.field).toBe('from')
+    }
+  })
+
+  it('is a saved search, not a folder', () => {
+    const sections = buildSidebar(
+      [ACCOUNT],
+      [INBOX],
+      [],
+      [],
+      [{ address: 'ada@example.test', addedAt: 0 }],
+    )
+    const vips = sections.find((s) => s.id === 'favourites')?.nodes.find((n) => n.id === 'vips')
+
+    expect(vips?.mailboxIds).toEqual([])
+  })
+})

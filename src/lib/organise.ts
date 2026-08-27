@@ -126,6 +126,22 @@ export async function junkScan(mailboxId: number): Promise<number> {
   return invoke<number>('junk_scan', { mailboxId })
 }
 
+/**
+ * Training mode: the filter scores everything and files nothing.
+ *
+ * The first weeks of a Bayesian filter are its worst, and the damage it can do then — a real
+ * message quietly moved out of the Inbox — is what makes people turn a junk filter off for
+ * good. This lets it be watched before it is trusted.
+ */
+export async function junkTrainingMode(): Promise<boolean> {
+  if (!inTauri) return false
+  return invoke<boolean>('junk_training_mode')
+}
+
+export async function setJunkTrainingMode(enabled: boolean): Promise<void> {
+  await invoke('junk_set_training_mode', { enabled })
+}
+
 export async function blockedList(): Promise<string[]> {
   if (!inTauri) return []
   return invoke<string[]>('blocked_list')

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDownUp, ListFilter, MoreHorizontal, PanelLeft } from 'lucide-react'
 
-import { useMailboxes, useMessages } from '@/app/queries'
+import { useMailboxes, useMessages, useSmartMessages } from '@/app/queries'
 import { useBodyPrefetch } from '@/features/reader/useBodyPrefetch'
 import type { Density } from '@/lib/appearance'
 import { cx } from '@/lib/cx'
@@ -12,6 +12,10 @@ import { useLayoutStore } from '@/store/layout'
 import { useMailStore } from '@/store/mail'
 import { useSettingsStore } from '@/store/settings'
 import { IconButton, Menu, MenuItem, MenuSection, MenuSeparator, Tooltip } from '@/ui'
+
+// Aliased: `MessageRow` in this file is the row *component*, and the generated type of the
+// same name would shadow it.
+import type { MessageRow as Row } from '@/lib/generated/MessageRow'
 
 import { MessageRow } from './MessageRow'
 import { buildListItems } from './rows'
@@ -46,6 +50,16 @@ export interface MessageListProps {
  * asks for the next page as it approaches the end. Neither ever counts or skips, which is
  * what holds the 80ms budget in docs/03 §5 at a hundred thousand messages.
  */
+/**
+ * Flattens either query's pages into one list of rows.
+ *
+ * The two shapes differ — the folder query pages a `Page<MessageRow>` with a cursor, the saved
+ * search pages a bare `MessageRow[]` by offset — and this is the one place that has to know it.
+ */
+function flattenPages(data: { pages: (Row[] | { items: Row[] })[] } | undefined): Row[] {
+  return (data?.pages ?? []).flatMap((page) => (Array.isArray(page) ? page : page.items))
+}
+
 export function MessageList({ showSidebarToggle = false }: MessageListProps) {
   const selection = useMailStore((state) => state.selection)
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
@@ -75,16 +89,23 @@ export function MessageList({ showSidebarToggle = false }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const { data: mailboxes = [] } = useMailboxes()
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isPending } = useMessages(
-    selection.mailboxIds,
+  // Two queries, one of which is always disabled. A saved search and a folder ask the core
+  // different questions — one carries a predicate, the other a mailbox list — and hooks cannot
+  // be called conditionally, so the row is chosen after both have run rather than before.
+  const folders = useMessages(
+    selection.predicate === undefined ? selection.mailboxIds : [],
     unreadOnly,
   )
+  const saved = useSmartMessages(selection.predicate)
+
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isPending } =
+    selection.predicate === undefined ? folders : saved
 
   const now = useMemo(storeNow, [])
 
   const rows = useMemo(
     () =>
-      sortRows(data?.pages.flatMap((page) => page.items) ?? [], {
+      sortRows(flattenPages(data), {
         field: sortField,
         ascending: sortAscending,
       }),
