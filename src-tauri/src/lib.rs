@@ -9,6 +9,7 @@ pub mod db;
 pub mod mail;
 pub mod rules;
 pub mod sync;
+pub mod undo;
 
 mod ipc;
 
