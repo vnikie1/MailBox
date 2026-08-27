@@ -13,8 +13,9 @@ import {
   composeSend,
   composeBlank,
   composeSizeLimit,
+  onCloseRequested,
 } from '@/lib/ipc'
-import { Button, IconButton, TextField, type Token } from '@/ui'
+import { Button, IconButton, Sheet, TextField, type Token } from '@/ui'
 
 import { formatFileSize as formatSize } from '@/lib/date'
 
@@ -108,6 +109,7 @@ export function ComposeWindow() {
 
   const [attachments, setAttachments] = useState<PickedFile[]>([])
   const [sizeLimit, setSizeLimit] = useState(25 * 1024 * 1024)
+  const [closing, setClosing] = useState(false)
   const [sending, setSending] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
 
@@ -191,6 +193,43 @@ export function ComposeWindow() {
   }, [accountId, to, cc, bcc, subject, threading, attachments])
 
   const autosave = useAutosave(buildMessage)
+
+  /** Whether there is anything in the window worth not losing. */
+  const hasContent = useCallback(() => {
+    const message = buildMessage()
+    if (message === null) return false
+
+    return (
+      message.subject.trim() !== '' ||
+      (message.text ?? '').trim() !== '' ||
+      message.to.length > 0 ||
+      message.cc.length > 0 ||
+      message.bcc.length > 0 ||
+      attachments.length > 0
+    )
+  }, [buildMessage, attachments])
+
+  // docs/01 §6 — closing an unsaved compose offers Save as Draft / Delete / Cancel. Closing a
+  // window with something typed in it is the one action in a mail client that destroys work
+  // with a single click and no undo.
+  useEffect(() => {
+    let off: (() => void) | undefined
+    let stopped = false
+
+    void onCloseRequested(() => {
+      if (!hasContent()) return true
+      setClosing(true)
+      return false
+    }).then((unlisten) => {
+      if (stopped) unlisten()
+      else off = unlisten
+    })
+
+    return () => {
+      stopped = true
+      off?.()
+    }
+  }, [hasContent])
 
   const onBodyChange = useCallback((html: string, text: string) => {
     body.current = { html, text }
@@ -375,6 +414,48 @@ export function ComposeWindow() {
       )}
 
       <Editor initialHtml={quoted} onChange={onBodyChange} ariaLabel="Message body" />
+
+      <Sheet
+        open={closing}
+        onOpenChange={(next) => {
+          if (!next) setClosing(false)
+        }}
+        title="Save this message as a draft?"
+        description="It has not been sent."
+        footer={
+          <>
+            <Button
+              variant="bordered"
+              onClick={() => {
+                setClosing(false)
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                // Abandoned first, so the autosave timer cannot write it back on the way out.
+                autosave.abandon()
+                setClosing(false)
+                void closeThisWindow()
+              }}
+            >
+              Delete
+            </Button>
+            <Button
+              variant="filled"
+              onClick={() => {
+                autosave.saveNow()
+                setClosing(false)
+                void closeThisWindow()
+              }}
+            >
+              Save as Draft
+            </Button>
+          </>
+        }
+      />
     </div>
   )
 }

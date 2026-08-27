@@ -750,3 +750,20 @@ export async function contactsSuggest(prefix: string, limit?: number): Promise<C
   if (!runningInTauri) return []
   return invoke<Contact[]>('contacts_suggest', { prefix, limit: limit ?? null })
 }
+
+/**
+ * Runs a handler when the user tries to close this window, and lets it stop the close.
+ *
+ * Compose uses it to offer Save as Draft / Delete / Cancel, per docs/01 §6. Closing a window
+ * with something typed in it is the one action in a mail client that destroys work with a
+ * single click and no undo.
+ */
+export async function onCloseRequested(handler: () => boolean): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+
+  return getCurrentWindow().onCloseRequested((event) => {
+    // The handler returns true when the window may go. Anything else holds it open while a
+    // question is put to the user.
+    if (!handler()) event.preventDefault()
+  })
+}

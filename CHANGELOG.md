@@ -1701,3 +1701,123 @@ window. Every layer is tested without the one above it.
   replies threading correctly in Gmail, Outlook and Apple Mail — needs real accounts on all
   three.
 - The twelve-hour soak is running as this is written. Its verdict is not yet in.
+
+---
+
+## 2026-08-27 (later) — Phase 7: composing and sending
+
+Built bottom-up — pure logic, then storage, then the network, then the window — so each layer
+is testable without the one above it. The parts of this phase that can be got wrong are mostly
+not the parts that fail loudly: a recipient list that is subtly wrong sends a private message to
+the wrong people, and the user finds out from them rather than from an error.
+
+### Added — the core
+
+- **`mail/reply.rs`** — who a reply goes to, the subject, the reference chain, the attribution
+  line. **`Bcc` is never read at all**: not filtered late, never consulted, so no future edit
+  can reintroduce it, and one test exists solely to keep that true. `Reply-To` wins over `From`.
+  The user's own addresses are excluded case-insensitively — the local part is case-sensitive
+  per RFC 5321 and nothing on earth treats it that way, so a case-sensitive comparison would put
+  the user on their own reply. Mailing-list machinery (`-bounces`, `-request`, `-owner`) and
+  `no-reply` addresses are dropped from a reply-all: replying to a bounce handler is a message
+  to a robot, sent in public. A forward starts with nobody on it, because pre-filling from the
+  original is how a private thread reaches the people already on it.
+
+- **`mail/outgoing.rs`** — the RFC 5322 bytes. `multipart/alternative` with the plain part
+  **first**, because RFC 2046 §5.1.4 makes the last part the richest and clients that show the
+  first part they understand depend on that order. Attachments nest the alternative inside a
+  `multipart/mixed`; a flat mixed part holding both bodies is read by some clients as two
+  attachments and by others as a message whose HTML is a file. `lettre` does the encoding —
+  quoted-printable, RFC 2047 headers, folding and boundaries are all places where "nearly right"
+  arrives as mojibake and the sender never finds out.
+
+- **`sync/outbox.rs`** — `holding → queued → sending → sent`, with `failed` and a retry path.
+  `holding` is what makes **Undo Send** honest: nothing has been transmitted, so undo deletes
+  the row rather than racing a send, and cancelling later returns false rather than pretending.
+
+  For _killing the app mid-send neither loses nor duplicates_: there is a window between SMTP
+  accepting and this process recording it, and both obvious answers fail silently. So the answer
+  comes from the server — every message carries a `Message-ID` we generate, a sent message lands
+  in Sent, and recovery searches for it there. An interrupted attempt does not spend a retry,
+  because it was cut short rather than used.
+
+- **`sync/smtp.rs`** and **`sync/sender.rs`** — submission, and the loop joining the two.
+  Submit, then file a copy in Sent, then mark sent: a message delivered but missing from Sent is
+  untidy, while a copy in Sent for a message that never left is a lie the user acts on. Port 25
+  is refused outright. The delivery envelope is built from the addresses rather than recovered
+  from the transmitted bytes, which is the mechanism by which `Bcc` works.
+
+### Added — the window
+
+- **A separate OS window**, as docs/01 §6 specifies. People start a reply, go and look something
+  up in another message, and come back; a modal makes that impossible and a pane makes the list
+  unusable. Lexical for the body, because a `contenteditable` differs between engines in exactly
+  the ways that matter — where the caret lands after a list item, what pasting from Word
+  produces, whether undo groups a word or a character.
+
+  The node allow-list is a security boundary rather than a feature list. This editor holds HTML
+  the user is about to send **under their own name**, so pasted content is parsed into nodes
+  rather than injected as markup, and anything without a node type has nothing to become.
+
+- **The format bar** — exactly Mail's set. The restraint is the design: every control produces a
+  node the _recipient's_ client has to render, and mail clients are the least capable renderers
+  in software. Links are limited to `http`, `https` and `mailto`; a `javascript:` URL signed by
+  the user is the same hazard as one from a stranger, only worse.
+
+- **Undo Send, Send Later and the failure banner.** The countdown is a _display_ of the core's
+  timer and never the thing driving it — a window that was asleep or throttled must not change
+  when a message goes. Failures show what the server actually said: "550 mailbox full" is
+  something the user can act on, and a paraphrase is not.
+
+- **Attachments**, with a size warning rather than a refusal. Outgoing filenames are sanitised,
+  which sounds redundant and is not: the name came from this machine, but it lands in the
+  _recipient's_ download folder, so traversal and right-to-left overrides matter identically on
+  the way out — and this app must not be the thing that sends them.
+
+- **Signatures**, on the account rather than in `setting`, because a signature belongs to an
+  identity. Placement above or below the quote is stored rather than guessed: "above" is what
+  people who reply inline expect and "below" is what top-posters expect, and getting it wrong
+  makes every reply look like a mistake.
+
+- **Drafts**, in their own table, autosaved on a timer _and_ on window blur. Neither alone is
+  enough: a timer loses up to thirty seconds when the window closes, and blur alone loses
+  everything when a machine dies with the window focused — which is exactly when a long message
+  is being written. The local write is what the caller waits for; the server copy is queued
+  through `pending_op`, so a draft written on a train is appended when the train leaves the
+  tunnel. Saves that changed nothing are skipped, or a window left open overnight would append a
+  fresh copy every thirty seconds and the user would find hundreds of identical drafts on their
+  phone.
+
+- **Recipient autocomplete**, from the mailbox, since there is no address book on Windows every
+  user has. Ranked by frequency rather than recency — recency puts whoever sent the last
+  newsletter at the top of every field.
+
+### Incidents
+
+- **Two of my own tests were wrong before the code was.** An attachment test asserted the output
+  contained no `..`, which also matches base64 and MIME boundaries; it now checks the
+  `Content-Disposition` header for path separators. And a soak-harness bug (recorded above)
+  had the liveness check reporting a dead client while the client worked.
+
+- **`clippy::items_after_test_module` fired twice**, both times because a block was appended to
+  the end of a file that already had its tests there. Worth noting because the lint is right and
+  the habit — `cat >>` onto a Rust file — is the cause.
+
+- **The `soak` test moved behind a Cargo feature.** While a soak runs, its binary is locked, and
+  an ordinary `cargo test` fails to link it with `LNK1104` — stopping verification for a reason
+  entirely unrelated to whatever is being verified.
+
+### Notes — what Phase 7 does not yet have
+
+Stated plainly rather than left to be discovered:
+
+- **Redirect** (docs/06 lists it beside reply/forward) is not implemented.
+- **Inline images as `multipart/related` with `cid:`** — attachments are `multipart/mixed` only,
+  so an image dragged into the body would travel as an attachment rather than appear in place.
+- **Mail Drop** for oversized attachments, which is an iCloud service, and **Markup** on image
+  attachments, which is a macOS framework. Both are named in docs/01 §6 as Mail behaviours; both
+  need a Windows answer that does not exist yet.
+- **The exit gate has not been run.** It asks that replies thread and render correctly in Gmail,
+  Outlook and Apple Mail, with Outlook Windows named as the strictest. Gmail can be checked with
+  the real account already configured; the other two need accounts that do not exist yet. Until
+  then Phase 7 is feature-complete and unproven, which is a different thing from done.
