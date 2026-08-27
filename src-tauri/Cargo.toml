@@ -120,3 +120,15 @@ tempfile = "3"
 [[bin]]
 name = "seed"
 path = "src/bin/seed.rs"
+
+[features]
+# The twelve-hour soak. Behind a feature so an ordinary `cargo test` does not try to *link* it
+# — while a soak is running, its own binary is locked and the linker fails with LNK1104, which
+# stops `npm run verify` for a reason that has nothing to do with the change being verified.
+#
+#   cargo test --features soak --test dovecot_soak -- --ignored --nocapture
+soak = []
+
+[[test]]
+name = "dovecot_soak"
+required-features = ["soak"]

@@ -10,7 +10,7 @@ import { useThread } from '@/app/queries'
 import { AttachmentPreview } from './AttachmentPreview'
 import { MessageBody } from './MessageBody'
 import { useThreadBodies } from './useBodyPrefetch'
-import { storeNow } from '@/lib/ipc'
+import { composeOpen, storeNow } from '@/lib/ipc'
 import { useMailStore } from '@/store/mail'
 import { Avatar, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
 import { Toolbar } from '@/features/toolbar/Toolbar'
@@ -132,15 +132,46 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
             <TooltipGroup>
               <Tooltip
                 content="Reply"
-                trigger={<IconButton icon={Reply} label="Reply" size="sm" />}
+                trigger={
+                  <IconButton
+                    icon={Reply}
+                    label="Reply"
+                    size="sm"
+                    onClick={(event) => {
+                      // The header is itself a button that collapses the message.
+                      event.stopPropagation()
+                      void composeOpen(message.id, 'reply')
+                    }}
+                  />
+                }
               />
               <Tooltip
                 content="Reply All"
-                trigger={<IconButton icon={ReplyAll} label="Reply All" size="sm" />}
+                trigger={
+                  <IconButton
+                    icon={ReplyAll}
+                    label="Reply All"
+                    size="sm"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void composeOpen(message.id, 'replyAll')
+                    }}
+                  />
+                }
               />
               <Tooltip
                 content="Forward"
-                trigger={<IconButton icon={Forward} label="Forward" size="sm" />}
+                trigger={
+                  <IconButton
+                    icon={Forward}
+                    label="Forward"
+                    size="sm"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      void composeOpen(message.id, 'forward')
+                    }}
+                  />
+                }
               />
             </TooltipGroup>
           </span>

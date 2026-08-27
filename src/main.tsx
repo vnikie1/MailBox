@@ -43,6 +43,21 @@ async function rootElement(): Promise<ReactNode> {
     const { Gallery } = await import('./dev/Gallery')
     return <Gallery />
   }
+
+  /**
+   * Compose is a separate OS window running the same bundle, told which it is by a query
+   * parameter rather than a path. A path would need the dev server and the packaged app to
+   * agree on routing for a file that is only ever `index.html`; a query parameter needs
+   * neither to know anything.
+   *
+   * Imported dynamically so the main window does not pay for the editor — Lexical and its
+   * plugins are a large chunk that the mailbox never touches.
+   */
+  if (new URLSearchParams(window.location.search).has('compose')) {
+    const { ComposeWindow } = await import('./features/compose/ComposeWindow')
+    return <ComposeWindow />
+  }
+
   return <App />
 }
 

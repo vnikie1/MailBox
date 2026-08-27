@@ -506,6 +506,9 @@ import type { HostMismatch } from './generated/HostMismatch'
 import type { LinkOutcome } from './generated/LinkOutcome'
 import type { Rendered } from './generated/Rendered'
 import type { AttachmentData } from './generated/AttachmentData'
+import type { OutgoingMessage } from './generated/OutgoingMessage'
+import type { OutboxRow } from './generated/OutboxRow'
+import type { ReplyDraft } from './generated/ReplyDraft'
 
 /**
  * A message body, sanitised and ready for the sandboxed frame. docs/03 §6.
@@ -576,4 +579,80 @@ export async function attachmentPreview(attachmentId: number): Promise<Attachmen
 export async function attachmentSave(attachmentId: number): Promise<string | null> {
   if (!runningInTauri) return null
   return invoke<string | null>('attachment_save', { attachmentId })
+}
+
+/* ---------------------------------------------------------------------- compose */
+
+/**
+ * Opens a compose window. docs/01 §6 — *a separate floating window, not a pane.*
+ *
+ * Returns the new window's label. Each call opens a distinct window, so several drafts can be
+ * open at once and Windows treats them as separate taskbar entries — which is what a separate
+ * window is for.
+ */
+export async function composeOpen(messageId?: number, kind?: string): Promise<string> {
+  if (!runningInTauri) return ''
+  return invoke<string>('compose_open', {
+    messageId: messageId ?? null,
+    kind: kind ?? null,
+  })
+}
+
+/** Who a reply goes to, what it quotes, and how it threads. Computed by the core. */
+export async function composeReply(messageId: number, kind: string): Promise<ReplyDraft> {
+  if (!runningInTauri) throw new Error('Composing is only available in the app.')
+  return invoke<ReplyDraft>('compose_reply', { messageId, kind })
+}
+
+/**
+ * Queues a message and returns its outbox id, which is what Undo Send cancels.
+ *
+ * Resolves once the message is **durably on disk and in the outbox** — not once it has been
+ * transmitted. The window can close immediately without risking the message, and for the length
+ * of the undo hold nothing has been sent.
+ */
+export async function composeSend(message: OutgoingMessage): Promise<number> {
+  if (!runningInTauri) throw new Error('Sending is only available in the app.')
+  return invoke<number>('compose_send', { message })
+}
+
+/**
+ * Cancels a queued message. This is Undo Send.
+ *
+ * Resolves to false when it is too late — the message is already on its way and no local action
+ * recalls it. Say so rather than reporting success; the user would otherwise find out from the
+ * recipient.
+ */
+export async function composeUndo(id: number): Promise<boolean> {
+  if (!runningInTauri) return false
+  return invoke<boolean>('compose_undo', { id })
+}
+
+/** Everything waiting or failed in the outbox. */
+export async function outboxList(): Promise<OutboxRow[]> {
+  if (!runningInTauri) return []
+  return invoke<OutboxRow[]>('outbox_list')
+}
+
+/** Closes the window this code is running in. Used by compose once a message is queued. */
+export async function closeThisWindow(): Promise<void> {
+  if (!runningInTauri) return
+  await getCurrentWindow().close()
+}
+
+/** Fires as a queued message moves through the outbox. */
+export async function onOutboxProgress(
+  handler: (progress: OutboxProgress) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<OutboxProgress>('outbox:progress', (event) => {
+    handler(event.payload)
+  })
+}
+
+export interface OutboxProgress {
+  id: number
+  accountId: number
+  state: string
+  error: string | null
 }

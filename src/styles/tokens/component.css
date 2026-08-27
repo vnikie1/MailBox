@@ -171,6 +171,21 @@
   --sheet-max-width: 420px;
   --sheet-enter-scale: 0.96;
 
+  /* ---------- compose — docs/01 §6, docs/06 Phase 7 ----------
+   * The window is one sheet of paper: the header fields and the body share a surface, so the
+   * spacing between them has to read as one document rather than a form above a text box. */
+  --compose-header-pad-x: var(--sp-6);
+  --compose-row-height: 30px;
+  --compose-label-width: 60px;
+  --compose-body-pad: var(--sp-6);
+  --compose-paragraph-gap: var(--sp-4);
+  --compose-quote-gap: var(--sp-5);
+  --compose-quote-pad: var(--sp-4);
+  --compose-quote-rule: 2px;
+  --compose-list-indent: var(--sp-8);
+  --compose-toolbar-height: 44px;
+  --compose-toolbar-gap: var(--sp-2);
+
   /* ---------- attachment previewer — docs/04 Phase 6 ----------
    * Larger than a sheet on purpose: this shows a document, and a scanned invoice at 420px
    * wide is not a preview, it is a thumbnail with a scrollbar. Capped as a share of the

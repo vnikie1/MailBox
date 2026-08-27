@@ -59,6 +59,7 @@ pub fn run() {
             ipc::compose::compose_send,
             ipc::compose::compose_undo,
             ipc::compose::outbox_list,
+            ipc::compose::compose_open,
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,

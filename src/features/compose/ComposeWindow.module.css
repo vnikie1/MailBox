@@ -1,0 +1,81 @@
+/* The compose window. docs/01 §6. */
+
+/**
+ * One sheet of paper. The header fields and the body share a surface with no divider between
+ * them, because the thing being composed is a document rather than a form with a text box
+ * underneath it.
+ */
+.window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-content);
+}
+
+.toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--compose-toolbar-gap);
+  align-items: center;
+  height: var(--compose-toolbar-height);
+  padding: 0 var(--compose-header-pad-x);
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.fields {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  padding: 0 var(--compose-header-pad-x);
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+/**
+ * Cc and Bcc stay hidden until asked for. docs/01 §6 shows them collapsed, and most messages
+ * never need them — three empty rows above every reply is three rows of nothing.
+ */
+.copiesToggle {
+  align-self: flex-start;
+  height: var(--compose-row-height);
+  padding: 0;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.copiesToggle:hover {
+  color: var(--accent);
+}
+
+.subjectRow {
+  display: flex;
+  gap: var(--tokenfield-gap);
+  align-items: center;
+  min-height: var(--compose-row-height);
+}
+
+.subjectLabel {
+  flex: 0 0 var(--compose-label-width);
+  color: var(--label-2);
+  font-size: var(--t-body-size);
+  text-align: right;
+}
+
+.subjectInput {
+  flex: 1 1 auto;
+}
+
+.problem {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--sp-4) var(--compose-header-pad-x);
+  color: var(--destructive);
+  font-size: var(--t-footnote-size);
+}

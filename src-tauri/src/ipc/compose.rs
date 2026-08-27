@@ -294,3 +294,55 @@ pub struct OutboxRow {
     pub attempts: i64,
     pub last_error: Option<String>,
 }
+
+/// Opens a compose window. docs/01 §6 — *a separate floating window, not a pane.*
+///
+/// A real OS window rather than a modal inside the main one, because that is what the design
+/// calls for and because it is what people actually do with mail: start a reply, go and look
+/// something up in another message, come back. A modal makes that impossible, and a pane makes
+/// the list unusable while it is open.
+///
+/// Each window gets a distinct label, so several drafts can be open at once and Windows treats
+/// them as separate entries in the taskbar and Alt-Tab, which is the behaviour a separate
+/// window is *for*.
+#[tauri::command]
+pub async fn compose_open(
+    app: tauri::AppHandle,
+    message_id: Option<i64>,
+    kind: Option<String>,
+) -> Result<String, AppError> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Monotonic per process. A label that collided would return the existing window instead of
+    // opening a second draft, which is a confusing way to lose what someone just typed.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let label = format!(
+        "compose-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
+    let mut url = String::from("index.html?compose=1");
+    if let Some(id) = message_id {
+        url.push_str(&format!("&message={id}"));
+    }
+    if let Some(kind) = kind.as_deref() {
+        url.push_str(&format!("&kind={kind}"));
+    }
+
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title("New Message")
+        // docs/01 §6 — 700x560 default, and the size is remembered by the window-state plugin.
+        .inner_size(700.0, 560.0)
+        .min_inner_size(480.0, 360.0)
+        .decorations(true)
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not open a compose window");
+            AppError {
+                code: "window-failed".into(),
+                message: "The compose window could not be opened.".into(),
+            }
+        })?;
+
+    Ok(label)
+}
