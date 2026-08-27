@@ -2033,17 +2033,22 @@ about what the same saved search means.
   processes holding the profile. WebView2 is working normally for other applications on the
   machine at the same time — Windows Shell and Google Drive both have live instances.
 
-  The machine has not rebooted since before the last successful launch, so whatever changed
-  changed within this uptime. What is visible: 313 processes, `dwm.exe` holding **20,910**
-  handles, and RustDesk holding 18,067. Both are consistent with desktop-heap or USER-object
-  pressure, which would explain a window that cannot be created now but could be four hours ago,
-  and would explain why applications that already own their windows are unaffected. That is a
-  hypothesis, not a finding — it is stated as one because the honest record of a bug you did not
-  close is what it was narrowed to, not a guess dressed as an answer.
+  I hypothesised desktop-heap or USER-object pressure: the machine had been up since the
+  previous afternoon with 313 processes, `dwm.exe` holding 20,910 handles and RustDesk 18,067,
+  which would explain a window that could not be created now but could be four hours earlier,
+  and why applications already owning their windows were unaffected. I recommended a reboot.
 
-  **Phase 8 is therefore verified by its tests and its gates, and unverified by running.** Given
-  how much of this project's real bug list came from log lines rather than green suites, that
-  distinction is worth stating plainly rather than leaving to be discovered.
+  **That hypothesis was wrong.** The next launch succeeded — window shown in 405ms, 44 mailboxes
+  synced, no panic — with _no_ intervention: same boot time, `dwm.exe` still at 20,938 handles,
+  RustDesk still running, process count slightly higher. The failure was transient and cleared
+  by itself, most likely a WebView2 environment left wedged while its profile directory was
+  being moved aside and back during this very investigation.
+
+  Two things worth keeping from it. The first is that the correct response to this error is to
+  **try again before changing anything** — every "fix" attempted here was a null result, and had
+  any of them been tried once more instead of once, it would have looked like the cure. The
+  second is that the diagnosis that _did_ hold — checking out the last known-good commit and
+  reproducing the failure on it — is the only step that produced certainty, and it took one run.
 
 ### Notes — what Phase 8 does not yet have
 
