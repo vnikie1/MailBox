@@ -6,13 +6,13 @@ import {
   PenSquare,
   Reply,
   ReplyAll,
-  Search,
   ShieldAlert,
   Trash2,
 } from 'lucide-react'
 
 import { useMailStore } from '@/store/mail'
-import { IconButton, TextField, Tooltip, TooltipGroup } from '@/ui'
+import { SearchField } from '@/features/search'
+import { IconButton, Tooltip, TooltipGroup } from '@/ui'
 
 import styles from './Toolbar.module.css'
 
@@ -35,7 +35,13 @@ import styles from './Toolbar.module.css'
  * toolbar whose buttons come and go changes width and shifts the search field — standing
  * rule 6.
  */
-export function Toolbar() {
+export interface ToolbarProps {
+  search: string
+  onSearchChange: (text: string) => void
+  onSearchCommit: (text: string) => void
+}
+
+export function Toolbar({ search, onSearchChange, onSearchCommit }: ToolbarProps) {
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
 
   const hasSelection = selectedMessageIds.length > 0
@@ -97,14 +103,7 @@ export function Toolbar() {
 
       <div className={styles.spacer} />
 
-      <TextField
-        label="Search"
-        hideLabel
-        variant="search"
-        placeholder="Search"
-        leadingIcon={Search}
-        className={styles.search}
-      />
+      <SearchField value={search} onChange={onSearchChange} onCommit={onSearchCommit} />
     </div>
   )
 }

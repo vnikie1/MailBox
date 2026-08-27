@@ -12,7 +12,11 @@
 //! text in the same place — which is the shape every injection has.
 
 pub mod compile;
+pub mod extract;
+pub mod predicate_bridge;
 pub mod query;
 pub mod rank;
 pub mod run;
 pub mod suggest;
+
+pub use predicate_bridge::as_predicate;

@@ -89,20 +89,29 @@ pub fn compile(query: &Query, scope: &[i64], limit: u32, now: i64) -> Compiled {
     let mut params: Vec<Value> = Vec::new();
     let ranked = !query.terms.is_empty();
 
+    // The mailbox is joined only when something actually reads it. It looks like a small
+    // saving and is not: the join runs once per *matching row*, before any limit, and a term
+    // like "the" matches 98,565 of 101,282 messages here — so an unnecessary join is a hundred
+    // thousand index lookups on a query that never asked about mailboxes.
+    let needs_mailbox = !query.mailbox.is_empty();
+    let mailbox_join = if needs_mailbox {
+        " JOIN mailbox ON mailbox.id = message.mailbox_id"
+    } else {
+        ""
+    };
+
     let mut sql = if ranked {
         params.push(Value::Text(match_expression(&query.terms)));
         format!(
             "SELECT {COLUMNS}, bm25(message_fts) AS relevance
                FROM message_fts
-               JOIN message ON message.id = message_fts.rowid
-               JOIN mailbox ON mailbox.id = message.mailbox_id
+               JOIN message ON message.id = message_fts.rowid{mailbox_join}
               WHERE message_fts MATCH ?1"
         )
     } else {
         format!(
             "SELECT {COLUMNS}, 0.0 AS relevance
-               FROM message
-               JOIN mailbox ON mailbox.id = message.mailbox_id
+               FROM message{mailbox_join}
               WHERE 1 = 1"
         )
     };
@@ -345,6 +354,18 @@ mod tests {
             .params
             .iter()
             .any(|value| matches!(value, Value::Integer(300))));
+    }
+
+    #[test]
+    fn the_mailbox_is_joined_only_when_something_reads_it() {
+        // The join runs once per matching row, before any limit. On a term matching 98,000
+        // messages an unnecessary one is a hundred thousand index lookups for nothing.
+        assert!(!compile(&parsed("figures"), &[], 50, NOW)
+            .sql
+            .contains("JOIN mailbox"));
+        assert!(compile(&parsed("mailbox:archive"), &[], 50, NOW)
+            .sql
+            .contains("JOIN mailbox"));
     }
 
     #[test]

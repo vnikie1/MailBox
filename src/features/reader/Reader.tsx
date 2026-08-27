@@ -25,7 +25,7 @@ import { composeOpen, storeNow } from '@/lib/ipc'
 import { RedirectSheet } from './RedirectSheet'
 import { useMailStore } from '@/store/mail'
 import { Avatar, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
-import { Toolbar } from '@/features/toolbar/Toolbar'
+import { Toolbar, type ToolbarProps } from '@/features/toolbar/Toolbar'
 
 import styles from './Reader.module.css'
 
@@ -296,7 +296,11 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
  * The pane carries the action toolbar as its own header, at the shared toolbar height, so
  * it lines up with the sidebar's and the list's.
  */
-export function Reader() {
+export interface ReaderProps {
+  toolbar: ToolbarProps
+}
+
+export function Reader({ toolbar }: ReaderProps) {
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
   const [expandedIds, setExpandedIds] = useState<number[]>([])
 
@@ -318,7 +322,7 @@ export function Reader() {
   return (
     <div className={styles.pane}>
       <header className={styles.header}>
-        <Toolbar />
+        <Toolbar {...toolbar} />
       </header>
 
       {messages.length > 0 ? (

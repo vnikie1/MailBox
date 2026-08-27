@@ -6,5 +6,6 @@ pub mod body;
 pub mod compose;
 pub mod mail;
 pub mod organise;
+pub mod search;
 pub mod sync;
 pub mod window;

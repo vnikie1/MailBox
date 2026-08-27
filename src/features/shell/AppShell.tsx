@@ -10,6 +10,8 @@ import { MessageList } from '@/features/messageList/MessageList'
 import { Reader } from '@/features/reader/Reader'
 import { Sidebar } from '@/features/sidebar/Sidebar'
 import { MailboxPicker, useOrganiseShortcuts, useUndo } from '@/features/organise'
+import { ScopeBar, useSearch } from '@/features/search'
+import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
 import { rulesRun } from '@/lib/organise'
 
 import { PaneDivider } from './PaneDivider'
@@ -50,6 +52,8 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
 
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
   const selectedNodeId = useMailStore((state) => state.selection.nodeId)
+  const selectionMailboxIds = useMailStore((state) => state.selection.mailboxIds)
+  const selectionLabel = useMailStore((state) => state.selection.label)
   const selectMailbox = useMailStore((state) => state.selectMailbox)
 
   const { data: mailboxes = [] } = useMailboxes()
@@ -58,6 +62,10 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
   const toast = useToast()
 
   const [movingTo, setMovingTo] = useState(false)
+  const [savingSearch, setSavingSearch] = useState(false)
+
+  const search = useSearch(selectionMailboxIds)
+  const searching = search.text.trim() !== ''
 
   // Called for its effect: the hook owns the Ctrl+Z handler and raises its own toast. The
   // return value describes what undo would do, which the menu bar will want in Phase 10 and
@@ -187,7 +195,25 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
                 : { width: `${String(listWidth)}px` }
             }
           >
-            <MessageList showSidebarToggle={!showSidebar} />
+            <MessageList
+              showSidebarToggle={!showSidebar}
+              searchRows={searching ? search.visible.map((hit) => hit.row) : undefined}
+              scopeBar={
+                searching ? (
+                  <ScopeBar
+                    place={search.place}
+                    state={search.state}
+                    mailboxLabel={selectionLabel}
+                    resultCount={search.visible.length}
+                    onPlaceChange={search.setPlace}
+                    onStateChange={search.setState}
+                    onSaveSearch={() => {
+                      setSavingSearch(true)
+                    }}
+                  />
+                ) : undefined
+              }
+            />
           </div>
         )}
 
@@ -203,10 +229,18 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
 
         {showReader && (
           <div className={styles.readerPane}>
-            <Reader />
+            <Reader
+              toolbar={{
+                search: search.text,
+                onSearchChange: search.setText,
+                onSearchCommit: search.commit,
+              }}
+            />
           </div>
         )}
       </div>
+
+      <SaveSearchSheet open={savingSearch} onOpenChange={setSavingSearch} text={search.text} />
 
       <MailboxPicker
         open={movingTo}

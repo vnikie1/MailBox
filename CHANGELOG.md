@@ -2255,3 +2255,109 @@ Gate 1 exercises `run_on_arrival` — the function the incremental sync calls wi
 just written — and does not open a socket. That new mail arrives at all and reaches that path is
 what the Dovecot gate already covers; duplicating it here would test the rig rather than the
 rules.
+
+---
+
+## 2026-08-28 — Phase 9: search, and the Phase 5 soak verdict
+
+### The twelve-hour soak passed
+
+The last outstanding Phase 5 gate item, finally measured over a full 12.03 hours:
+
+| measure                            | result                       | budget       |
+| ---------------------------------- | ---------------------------- | ------------ |
+| memory, 2nd quarter → last         | 29.8MB → 36.1MB (**+21.2%**) | under 25%    |
+| peak connections                   | 1                            | 3            |
+| samples over the connection budget | 0 of 144                     | under 15     |
+| deliveries picked up               | **143 of 144**               | at least 108 |
+
+The liveness number is the one that matters, and it is the one an earlier run failed silently:
+a dead client uses no memory and opens no connections, so it passes the other two. This client
+was awake for twelve hours and missed one delivery — the last, which landed after the final
+sample.
+
+**The +21.2% is not a leak but is not nothing.** The shape says so: flat for 200 minutes, a
+single 7MB step, then drift inside a ±1MB band. There is no explicit `cache_size` PRAGMA, so
+each pooled connection takes SQLite's default 2MB page cache, and four readers plus a writer is
+a bounded ~10MB that fills as the pool warms. The ceiling is real but accidental — the product
+of a default and however many connections happen to exist — and making it deliberate is worth
+doing before it is discovered on a smaller machine.
+
+### Added — search
+
+- **A query language and its parser.** `from:`, `to:`, `subject:`, `mailbox:`, `has:attachment`,
+  `is:`, `before:`, `after:`, `larger:`, `smaller:`, free text between. Nothing typed reaches
+  FTS5 as syntax: every term is quoted, so `NEAR`, `AND`, `*` and `^` are matched as words. An
+  unrecognised field becomes free text rather than an error, because `re: figures` and
+  `http://example.com` are things people type.
+
+- **Natural-language dates**, with one rule that keeps them from being a nuisance: **a bare
+  month name is never a date.** `March` is a person, `May` is a person, and a search box that
+  turned a colleague's name into a date range would break searches with no error and nothing on
+  screen to explain it. A phrase needs an unambiguous marker — `in March`, `last week`,
+  `yesterday`. `after:march` is accepted, because there the user has already said they mean a
+  date.
+
+- **Top Hits ranking**: BM25 × recency × VIP × thread participation, multiplied rather than
+  added so none dominates. BM25 arrives _negative_ from SQLite and more negative is better; used
+  directly as a multiplier it would invert the ranking into something that looks like a
+  plausible order rather than an obviously broken one.
+
+- **Suggestions**, grouped with headers, arrow-navigable. Debounced — not for load, since the
+  core answers in under a millisecond, but because a list that changes on every keystroke moves
+  under the pointer and a click aimed at one row lands on another.
+
+- **The scope bar, match highlighting, save-as-smart-mailbox and search history.** Highlighting
+  returns _segments_, never markup: a subject is hostile input, and the moment highlighting
+  produces HTML it becomes an injection with a friendly name. A saved search is stored as a
+  predicate rather than as its text, so a later parser change cannot quietly alter what a
+  year-old smart mailbox matches.
+
+- **Attachment text extraction** for PDF, DOCX and TXT. This is the one place in the app that
+  _parses_ an attachment, by third-party code, on the user's machine, from a file a stranger
+  sent — so: a size ceiling before anything is parsed, a page ceiling, every parse wrapped in
+  `catch_unwind`, and only the one known entry read from a DOCX zip. No `.doc` or `.xls`: old
+  Office formats are a long list of parser CVEs and are not what people search for.
+
+### The exit gate
+
+| measure                           | result                  | budget      |
+| --------------------------------- | ----------------------- | ----------- |
+| worst search at 101,282 messages  | **104–110ms**           | under 120ms |
+| worst suggestion                  | **under 1ms**           | under 30ms  |
+| five queries ranked and explained | printed by `searchgate` | —           |
+
+Getting there took three findings, all measured rather than guessed:
+
+1. **`strftime('%s','now')` is non-deterministic**, so SQLite may not lift it out of the loop and
+   evaluates it once per row. It was in the snooze filter of every list and search query added
+   this week. Now bound as a parameter.
+
+2. **`ORDER BY bm25()` cannot be answered from an index.** "the" matches 98,565 of 101,282
+   messages, so ranking meant 98k joins and a 98k-row temporary b-tree: 160–220ms. Candidates
+   are now selected by **date** and ranked afterwards. That is consistent with the ranking rather
+   than a compromise against it — a 30-day half-life means only recent candidates can
+   realistically win. The cost is stated in the code: a very old message that is a far better
+   match than anything recent can fall outside the window.
+
+3. **The `mailbox` join ran on every search** and is needed only by `mailbox:` queries. It runs
+   once per matching row _before_ any limit, so on a common term it was a hundred thousand index
+   lookups for a table nothing read. Removing it took the worst case from 115–118ms to
+   104–110ms.
+
+An attempt to invert the join — driving from the date index and probing FTS as a subquery — was
+abandoned after it failed to finish in ten minutes. Recorded because it is the obvious idea and
+it is much worse.
+
+### Incidents
+
+- **A wrong column name hidden by a swallowed error.** The person-suggestion query selected
+  `address`; the column is `addr`. The `prepare` was wrapped in `if let Ok`, so the failure was
+  discarded, suggestions silently returned nothing, and every test passed. Same shape as the
+  junk gate that "passed" while catching nothing. The `?` is back and there is now a test that
+  would have caught it — which the first version simply did not have.
+
+- **The first performance verdict was measured against a busy machine.** The 12-hour soak was
+  running throughout, and readings moved 115ms → 134ms → 110ms with no code change between two
+  of those. Timings taken while something else is saturating the disk are not a verdict, and the
+  numbers above were taken after the soak finished.

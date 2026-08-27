@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ArrowDownUp, ListFilter, MoreHorizontal, PanelLeft } from 'lucide-react'
 
@@ -40,6 +48,16 @@ const PREFETCH_ROWS = 30
 export interface MessageListProps {
   /** True when the sidebar pane is not on screen, so the toggle moves here. */
   showSidebarToggle?: boolean
+  /**
+   * Search results to show instead of the mailbox.
+   *
+   * `undefined` means no search is running. An *empty array* means one is and found nothing —
+   * a distinction the list has to draw, because "no messages here" and "nothing matched" are
+   * different things to be told.
+   */
+  searchRows?: Row[] | undefined
+  /** Rendered above the rows while a search is running. */
+  scopeBar?: ReactNode
 }
 
 /**
@@ -60,7 +78,7 @@ function flattenPages(data: { pages: (Row[] | { items: Row[] })[] } | undefined)
   return (data?.pages ?? []).flatMap((page) => (Array.isArray(page) ? page : page.items))
 }
 
-export function MessageList({ showSidebarToggle = false }: MessageListProps) {
+export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }: MessageListProps) {
   const selection = useMailStore((state) => state.selection)
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
   const selectMessage = useMailStore((state) => state.selectMessage)
@@ -103,14 +121,16 @@ export function MessageList({ showSidebarToggle = false }: MessageListProps) {
 
   const now = useMemo(storeNow, [])
 
-  const rows = useMemo(
-    () =>
-      sortRows(flattenPages(data), {
-        field: sortField,
-        ascending: sortAscending,
-      }),
-    [data, sortField, sortAscending],
-  )
+  const rows = useMemo(() => {
+    // Search results arrive already ranked, and re-sorting them by date would throw the
+    // ranking away — which is the whole reason a search is not just a filtered list.
+    if (searchRows !== undefined) return searchRows
+
+    return sortRows(flattenPages(data), {
+      field: sortField,
+      ascending: sortAscending,
+    })
+  }, [searchRows, data, sortField, sortAscending])
 
   const order = useMemo(() => rows.map((row) => row.id), [rows])
   const selected = useMemo(() => new Set(selectedMessageIds), [selectedMessageIds])
@@ -335,6 +355,8 @@ export function MessageList({ showSidebarToggle = false }: MessageListProps) {
           </Menu>
         </div>
       </header>
+
+      {scopeBar}
 
       <div className={styles.listWrap}>
         {stickyLabel !== null && (

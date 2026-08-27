@@ -105,6 +105,9 @@ lettre = { version = "0.11", default-features = false, features = [
 # "On 27 Aug 2026, at 09:34, Ada <ada@x> wrote:", which needs a local-time conversion and a
 # month name — the two parts of date handling that are genuinely not worth writing by hand.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+pdf-extract = "0.12.0"
+zip = "5.0.1"
+lopdf = "0.36.0"
 
 [profile.dev]
 incremental = true

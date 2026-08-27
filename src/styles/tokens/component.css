@@ -113,6 +113,13 @@
 
   /* ---------- mailbox picker ---------- */
   --picker-max-height: 320px;
+
+  /* ---------- search dropdown ---------- */
+  --scope-bar-height: 36px;
+  --scope-tab-height: 24px;
+  --scope-divider-height: 16px;
+  --search-dropdown-min-width: 280px;
+  --search-dropdown-max-height: 360px;
   --chip-height: 20px;
   --chip-radius: var(--r-pill);
   --chip-pad-x: var(--sp-3);

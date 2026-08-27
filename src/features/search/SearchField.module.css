@@ -1,0 +1,73 @@
+/* The search field and its dropdown. docs/02 §6.6. */
+
+.wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.field {
+  width: var(--search-width);
+}
+
+/* Anchored to the field rather than portalled: it is always directly below, never flips, and
+ * a portal would put it outside the toolbar's stacking context for no gain. */
+.dropdown {
+  position: absolute;
+  top: calc(100% + var(--sp-2));
+  right: 0;
+  z-index: 1;
+  min-width: var(--search-dropdown-min-width);
+  max-height: var(--search-dropdown-max-height);
+  padding: var(--menu-pad);
+  margin: 0;
+  overflow-y: auto;
+  list-style: none;
+
+  /* The same material as a menu, from the same place. A dropdown that looked *nearly* like
+   * the menus would be the one surface in the app that felt slightly wrong. */
+  border-radius: var(--menu-radius);
+  composes: materialMenu from global;
+}
+
+.group {
+  display: block;
+  padding: var(--sp-2) var(--sp-3) var(--sp-1);
+  color: var(--label-3);
+  font-size: var(--t-caption-size);
+  letter-spacing: var(--t-caption-tracking);
+}
+
+.row {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: baseline;
+  width: 100%;
+  height: var(--menu-item-height);
+  padding: 0 var(--sp-3);
+  color: var(--label-1);
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--menu-item-radius);
+}
+
+.label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail {
+  flex: 0 0 auto;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+}
+
+/* Keyboard and pointer share one highlight, so the row Enter will take is always the row that
+ * looks chosen. Two separate affordances is how people press Enter while looking elsewhere. */
+.highlighted {
+  background: var(--fill-selected-inactive);
+}

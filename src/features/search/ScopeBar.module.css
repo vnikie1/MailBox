@@ -1,0 +1,81 @@
+/* The scope bar above search results. docs/01 §7. */
+
+.bar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-3);
+  align-items: center;
+  height: var(--scope-bar-height);
+  padding: 0 var(--sp-5);
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+.group {
+  display: flex;
+  gap: var(--sp-1);
+  align-items: center;
+}
+
+.tab {
+  height: var(--scope-tab-height);
+  padding: 0 var(--sp-4);
+  color: var(--label-2);
+  font: inherit;
+  font-size: var(--t-subhead-size);
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  border-radius: var(--r-pill);
+}
+
+.tab:hover {
+  background: var(--fill-hover);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The selected tab is the only tinted thing in the bar, so it reads at a glance without
+ * anything else competing. docs/02 §6 — colour carries meaning, it is not decoration. */
+.active {
+  color: var(--label-1);
+  background: var(--fill-selected-inactive);
+}
+
+.divider {
+  width: var(--hairline);
+  height: var(--scope-divider-height);
+  background: var(--separator);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.count {
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  white-space: nowrap;
+}
+
+.save {
+  padding: 0 var(--sp-3);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--t-subhead-size);
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  border-radius: var(--r-sm);
+}
+
+.save:disabled {
+  color: var(--label-3);
+}
+
+.save:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
