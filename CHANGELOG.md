@@ -2009,6 +2009,42 @@ about what the same saved search means.
   the compiler or a test, but the pattern is now unambiguous: multi-line source with backticks or
   quotes goes through the file-writing tool, not through the shell.
 
+### Incidents — the app would not start, and it was not our code
+
+- **A `tokio::spawn` in Tauri's `setup` hook.** `Sender::start` panicked with "there is no
+  reactor running" on the first launch after Phase 7 — `setup` does not run inside a tokio
+  runtime, and the bare form requires one. Every other spawn in the app already used
+  `tauri::async_runtime::spawn`; that one and the new upkeep loop were the only outliers.
+
+  It went unnoticed because **the whole of Phase 7 was written, verified and committed without
+  the app once being launched.** Nothing in a test suite exercises `setup`. Both loops now
+  return their future instead of spawning it, so the caller spawns on a runtime it actually has.
+
+- **The webview then failed to be created at all**, with
+  `0x80070057 The parameter is incorrect`, before `setup` ran. Recorded here in full because
+  the diagnosis matters more than the outcome: **it is not this codebase.** Checking out
+  `78c2b5f` — the last commit known to have launched successfully, at 22:13 the previous night
+  — reproduced the failure exactly. Everything after that commit is therefore ruled out.
+
+  Ruled out individually, each by running the app: `transparent: true` (with a forced rebuild,
+  because the first attempt at this test silently reused the old binary and proved nothing), the
+  saved `.window-state.json`, the entire `EBWebView` profile, the Phase 7 capability changes,
+  disk space, WebView2 Runtime version and install date, Group Policy, RivaTuner, and stale
+  processes holding the profile. WebView2 is working normally for other applications on the
+  machine at the same time — Windows Shell and Google Drive both have live instances.
+
+  The machine has not rebooted since before the last successful launch, so whatever changed
+  changed within this uptime. What is visible: 313 processes, `dwm.exe` holding **20,910**
+  handles, and RustDesk holding 18,067. Both are consistent with desktop-heap or USER-object
+  pressure, which would explain a window that cannot be created now but could be four hours ago,
+  and would explain why applications that already own their windows are unaffected. That is a
+  hypothesis, not a finding — it is stated as one because the honest record of a bug you did not
+  close is what it was narrowed to, not a guess dressed as an answer.
+
+  **Phase 8 is therefore verified by its tests and its gates, and unverified by running.** Given
+  how much of this project's real bug list came from log lines rather than green suites, that
+  distinction is worth stating plainly rather than leaving to be discovered.
+
 ### Notes — what Phase 8 does not yet have
 
 - **The rules editor is not reachable from a menu yet.** `RulesEditor` is built and tested but
