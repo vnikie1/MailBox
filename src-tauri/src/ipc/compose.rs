@@ -112,6 +112,115 @@ async fn hold_seconds(db: &Db) -> i64 {
         .clamp(0, 60)
 }
 
+/// Passes a message on unaltered. docs/01 §6, docs/06 Phase 7.
+///
+/// Not a forward, and the difference is the whole feature: the recipient gets the original,
+/// from its original sender, so their reply goes back to whoever wrote it. See
+/// `mail::outgoing::redirect` for why that requires the cached raw source rather than a
+/// rebuild from the stored HTML.
+#[tauri::command]
+pub async fn compose_redirect(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    sender: State<'_, Sender>,
+    message_id: i64,
+    to: Vec<ComposeAddress>,
+    cc: Vec<ComposeAddress>,
+    bcc: Vec<ComposeAddress>,
+) -> Result<i64, AppError> {
+    let (account_id, subject) = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT account_id, COALESCE(subject, '') FROM message WHERE id = ?1",
+                    rusqlite::params![message_id],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .ok())
+        })
+        .await?
+        .ok_or_else(|| AppError {
+            code: "no-message".into(),
+            message: "That message is no longer in the mailbox.".into(),
+        })?;
+
+    let account = db
+        .read(move |conn| crate::accounts::store::get(conn, account_id))
+        .await?
+        .ok_or_else(|| AppError {
+            code: "no-account".into(),
+            message: "That account no longer exists.".into(),
+        })?;
+
+    let root = crate::db::default_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+
+    // The original bytes, or nothing. A redirect that quietly fell back to rebuilding the
+    // message would send the recipient our reconstruction of it under someone else's name.
+    let path = crate::sync::bodies::cache_path(&root, account_id, message_id);
+    let original = std::fs::read(&path).map_err(|_| AppError {
+        code: "not-cached".into(),
+        message: "This message has not been downloaded in full yet, so it cannot be \
+                  redirected. Open it once and try again."
+            .into(),
+    })?;
+
+    let request = crate::mail::outgoing::Redirect {
+        original: &original,
+        from: Address {
+            name: Some(account.display_name.clone()),
+            email: account.email.clone(),
+        },
+        to: to.iter().map(Address::from).collect(),
+        cc: cc.iter().map(Address::from).collect(),
+        bcc: bcc.iter().map(Address::from).collect(),
+        date: rfc2822_now(),
+        resent_message_id: None,
+    };
+
+    let built = crate::mail::outgoing::redirect(&request).map_err(|error| AppError {
+        code: "build-failed".into(),
+        message: error.to_string(),
+    })?;
+
+    // Bcc included, exactly as an ordinary send does: the blind addresses exist nowhere in the
+    // message and reach the transport only through this list.
+    let recipients: Vec<String> = to
+        .iter()
+        .chain(cc.iter())
+        .chain(bcc.iter())
+        .map(|address| address.email.trim().to_string())
+        .filter(|address| !address.is_empty())
+        .collect();
+
+    let id = outbox::enqueue(
+        db.inner(),
+        &root,
+        account_id,
+        &built,
+        &subject,
+        &recipients.join(","),
+        hold_seconds(db.inner()).await,
+    )
+    .await?;
+
+    let _ = tauri::Emitter::emit(&app, "outbox:changed", ());
+    sender.poke();
+
+    Ok(id)
+}
+
+/// The current moment as RFC 5322 asks for it.
+///
+/// Local offset rather than UTC. `Resent-Date` records when *this* person passed the message
+/// on, and a trail of hops that all claim to be in London tells the recipient less than one
+/// that says where each hop actually was.
+fn rfc2822_now() -> String {
+    chrono::Local::now().to_rfc2822()
+}
+
 /// The Undo Send delay, for the settings sheet. docs/01 §6.
 #[tauri::command]
 pub async fn compose_undo_seconds(db: State<'_, Db>) -> Result<i64, AppError> {

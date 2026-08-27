@@ -70,6 +70,7 @@ pub fn run() {
             ipc::compose::signature_set,
             ipc::compose::compose_blank,
             ipc::compose::compose_save_draft,
+            ipc::compose::compose_redirect,
             ipc::compose::compose_undo_seconds,
             ipc::compose::compose_set_undo_seconds,
             ipc::organise::smart_list,

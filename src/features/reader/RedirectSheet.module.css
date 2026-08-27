@@ -1,0 +1,8 @@
+/* The Redirect sheet. docs/01 §6. */
+
+.note {
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  line-height: var(--t-footnote-leading);
+}

@@ -2062,3 +2062,71 @@ about what the same saved search means.
 - **The junk gate needs a corpus downloaded separately.** It is not vendored — 5MB of third-party
   mail in the repo would be worse — so `junkgate` prints where to get it and refuses to report a
   pass or a fail without it.
+
+---
+
+## 2026-08-27 (later still) — Phase 7: closing the gaps
+
+Phase 7 was reported feature-complete and was not. Checking it against docs/06's build list
+rather than against memory found seven things missing, and this closes all seven.
+
+### Added
+
+- **Redirect.** Passes a message on unaltered, so a reply goes back to whoever wrote it rather
+  than to the person who passed it on. That distinction only survives if the original bytes do,
+  so it works from the cached raw source or it refuses outright: rebuilding from the stored HTML
+  would hand the recipient our reconstruction of somebody else's message — different encoding,
+  different boundaries, signatures broken — with no way for them to tell. The `Resent-` block is
+  **prepended**, which is what RFC 5322 §3.6.6 asks for rather than a shortcut, and
+  `Resent-Bcc` is never written for the same reason `Bcc` never is.
+
+  Display names in those headers are escaped. An unescaped quote closes the quoting early and
+  everything after it reads as another address — which for a redirect means silently sending
+  someone's mail to an address they never named. There is a test for exactly that string.
+
+- **Inline images**, as `multipart/related` nested _inside_ `multipart/mixed`. The order is not
+  interchangeable: related on the outside makes ordinary attachments part of the body's resource
+  set, which Outlook renders as neither an attachment nor an image. Angle brackets on the
+  `Content-ID` header and none in the `cid:` URL — RFC 2392 is explicit about the asymmetry and
+  clients that get it wrong show nothing at all.
+
+- **Draft conflict detection.** Before appending, the server is asked which copies of this draft
+  it already holds; anything that is not the copy being replaced was written by another device.
+  Both copies are then kept and the window says so. Resolving by picking a winner automatically
+  is the one thing that must not happen here — the losing copy is work somebody did, and only
+  they can say which version matters. The check runs _before_ the append, or our own new copy
+  would be in the answer and every save would look like a conflict.
+
+- **Four more format-bar controls** — colour, size, alignment and separator — bringing it to the
+  eleven docs/06 names. Colours are a fixed list rather than a picker: a picker invites a pale
+  yellow the sender sees against the composer's background and never against the recipient's.
+  Sizes are absolute points, because `em` and `%` compound through nested quoting and a reply to
+  a reply arrives at four points or forty. Alignment is a toggle, since "left" is not "unset" —
+  an explicit `text-align` overrides the reading direction of anyone right-to-left.
+
+- **Recipient chips drag between To, Cc and Bcc.** The payload carries a group-scoped MIME type,
+  so a file dragged in from another window never lights up a recipient field as a target. The
+  source chip is removed on `dragend` and only when `dropEffect` reports the drop was accepted:
+  a drag abandoned over the desktop leaves the chip where it was.
+
+- **Send Later gains Custom.** Date and time are parsed as _local_: `new Date('2026-08-28')` is
+  midnight UTC and would schedule a message for the previous evening everywhere west of London.
+  A moment already past is refused rather than sent immediately, which is the one outcome the
+  user cannot undo.
+
+- **The Undo Send delay is settable** — 10/20/30/off, in Settings. The core had read
+  `compose.undoSeconds` since Phase 7; nothing could write it, so the choice the spec describes
+  did not exist.
+
+### Notes
+
+- **The exit gate still has not been run.** It needs replies rendered and threaded correctly in
+  Gmail, Outlook and Apple Mail, with Outlook Windows named as the strictest. Gmail can be
+  checked with the account already configured; the other two need accounts that do not exist.
+  Phase 7 is now complete against its build list and still unproven against its gate, and those
+  are different things.
+
+- **`clippy::items_after_test_module` fired again**, from appending a function to the end of a
+  file with `cat >>`. The changelog already records this exact trap from Phase 7's first pass.
+  Recording it a second time because the lesson evidently did not take: appending to a Rust file
+  puts the code after the test module, every time.

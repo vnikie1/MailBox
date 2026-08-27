@@ -1,5 +1,14 @@
 import { useMemo, useState } from 'react'
-import { ChevronDown, Forward, Mail, Paperclip, Reply, ReplyAll, ShieldAlert } from 'lucide-react'
+import {
+  ChevronDown,
+  CornerUpRight,
+  Forward,
+  Mail,
+  Paperclip,
+  Reply,
+  ReplyAll,
+  ShieldAlert,
+} from 'lucide-react'
 
 import type { AttachmentRow } from '@/lib/generated/AttachmentRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
@@ -11,6 +20,8 @@ import { AttachmentPreview } from './AttachmentPreview'
 import { MessageBody } from './MessageBody'
 import { useThreadBodies } from './useBodyPrefetch'
 import { composeOpen, storeNow } from '@/lib/ipc'
+
+import { RedirectSheet } from './RedirectSheet'
 import { useMailStore } from '@/store/mail'
 import { Avatar, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
 import { Toolbar } from '@/features/toolbar/Toolbar'
@@ -58,6 +69,7 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
   // Per message rather than per thread: opening an attachment on one message in a
   // conversation should not close one already open on another.
   const [previewing, setPreviewing] = useState<AttachmentRow | null>(null)
+  const [redirecting, setRedirecting] = useState(false)
   const sender = message.fromName ?? message.fromAddr ?? 'Unknown sender'
 
   return (
@@ -173,6 +185,20 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
                   />
                 }
               />
+              <Tooltip
+                content="Redirect"
+                trigger={
+                  <IconButton
+                    icon={CornerUpRight}
+                    label="Redirect"
+                    size="sm"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      setRedirecting(true)
+                    }}
+                  />
+                }
+              />
             </TooltipGroup>
           </span>
         </div>
@@ -238,6 +264,13 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
           )}
         </>
       )}
+
+      <RedirectSheet
+        open={redirecting}
+        onOpenChange={setRedirecting}
+        messageId={message.id}
+        subject={message.subject ?? ''}
+      />
     </article>
   )
 }

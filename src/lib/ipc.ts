@@ -89,6 +89,7 @@ export async function onWindowFocusChanged(
 /* -------------------------------------------------------------------------- mail */
 
 import type { AccountRow } from './generated/AccountRow'
+import type { ComposeAddress } from './generated/ComposeAddress'
 import type { FlagPatch } from './generated/FlagPatch'
 import type { ListQuery } from './generated/ListQuery'
 import type { MailboxRow } from './generated/MailboxRow'
@@ -749,6 +750,21 @@ export async function composeDiscardDraft(id: number): Promise<void> {
 export async function contactsSuggest(prefix: string, limit?: number): Promise<Contact[]> {
   if (!runningInTauri) return []
   return invoke<Contact[]>('contacts_suggest', { prefix, limit: limit ?? null })
+}
+
+/**
+ * Passes a message on unaltered, still from its original sender. docs/01 §6.
+ *
+ * Separate from `sendMessage` because it is not a send: nothing is composed, and the bytes
+ * that go out are the ones that arrived. The core refuses if the original is not cached.
+ */
+export async function redirectMessage(
+  messageId: number,
+  to: ComposeAddress[],
+  cc: ComposeAddress[],
+  bcc: ComposeAddress[],
+): Promise<number> {
+  return invoke<number>('compose_redirect', { messageId, to, cc, bcc })
 }
 
 /**
