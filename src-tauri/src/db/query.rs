@@ -153,10 +153,16 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
     // column nothing reads: the message stays exactly where it was, in the list the user asked
     // not to see it in.
     //
-    // The comparison is against SQLite's own clock rather than a bound timestamp so that a list
-    // held open across the moment a reminder fires shows it on the next page rather than on the
-    // next restart.
-    sql.push_str(" AND (snooze_until IS NULL OR snooze_until <= strftime('%s', 'now'))");
+    // The moment is **bound, not called**. `strftime('%s','now')` is non-deterministic, so
+    // SQLite may not lift it out of the loop and evaluates it per row — measurably expensive
+    // over a large mailbox, and it was costing about half the time of a search before this was
+    // changed. A list held open across the moment a reminder fires picks it up on its next
+    // fetch, which is what invalidation already triggers.
+    params.push(Box::new(now_seconds()));
+    sql.push_str(&format!(
+        " AND (snooze_until IS NULL OR snooze_until <= ?{})",
+        params.len()
+    ));
 
     if let Some(cursor) = query.cursor {
         let date_index = params.len() + 1;
@@ -596,6 +602,17 @@ fn qualified(columns: &str) -> String {
         .join(", ")
 }
 
+/// The current moment, for the snooze filter.
+///
+/// Read in Rust and bound as a parameter rather than left to SQLite's `strftime('%s','now')`,
+/// which is non-deterministic and so may be evaluated once per row.
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// The messages a smart-mailbox predicate matches.
 ///
 /// Compiled to SQL rather than evaluated row by row in Rust: a smart mailbox over 50,000
@@ -619,13 +636,14 @@ pub fn messages_matching(
            FROM message
            JOIN mailbox ON mailbox.id = message.mailbox_id
           WHERE ({})
-            AND (message.snooze_until IS NULL OR message.snooze_until <= strftime('%s', 'now'))
+            AND (message.snooze_until IS NULL OR message.snooze_until <= ?{})
           ORDER BY message.date_received DESC, message.id DESC
           LIMIT ?{} OFFSET ?{}",
         qualified(MESSAGE_ROW_COLUMNS),
         compiled.sql,
         compiled.params.len() + 1,
         compiled.params.len() + 2,
+        compiled.params.len() + 3,
     );
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = compiled
@@ -634,6 +652,8 @@ pub fn messages_matching(
         .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>)
         .collect();
 
+    // Bound rather than called per row; see `messages_page`.
+    params.push(Box::new(now_seconds()));
     params.push(Box::new(i64::from(limit)));
     params.push(Box::new(i64::from(offset)));
 

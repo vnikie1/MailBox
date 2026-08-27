@@ -8,6 +8,7 @@ pub mod accounts;
 pub mod db;
 pub mod mail;
 pub mod rules;
+pub mod search;
 pub mod sync;
 pub mod undo;
 
