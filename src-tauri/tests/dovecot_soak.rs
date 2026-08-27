@@ -116,14 +116,19 @@ fn server_connections() -> usize {
 /// Delivers a message, so IDLE has something to react to.
 ///
 /// A soak against a mailbox nothing ever touches measures an idle socket, not a mail client.
-fn deliver(number: u64) {
+///
+/// The filename carries a per-run stamp. Without one, a second run reuses `soak1`, `soak2` and
+/// so on, and each *overwrites* the message the previous run delivered rather than adding a new
+/// one — so the mailbox count stays flat and the liveness check reports a dead client when the
+/// client is fine. That is exactly what the first run of this harness did.
+fn deliver(run: u64, number: u64) {
     let script = format!(
         "export PATH=/usr/local/bin:$PATH; \
-         docker exec -i halcyon-dovecot sh -c 'cat > /srv/mail/{TEST_EMAIL}/Maildir/new/soak{number}.halcyon' <<'EOF'\n\
-         Message-ID: <soak-{number}@halcyon.test>\n\
+         docker exec -i halcyon-dovecot sh -c 'cat > /srv/mail/{TEST_EMAIL}/Maildir/new/soak{run}-{number}.halcyon' <<'EOF'\n\
+         Message-ID: <soak-{run}-{number}@halcyon.test>\n\
          From: Soak <soak@example.test>\n\
          To: Tester <{TEST_EMAIL}>\n\
-         Subject: Soak message {number}\n\
+         Subject: Soak message {run}-{number}\n\
          Date: Mon, 01 Jan 2029 00:00:00 +0000\n\
          Content-Type: text/plain; charset=utf-8\n\
          \n\
@@ -239,6 +244,12 @@ async fn gate_5_twelve_hour_soak() {
 
     let started = Instant::now();
     let mut samples: Vec<Sample> = Vec::new();
+    // A stamp unique to this run, so deliveries do not overwrite a previous run's.
+    let run = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     let mut delivered = 0u64;
     let mut over_budget = 0usize;
     let mut peak_connections = 0usize;
@@ -249,7 +260,7 @@ async fn gate_5_twelve_hour_soak() {
         // Deliver every other sample, so the watcher has real work and the mailbox grows the
         // way a real one does.
         delivered += 1;
-        deliver(delivered);
+        deliver(run, delivered);
 
         let connections = server_connections();
         peak_connections = peak_connections.max(connections);
