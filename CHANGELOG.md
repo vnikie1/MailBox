@@ -2137,3 +2137,70 @@ rather than against memory found seven things missing, and this closes all seven
   file with `cat >>`. The changelog already records this exact trap from Phase 7's first pass.
   Recording it a second time because the lesson evidently did not take: appending to a Rust file
   puts the code after the test module, every time.
+
+---
+
+## 2026-08-27 (evening) — Phase 8: closing the gaps
+
+Same exercise as Phase 7 an hour earlier: checked against docs/06's build list rather than
+against memory, and found the engines were largely built with nothing able to invoke them.
+
+### Added
+
+- **Smart mailboxes work when clicked.** The sidebar has carried predicates since this morning
+  and selecting one did nothing: the selection had no way to hold a predicate and the list only
+  knew how to query by mailbox id. The selection now carries one or the other — never both,
+  which is the same rule `mailboxIds` already had for the same reason — and the list runs one
+  of two queries. The saved-search query pages by offset rather than by keyset cursor: an
+  arbitrary predicate has no cheap ordering to seek into, and the result sets are small enough
+  that it does not matter. The folder list keeps its cursor precisely because it is the one
+  paging through fifty thousand rows.
+
+- **A smart mailbox editor**, sharing `PredicateEditor` with the rules editor. What it adds
+  over that editor is what it _lacks_: no actions. A smart mailbox is a question about the
+  mailbox, not something that happens to mail.
+
+- **A VIP mailbox**, as a saved search over the VIP addresses rather than a folder, so nothing
+  is moved and a VIP's mail still appears in the Inbox where they expect it. It matches on
+  `from` rather than `anyText`, or a newsletter quoting a VIP's address would land in the row
+  meant for mail they actually sent. The row is absent until there is a VIP: an empty row that
+  can never fill reads as a broken feature rather than an unused one.
+
+- **The junk banner**, which says two different things depending on who decided. The filter's
+  guess invites a correction and carries its confidence; the user's own decision is stated back
+  without argument. A banner that debated somebody's own judgement would be the fastest way to
+  make them turn the filter off. It sits _above_ the body — a warning underneath a phishing
+  attempt has already lost.
+
+- **Training mode**: score everything, file nothing. The first weeks of a Bayesian filter are
+  its worst, and the damage it can do then — a real message quietly moved out of the Inbox — is
+  exactly what makes someone disable a junk filter permanently.
+
+- **Ctrl+Shift+M**, a mailbox picker with typeahead. Ranked so a prefix match beats a contained
+  one: otherwise typing "arch" puts "Research Notes" above "Archive", the top result changes
+  under the user between keystrokes, and Enter sends mail somewhere they never looked at. Enter
+  on an empty result list does nothing rather than falling through to the first mailbox.
+
+- **Alt+Ctrl+L**, running the rules over the selection, and the Rules and Smart Mailbox editors
+  reachable from Settings. Both shortcuts are registered on the window rather than on a focused
+  element, because both act on the _selection_ and the selection outlives focus moving between
+  panes; both are ignored while the caret is in a text field.
+
+### Notes
+
+- **Drag-and-drop move to the sidebar already existed.** Checked before building it. Recording
+  it because the check took thirty seconds and would have cost an afternoon.
+
+- **The soak is showing memory growth that is on course to fail its own threshold.** At 425 of
+  720 minutes the working set has gone 22.7MB → 35.1MB, but not as a leak's straight line: flat
+  for 200 minutes, a single 7MB step between minute 240 and 245, then a slow climb inside a
+  ±1MB band. The gate compares the last quarter against the second and fails above 25%; on the
+  current trend it lands near 30%.
+
+  The likely cause is not a leak. There is no explicit `cache_size` PRAGMA, so each pooled
+  connection takes SQLite's default 2MB page cache, and with a reader pool of four plus the
+  writer that is a bounded ~10MB that fills as the pool warms — which is a step, not a slope.
+  **Not changed while the soak is running**, because doing so would invalidate the run that is
+  measuring it. The verdict is due around 22:15; the decision after it is whether to make that
+  ceiling explicit rather than an accident of a default times however many connections happen
+  to exist.
