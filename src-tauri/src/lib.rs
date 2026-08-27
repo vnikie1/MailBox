@@ -67,6 +67,8 @@ pub fn run() {
             ipc::compose::signature_get,
             ipc::compose::signature_set,
             ipc::compose::compose_blank,
+            ipc::compose::compose_save_draft,
+            ipc::compose::compose_discard_draft,
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,

@@ -17,7 +17,10 @@ import { Button, IconButton, TextField, TokenField, type Token } from '@/ui'
 
 import { formatFileSize as formatSize } from '@/lib/date'
 
+import type { OutgoingMessage } from '@/lib/generated/OutgoingMessage'
+
 import { Editor } from './Editor'
+import { useAutosave } from './useAutosave'
 import styles from './ComposeWindow.module.css'
 
 /**
@@ -163,6 +166,26 @@ export function ComposeWindow() {
     }
   }, [replyTo, replyKind])
 
+  /** The message as it stands. Used by both autosave and Send, so they cannot drift. */
+  const buildMessage = useCallback((): OutgoingMessage | null => {
+    if (accountId === null) return null
+
+    return {
+      accountId,
+      to: to.map(toAddress),
+      cc: cc.map(toAddress),
+      bcc: bcc.map(toAddress),
+      subject,
+      html: body.current.html,
+      text: body.current.text,
+      inReplyTo: threading.inReplyTo,
+      references: threading.references,
+      attachments: attachments.map((file) => file.path),
+    }
+  }, [accountId, to, cc, bcc, subject, threading, attachments])
+
+  const autosave = useAutosave(buildMessage)
+
   const onBodyChange = useCallback((html: string, text: string) => {
     body.current = { html, text }
   }, [])
@@ -180,19 +203,19 @@ export function ComposeWindow() {
     setSending(true)
     setProblem(null)
 
+    const message = buildMessage()
+    if (message === null) {
+      setSending(false)
+      setProblem('No account is selected to send from.')
+      return
+    }
+
     try {
-      await composeSend({
-        accountId,
-        to: to.map(toAddress),
-        cc: cc.map(toAddress),
-        bcc: bcc.map(toAddress),
-        subject,
-        html: body.current.html,
-        text: body.current.text,
-        inReplyTo: threading.inReplyTo,
-        references: threading.references,
-        attachments: attachments.map((file) => file.path),
-      })
+      // Before the send, so a draft that was never autosaved does not reappear afterwards as
+      // an unsent copy of a message that has gone.
+      autosave.abandon()
+
+      await composeSend(message)
 
       // The core has the message on disk and in the outbox before this resolves, so closing
       // now cannot lose it — and for the length of the undo hold it has not been sent either.
@@ -205,7 +228,7 @@ export function ComposeWindow() {
           : 'The message could not be queued.'
       setProblem(message)
     }
-  }, [accountId, to, cc, bcc, subject, threading, attachments])
+  }, [accountId, to, cc, bcc, buildMessage, autosave])
 
   return (
     <div className={styles.window}>

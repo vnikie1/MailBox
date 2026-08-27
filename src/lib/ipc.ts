@@ -510,6 +510,7 @@ import type { OutgoingMessage } from './generated/OutgoingMessage'
 import type { PickedFile } from './generated/PickedFile'
 import type { OutboxRow } from './generated/OutboxRow'
 import type { ReplyDraft } from './generated/ReplyDraft'
+import type { DraftState } from './generated/DraftState'
 import type { Signature } from './generated/Signature'
 
 /**
@@ -714,4 +715,25 @@ export async function signatureSet(
 ): Promise<void> {
   if (!runningInTauri) return
   await invoke('signature_set', { accountId, html, placement })
+}
+
+/**
+ * Saves a draft. Resolves once it is stored **locally** — the server copy is queued.
+ *
+ * Autosave runs every thirty seconds while someone is typing. Waiting for a round trip would
+ * make writing a message a stream of network stalls, and a draft written with no connection
+ * would be no draft at all.
+ */
+export async function composeSaveDraft(
+  message: OutgoingMessage,
+  messageId: string | null,
+): Promise<DraftState> {
+  if (!runningInTauri) throw new Error('Drafts are only available in the app.')
+  return invoke<DraftState>('compose_save_draft', { message, messageId })
+}
+
+/** Removes a draft once its message has been sent or thrown away. */
+export async function composeDiscardDraft(id: number): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('compose_discard_draft', { id })
 }

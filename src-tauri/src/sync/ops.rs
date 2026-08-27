@@ -56,6 +56,21 @@ pub enum Op {
     /// `UID STORE \Deleted` then expunge. Only ever a *permanent* delete; moving to Trash is
     /// a `Move`, which is what the delete command does unless the user asked otherwise.
     Delete { mailbox: String, uids: Vec<u32> },
+
+    /// `APPEND` a draft to the Drafts mailbox, replacing the copy it supersedes.
+    ///
+    /// Queued rather than sent inline because it happens every thirty seconds while someone is
+    /// typing, and a save that opened a connection each time would make the act of writing a
+    /// message a stream of network activity. It also means a draft written on a train is
+    /// appended when the train leaves the tunnel, rather than lost.
+    AppendDraft {
+        mailbox: String,
+        /// Where the bytes are. Read at drain time, so a draft saved five times appends only
+        /// whatever the last save wrote.
+        eml_path: String,
+        /// The UID of the copy this replaces, when one is known.
+        replaces: Option<u32>,
+    },
 }
 
 impl Op {
@@ -64,6 +79,7 @@ impl Op {
             Op::Flag { .. } => "flag",
             Op::Move { .. } => "move",
             Op::Delete { .. } => "delete",
+            Op::AppendDraft { .. } => "append",
         }
     }
 
@@ -76,6 +92,8 @@ impl Op {
                 ..
             } => uids.is_empty() || (seen.is_none() && flagged.is_none()),
             Op::Move { uids, .. } | Op::Delete { uids, .. } => uids.is_empty(),
+            // Always worth doing: the point is the bytes, not a UID list.
+            Op::AppendDraft { .. } => false,
         }
     }
 }
@@ -368,6 +386,33 @@ async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<(),
 
             store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
             expunge(session, &set).await?;
+        }
+
+        Op::AppendDraft {
+            mailbox,
+            eml_path,
+            replaces,
+        } => {
+            // A draft that has since been sent or discarded leaves its file behind for a
+            // moment. Nothing to append is not a failure — it is a queue that has been
+            // overtaken, and treating it as an error would block everything behind it.
+            let Ok(raw) = std::fs::read(eml_path) else {
+                tracing::debug!(eml_path, "draft file is gone; nothing to append");
+                return Ok(());
+            };
+
+            // The new copy first. If the append fails the old draft is still on the server,
+            // whereas deleting first and failing to append loses whatever was typed.
+            session
+                .append(mailbox, Some("(\\Draft \\Seen)"), None, &raw)
+                .await?;
+
+            if let Some(old) = replaces {
+                session.select(mailbox).await?;
+                let set = old.to_string();
+                store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
+                expunge(session, &set).await?;
+            }
         }
     }
 

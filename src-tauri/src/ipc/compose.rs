@@ -693,3 +693,234 @@ pub async fn compose_blank(db: State<'_, Db>, account_id: i64) -> Result<ReplyDr
         signature_placement: signature.placement,
     })
 }
+
+/// A draft as it is stored and restored.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftState {
+    #[ts(type = "number")]
+    pub id: i64,
+    #[ts(type = "number")]
+    pub account_id: i64,
+    pub message_id: String,
+    pub to: Vec<ComposeAddress>,
+    pub cc: Vec<ComposeAddress>,
+    pub bcc: Vec<ComposeAddress>,
+    pub subject: String,
+    pub html: String,
+    pub text: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+}
+
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Saves a draft, locally and then to the server.
+///
+/// **Local first, and the local write is what the caller waits for.** Autosave runs every
+/// thirty seconds while someone is typing; if it waited for a round trip, writing a message
+/// would become a stream of network stalls, and a draft written with no connection would be no
+/// draft at all. The server copy goes through `pending_op`, which already knows how to carry an
+/// intent across a lost connection.
+///
+/// `message_id` is stable across saves. It is what lets the tenth save recognise the ninth as
+/// the same draft, both here and on the server.
+#[tauri::command]
+pub async fn compose_save_draft(
+    db: State<'_, Db>,
+    message: OutgoingMessage,
+    message_id: Option<String>,
+) -> Result<DraftState, AppError> {
+    let account = db
+        .read({
+            let id = message.account_id;
+            move |conn| crate::accounts::store::get(conn, id)
+        })
+        .await?
+        .ok_or_else(|| AppError {
+            code: "no-account".into(),
+            message: "That account no longer exists.".into(),
+        })?;
+
+    let from = Address {
+        name: Some(account.display_name.clone()),
+        email: account.email.clone(),
+    };
+
+    // A draft with no recipients is the normal case — people type the body first. The builder
+    // refuses those, so bytes are only produced once there is somewhere to send it; until then
+    // the draft lives locally and is restored from the columns below.
+    let has_recipients =
+        !message.to.is_empty() || !message.cc.is_empty() || !message.bcc.is_empty();
+
+    let draft = Draft {
+        from,
+        to: message.to.iter().map(Address::from).collect(),
+        cc: message.cc.iter().map(Address::from).collect(),
+        bcc: message.bcc.iter().map(Address::from).collect(),
+        subject: message.subject.clone(),
+        html: message.html.clone(),
+        text: message.text.clone(),
+        references: message.references.clone(),
+        in_reply_to: message.in_reply_to.clone(),
+        attachments: Vec::new(),
+        message_id: message_id.clone(),
+    };
+
+    let built = if has_recipients {
+        outgoing::build(&draft).ok()
+    } else {
+        None
+    };
+
+    let identity = built
+        .as_ref()
+        .map(|b| b.message_id.clone())
+        .or(message_id)
+        .unwrap_or_else(|| format!("<draft-{}@halcyon.invalid>", now_seconds()));
+
+    let account_id = message.account_id;
+
+    let stored = {
+        let identity = identity.clone();
+        let to = serde_json::to_string(&message.to).unwrap_or_else(|_| "[]".into());
+        let cc = serde_json::to_string(&message.cc).unwrap_or_else(|_| "[]".into());
+        let bcc = serde_json::to_string(&message.bcc).unwrap_or_else(|_| "[]".into());
+        let subject = message.subject.clone();
+        let html = message.html.clone();
+        let text = message.text.clone().unwrap_or_default();
+        let in_reply_to = message.in_reply_to.clone();
+        let references = message.references.join(" ");
+
+        db.write(move |tx| {
+            tx.execute(
+                "INSERT INTO draft (
+                     account_id, message_id, to_json, cc_json, bcc_json,
+                     subject, html, text, in_reply_to, references_, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(message_id) DO UPDATE SET
+                     to_json = excluded.to_json,
+                     cc_json = excluded.cc_json,
+                     bcc_json = excluded.bcc_json,
+                     subject = excluded.subject,
+                     html = excluded.html,
+                     text = excluded.text,
+                     in_reply_to = excluded.in_reply_to,
+                     references_ = excluded.references_,
+                     updated_at = excluded.updated_at",
+                rusqlite::params![
+                    account_id,
+                    identity,
+                    to,
+                    cc,
+                    bcc,
+                    subject,
+                    html,
+                    text,
+                    in_reply_to,
+                    references,
+                    now_seconds()
+                ],
+            )?;
+
+            let id: i64 = tx.query_row(
+                "SELECT id FROM draft WHERE message_id = ?1",
+                rusqlite::params![identity],
+                |row| row.get(0),
+            )?;
+
+            Ok(id)
+        })
+        .await?
+    };
+
+    // The server copy, queued. Only once the message can actually be built: a draft with no
+    // recipients has no valid MIME to append.
+    if let Some(built) = built {
+        let root = crate::db::default_path()
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+
+        let path = root.join("drafts").join(format!("{stored}.eml"));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        if std::fs::write(&path, &built.bytes).is_ok() {
+            let mailbox = db
+                .read(move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT remote_path FROM mailbox
+                              WHERE account_id = ?1 AND role = 'drafts'",
+                            rusqlite::params![account_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok())
+                })
+                .await?
+                .unwrap_or_else(|| "Drafts".to_string());
+
+            let replaces: Option<u32> = db
+                .read(move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT remote_uid FROM draft WHERE id = ?1",
+                            rusqlite::params![stored],
+                            |row| row.get::<_, Option<i64>>(0),
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|uid| uid as u32))
+                })
+                .await?;
+
+            let eml_path = path.to_string_lossy().to_string();
+            db.write(move |tx| {
+                crate::sync::ops::enqueue(
+                    tx,
+                    account_id,
+                    &crate::sync::ops::Op::AppendDraft {
+                        mailbox,
+                        eml_path,
+                        replaces,
+                    },
+                )
+            })
+            .await?;
+        }
+    }
+
+    Ok(DraftState {
+        id: stored,
+        account_id,
+        message_id: identity,
+        to: message.to,
+        cc: message.cc,
+        bcc: message.bcc,
+        subject: message.subject,
+        html: message.html,
+        text: message.text.unwrap_or_default(),
+        in_reply_to: message.in_reply_to,
+        references: message.references,
+    })
+}
+
+/// Removes a draft once its message has been sent or thrown away.
+#[tauri::command]
+pub async fn compose_discard_draft(db: State<'_, Db>, id: i64) -> Result<(), AppError> {
+    db.write(move |tx| {
+        tx.execute("DELETE FROM draft WHERE id = ?1", rusqlite::params![id])?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
+}

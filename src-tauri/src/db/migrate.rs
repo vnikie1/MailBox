@@ -48,6 +48,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "signatures",
         sql: include_str!("../../migrations/0005_signatures.sql"),
     },
+    Migration {
+        version: 6,
+        name: "drafts",
+        sql: include_str!("../../migrations/0006_drafts.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.
