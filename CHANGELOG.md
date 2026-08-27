@@ -1555,3 +1555,149 @@ with the remainder listed honestly at the end.
   work rather than a Tauri call — and was left undone rather than faked. The exit gate also
   asks for twenty real newsletters checked in both themes, which has not been done
   systematically.
+
+---
+
+## 2026-08-27 — Phase 5 exit gate, and Phase 7 begins
+
+The Dovecot rig went up on the Mac Studio, four of the five Phase 5 gate items ran against it,
+and **every one of them found a bug**. That is the entire argument for exit gates, and it is
+worth stating plainly: none of the four could have been caught by a unit test, and all four
+were sitting behind a suite that was green.
+
+### Added — the rig
+
+- **`test/dovecot/`** — Dovecot in Docker, with a 50,000-message seeded mailbox. Three things
+  need a server we control, and Gmail can supply none of them: **QRESYNC**, which Gmail does not
+  advertise at all, so that path had never run once; a **`UIDVALIDITY` reset**, which cannot be
+  provoked on Gmail and whose recovery is the one most likely to be wrong and least likely to be
+  noticed; and **rudeness** — cutting the connection mid-sync is something to do to a server you
+  own.
+
+  Three things fought back, and all three are recorded in the rig rather than left as folklore.
+  Docker Desktop consults its credential helper on every pull _and_ build, the helper reads the
+  login keychain, and a keychain cannot be unlocked from a non-interactive SSH session — so a
+  public image needing no credentials still could not be fetched, and the image is now built
+  from a base already on the host. Alpine ships **Dovecot 2.4**, whose configuration is a
+  different language from 2.3 and which refuses to start rather than degrade. And the
+  certificate needed an **IP SAN**, because this machine cannot resolve the Mac's mDNS name, so
+  Halcyon connects by address and a DNS-only certificate fails validation against one.
+
+  TLS is required rather than optional, and the CA is trusted on the development machine
+  deliberately. The alternative — a code path that skips validation "only in tests" — is exactly
+  the kind of thing that ships, and a mail client that can be talked out of checking a
+  certificate is not worth writing.
+
+- **`tests/dovecot_gate.rs`** — the first four gate items, reproducible.
+
+- **`tests/dovecot_soak.rs`** — the twelve-hour soak, behind a `soak` feature so that a running
+  soak's locked binary does not stop `npm run verify` with a linker error unrelated to whatever
+  is being verified.
+
+### Fixed — what the gate found
+
+- **An interrupted first sync silently abandoned the rest of the mailbox.** A sync records
+  `uid_next` and the MODSEQ after its _first page_; interrupt it and the next sync sees an
+  unmoved MODSEQ, concludes "unchanged since the last sync", and returns before reaching the
+  backfill. Measured: killed at 5,000 of 50,000, re-run, **finished in 1.6 seconds having
+  fetched nothing**. The remaining 45,000 would never have arrived and nothing would have said
+  so. The incremental shortcut now refuses to run while a backfill is outstanding.
+
+- **A `UIDVALIDITY` reset restored one page instead of the mailbox.** The same shape: the
+  mailbox's stored state is read at the top of `sync_mailbox`, the drop then clears it, and the
+  local variables still described the mailbox that no longer existed — so the backfill marker
+  still read "complete" and the mailbox was refetched to exactly 500 messages of 50,000, and
+  reported success.
+
+- **Ninety per cent of a large mailbox had no threading.** The comment on `RETHREAD_WINDOW` has
+  claimed since Phase 5 that "a full pass runs once at the end of the initial sync". It never
+  did. Every message stored correctly; 45,000 of 50,000 with no thread, which in the reader is
+  nine messages in ten shown as a conversation of one. The pass now exists, runs only when
+  something is actually unthreaded, and is affordable only because of the indexes added
+  yesterday.
+
+- **A transient sign-in failure permanently stopped the sync — the worst bug this project has
+  had.** Every login failure became `Rejected`, which is not retryable (correctly, since
+  hammering a refused password locks an account), and a non-retryable error makes the IDLE
+  watcher exit for the life of the process.
+
+  It fired for real during the first soak. The Docker host slept, its VM clock jumped backwards,
+  Dovecot killed its own auth process — it does that deliberately — and for about ninety seconds
+  logins were aborted. The client read that as a refused credential and **did not open another
+  connection for the remaining six and a half hours**. In the app that is mail silently ceasing
+  to arrive until someone restarts it. `login_failure` now separates the two using RFC 5530
+  codes plus the plain-language forms servers actually send, defaulting to _retry_: getting it
+  wrong that way costs one connection after a backoff, and getting it wrong the other way costs
+  the user their mail.
+
+### Changed
+
+- **The sync engine no longer depends on Tauri.** It took an `AppHandle` purely to call `emit`,
+  which made it undrivable from a test — Tauri's own mock runtime does not load on Windows at
+  all, and the test binary dies at start with `STATUS_ENTRYPOINT_NOT_FOUND` before running a
+  line. `sync::events::Events` is a two-method trait that `AppHandle` implements, so the app is
+  unchanged; the gate implements it in six lines and can additionally assert on what was
+  emitted. It also matches what docs/03 already claims the architecture is.
+
+### Incidents
+
+- **The soak's own criteria were too weak to catch the bug it found.** Memory was flat and
+  connections never exceeded budget, so both assertions passed — while the client had been dead
+  for six and a half hours. A dead process uses no memory and opens no connections. It now
+  checks **liveness first**: that delivered messages were actually picked up, and that
+  connections were not absent for most of the run. A soak whose criteria a corpse can meet is
+  not measuring anything.
+
+- **And then the liveness check was wrong too.** The soak delivers a message each sample, named
+  `soak1`, `soak2`, restarting at 1 every run — so the second run _overwrote_ the first run's
+  messages instead of adding any, the mailbox count stayed flat, and the new check reported a
+  dead client while the client was working. A harness that cries wolf is worse than none.
+  Filenames now carry a per-run stamp.
+
+### Added — Phase 7
+
+Composing, built bottom-up: the pure logic first, then storage, then the network, then the
+window. Every layer is tested without the one above it.
+
+- **`mail/reply.rs`** — who a reply goes to. **`Bcc` is never read at all**: not filtered late,
+  never consulted, so no future edit can reintroduce it, and there is a test whose only job is
+  to keep that true. `Reply-To` wins over `From`. The user's own addresses are excluded
+  case-insensitively, because the local part is case-sensitive per RFC 5321 and nothing on earth
+  treats it that way. Mailing-list machinery and `no-reply` addresses are excluded from a
+  reply-all — replying to a bounce handler is a message to a robot, sent in public. A forward
+  starts with nobody on it.
+
+- **`mail/outgoing.rs`** — the RFC 5322 bytes. `multipart/alternative` with the plain part
+  **first**, because RFC 2046 §5.1.4 makes the last part the richest and clients that show the
+  first part they understand depend on that order. `lettre` does the encoding: quoted-printable,
+  RFC 2047 headers, folding and boundaries are all places where "nearly right" arrives as
+  mojibake and the sender never finds out.
+
+- **`sync/outbox.rs`** — the state machine, built around never silently losing a message and
+  never silently sending one twice. `holding` is what makes **Undo Send** honest: nothing has
+  been transmitted, so undo deletes the row rather than racing a send. Cancelling later returns
+  false rather than pretending.
+
+  For "killing the app mid-send neither loses nor duplicates" there is a window between SMTP
+  accepting and this process recording it, and both obvious answers fail silently. So the answer
+  comes from the server: every message carries a `Message-ID` we generate, a sent message lands
+  in Sent, and recovery searches for it there.
+
+- **`sync/smtp.rs`** and **`sync/sender.rs`** — submission, and the loop that joins the two.
+  Submit, then file a copy in Sent, then mark sent: a message delivered but missing from Sent is
+  untidy, while a copy in Sent for a message that never left is a lie the user acts on. Port 25
+  is refused outright. The delivery envelope is built from the addresses rather than recovered
+  from the transmitted bytes, which is the mechanism by which `Bcc` works.
+
+- **The compose window** — a separate OS window, with Lexical for the body. The node allow-list
+  is a security boundary rather than a feature list: this editor holds HTML the user is about to
+  send under their own name, so pasted content is parsed into nodes rather than injected as
+  markup and anything without a node type has nothing to become.
+
+### Notes
+
+- Phase 7 still owes: signatures, attachments, drafts with IMAP `APPEND`, the format bar UI,
+  contact autocomplete, Send Later, and the Undo Send banner in the main window. Its exit gate —
+  replies threading correctly in Gmail, Outlook and Apple Mail — needs real accounts on all
+  three.
+- The twelve-hour soak is running as this is written. Its verdict is not yet in.
