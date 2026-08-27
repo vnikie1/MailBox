@@ -4,4 +4,6 @@
 //! to it on the way out — and the security boundary docs/03 §6 draws lives here.
 
 pub mod detect;
+pub mod outgoing;
 pub mod render;
+pub mod reply;

@@ -12,7 +12,11 @@
 use crate::sync::threading::subject_base;
 
 /// One address, decoded.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is an empty address, which is a real state: a draft has a `From` before the user
+/// has chosen an identity, and a header can parse to nothing. Building refuses it rather than
+/// sending it — see `mail::outgoing`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Address {
     pub name: Option<String>,
     pub email: String,

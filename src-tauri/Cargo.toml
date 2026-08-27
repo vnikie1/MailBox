@@ -87,6 +87,20 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# MIME building and SMTP. Hand-rolling either is a bad trade: quoted-printable, RFC 2047
+# header encoding, line folding and multipart boundaries are all places where "nearly right"
+# renders as mojibake in someone else s client, and Outlook Windows — which docs/04 names as
+# the strictest renderer — is the least forgiving of the lot.
+#
+# native-tls to match the IMAP side, so certificate validation goes through SChannel and the
+# system trust store rather than a second, separately-configured root set.
+lettre = { version = "0.11", default-features = false, features = [
+  "builder",
+  "tokio1",
+  "tokio1-native-tls",
+  "smtp-transport",
+  "hostname",
+] }
 
 [profile.dev]
 incremental = true
