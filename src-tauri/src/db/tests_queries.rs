@@ -561,3 +561,26 @@ fn a_snoozed_message_is_hidden_until_it_comes_due() {
         "a message whose reminder has passed did not come back"
     );
 }
+
+/// The page cache is set deliberately, not left to SQLite's default. docs/06 Phase 5's soak.
+///
+/// Asserted because the value is a *budget*: 8MB per connection times the pool is the app's
+/// memory ceiling for the store, and the twelve-hour soak's +21.2% growth was the old default
+/// filling up by accident. A change here changes what that soak measures, and it should be a
+/// decision rather than a drift.
+#[test]
+fn the_page_cache_is_an_explicit_budget() {
+    // A connection put through `configure`, not the bare fixture — `configure` is the thing
+    // being asserted, and the fixture deliberately does not call it.
+    let conn = Connection::open_in_memory().expect("open");
+    super::configure(&conn).expect("configure");
+
+    let cache: i64 = conn
+        .query_row("PRAGMA cache_size", [], |row| row.get(0))
+        .expect("cache_size");
+
+    assert_eq!(
+        cache, -8192,
+        "the page cache is no longer the 8MB per connection the soak was measured against"
+    );
+}

@@ -112,6 +112,8 @@ pub fn run() {
             ipc::search::search_history_clear,
             ipc::search::search_save_as_smart,
             ipc::body::message_body,
+            ipc::body::remote_images_enabled,
+            ipc::body::set_remote_images_enabled,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,
             ipc::attachments::attachment_preview,

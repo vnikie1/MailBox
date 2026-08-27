@@ -106,9 +106,26 @@ fn collect_parts(
 
 /// Fetches the remote images a message wants, through the core.
 ///
-/// docs/03 §6.3: *proxy through the Rust core so the sender never sees the user's IP, and
-/// strip the `Referer`.* Both matter. The IP is what turns a tracking pixel into a location;
-/// the `Referer` is what tells the sender which message was opened.
+/// docs/03 §6.3 asks to *proxy through the Rust core so the sender never sees the user's IP,
+/// and strip the `Referer`.* **The second half of that is achieved and the first half is not,
+/// and the spec is wrong about it.** The Rust core runs on the user's own machine, so a request
+/// it makes leaves from the user's own address. Nothing here is a proxy in the sense that word
+/// implies; making one would mean routing a user's mail through a server this project does not
+/// have and standing rule 16 would not allow.
+///
+/// What fetching here *does* buy, which is real and worth having:
+///
+/// * **No cookies.** A store would let one sender's pixel identify the reader to the next.
+/// * **No `Referer`**, so the request does not name the message that triggered it.
+/// * **A generic `User-Agent`**, naming no client, no version and no machine.
+/// * **The frame never makes the request itself.** It gets `data:` URIs, so there is no
+///   network access from the document at all — which is what keeps a malicious message from
+///   correlating anything or reaching a host the sanitiser refused.
+///
+/// So the sender learns that the message was opened, roughly when, and the IP it was opened
+/// from. They do not learn which client, which message, or anything that persists between
+/// senders. The user-facing copy in Settings says exactly this, because a promise of anonymity
+/// that is not kept is worse than no promise.
 async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
     let mut fetched = HashMap::new();
 
@@ -171,9 +188,17 @@ async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
 
 /// Returns a message's body, ready for the frame.
 ///
-/// `load_remote` is the user's explicit consent, given by pressing the banner. It is not
-/// remembered and not inferred: every message starts blocked, because "I wanted to see that
-/// newsletter's pictures" is not the same as "tell every sender when I open their mail".
+/// `load_remote` says whether remote images may be fetched for this message. It comes from the
+/// `reader.loadRemoteImages` setting, which the user owns, and can be overridden per message
+/// from the banner in either direction.
+///
+/// **This is the one thing in the app whose default was chosen against the security advice.**
+/// A remote image is the standard read receipt nobody consented to: a unique URL per recipient
+/// tells the sender the message was opened, when, how often, and roughly from where. Standing
+/// rule 11 had it blocked by default for that reason. The owner of this app asked for it on,
+/// which is their call to make about their own mail, and the setting is theirs to change back.
+/// Everything else rule 11 requires is unchanged — the sandboxed frame, no scripting, and the
+/// Rust-side sanitiser all still apply.
 #[tauri::command]
 pub async fn message_body(
     db: State<'_, Db>,
@@ -406,6 +431,44 @@ fn open_in_browser(url: &str) -> Result<(), AppError> {
             message: "Halcyon could not open your browser.".into(),
         })
     }
+}
+
+/// Whether remote images load without being asked for. docs/01 §5.
+///
+/// Defaults to **on**, at the owner's request. See `message_body` for what that costs and what
+/// it does not change.
+#[tauri::command]
+pub async fn remote_images_enabled(db: State<'_, Db>) -> Result<bool, AppError> {
+    let stored: Option<String> = db
+        .read(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM setting WHERE key = 'reader.loadRemoteImages'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok())
+        })
+        .await?;
+
+    // Absent means on. A fresh install gets the default without needing a row written first,
+    // and a database from before this setting existed behaves the same as a new one.
+    Ok(stored.is_none_or(|value| value == "1" || value.eq_ignore_ascii_case("true")))
+}
+
+#[tauri::command]
+pub async fn set_remote_images_enabled(db: State<'_, Db>, enabled: bool) -> Result<(), AppError> {
+    db.write(move |tx| {
+        tx.execute(
+            "INSERT INTO setting (key, value) VALUES ('reader.loadRemoteImages', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![if enabled { "1" } else { "0" }],
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ import { Sheet } from '@/ui'
 
 import { AccountAssistant } from './AccountAssistant'
 import { ComposingSettings } from '@/features/compose/ComposingSettings'
+import { ReadingSettings } from '@/features/reader/ReadingSettings'
 import { JunkSettings } from '@/features/organise/JunkSettings'
 import { OrganiseSettings } from '@/features/organise/OrganiseSettings'
 
@@ -47,6 +48,7 @@ export function AccountsGate({ firstRun, settingsOpen, onCloseSettings }: Accoun
       >
         <AccountsSettings />
         <ComposingSettings />
+        <ReadingSettings />
         <JunkSettings />
         <OrganiseSettings />
       </Sheet>

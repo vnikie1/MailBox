@@ -42,6 +42,14 @@ pub struct Rendered {
     /// How many `cid:` parts were inlined from the local cache.
     #[ts(type = "number")]
     pub inlined: u32,
+    /// How many remote images were actually fetched and inlined.
+    ///
+    /// Distinct from `blocked_remote`, and needed because the two banners ask opposite
+    /// questions. "Some were withheld — load them?" needs the blocked count; "these loaded,
+    /// which told the sender you opened this — block them?" needs this one, and with the
+    /// setting on by default that second banner is the only per-message control there is.
+    #[ts(type = "number")]
+    pub loaded_remote: u32,
     /// True when the message had no HTML part and this is its plain text, wrapped.
     pub from_plain_text: bool,
 }
@@ -193,9 +201,10 @@ fn rewrite_images(
     inline: &HashMap<String, String>,
     load_remote: bool,
     remote: &HashMap<String, String>,
-) -> (String, u32, u32) {
+) -> (String, u32, u32, u32) {
     let mut out = String::with_capacity(html.len());
     let mut blocked = 0u32;
+    let mut loaded = 0u32;
     let mut inlined = 0u32;
     let mut rest = html;
 
@@ -207,7 +216,7 @@ fn rewrite_images(
             // No closing quote: not something html5ever would emit, so stop rewriting and
             // pass the remainder through rather than guessing.
             out.push_str(after);
-            return (out, blocked, inlined);
+            return (out, blocked, loaded, inlined);
         };
 
         let url = &after[..end];
@@ -228,7 +237,10 @@ fn rewrite_images(
             match (load_remote, remote.get(url)) {
                 // Loaded through the core, which is what keeps the sender from seeing the
                 // user's IP. docs/03 §6.3.
-                (true, Some(data_uri)) => out.push_str(data_uri),
+                (true, Some(data_uri)) => {
+                    out.push_str(data_uri);
+                    loaded += 1;
+                }
                 (true, None) => {
                     // Asked for but could not be fetched. Blocked rather than left as a live
                     // URL — otherwise "load remote content" would quietly become "let the
@@ -252,7 +264,7 @@ fn rewrite_images(
     }
 
     out.push_str(rest);
-    (out, blocked, inlined)
+    (out, blocked, loaded, inlined)
 }
 
 /// Sanitised HTML with `src` attributes untouched.
@@ -542,7 +554,8 @@ pub fn render(
     };
 
     let clean = sanitise(html);
-    let (rewritten, blocked_remote, inlined) = rewrite_images(&clean, inline, load_remote, remote);
+    let (rewritten, blocked_remote, loaded_remote, inlined) =
+        rewrite_images(&clean, inline, load_remote, remote);
 
     // Detected *before* folding, so a tracking number in the quoted part is still a link when
     // the quote is opened. Folding only wraps; it does not change any text.
@@ -556,6 +569,7 @@ pub fn render(
     Rendered {
         html: folded,
         blocked_remote,
+        loaded_remote,
         inlined,
         from_plain_text: false,
     }

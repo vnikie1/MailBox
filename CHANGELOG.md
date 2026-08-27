@@ -2361,3 +2361,59 @@ it is much worse.
   running throughout, and readings moved 115ms → 134ms → 110ms with no code change between two
   of those. Timings taken while something else is saturating the disk are not a verdict, and the
   numbers above were taken after the soak finished.
+
+---
+
+## 2026-08-28 (later) — Two changes before Phase 10
+
+### Changed — remote images load by default
+
+At the owner's request. **This reverses standing rule 11**, which says remote content is blocked
+by default and "has no exceptions", so it is recorded here in full.
+
+A remote image is the read receipt nobody consented to: a URL unique per recipient tells the
+sender their message was opened, roughly when, and how often. That is why the rule existed. It
+is the owner's own mail and their call to make, and it is a **setting** — Settings ▸ Reading —
+rather than a decision baked in, with a per-message override in both directions: a banner to
+load images on a message when the setting is off, and a banner to block them when it is on.
+
+`PROMPT.md` §11 now contradicts the code. It is the contract and not mine to edit; whoever owns
+it should decide whether to amend the rule or the exception.
+
+Everything else rule 11 requires is unchanged: the sandboxed frame, no scripting, the Rust-side
+sanitiser, and the rule that the frame itself never makes a network request.
+
+### Fixed — a privacy claim that was not true
+
+Chasing the copy for that setting turned up an error in the code comments and in `docs/03` §6.3,
+which says to _"proxy through the Rust core so the sender never sees the user's IP"_.
+
+**The Rust core runs on the user's own machine.** A request it makes leaves from the user's own
+address, so the sender sees the IP either way. Nothing here is a proxy in the sense the word
+implies, and building one would mean routing someone's mail through a server this project does
+not have and standing rule 16 would not permit.
+
+What fetching through the core does buy is real and was worth keeping: no cookie store, so one
+sender's pixel cannot identify the reader to the next; no `Referer`, so the request does not name
+the message; a generic `User-Agent`, naming no client or machine; and `data:` URIs into the
+frame, so the document makes no network request at all.
+
+The comment and the Settings text now say that rather than the stronger thing. A promise of
+anonymity that is not kept is worse than no promise — and this one would have been made to the
+user directly, on screen, at the moment they turned the feature on.
+
+### Changed — the page cache is now a budget rather than a default
+
+The twelve-hour soak passed at +21.2% memory growth against a 25% ceiling, and the shape said it
+was the SQLite page cache filling rather than a leak. There was no `cache_size` PRAGMA, so each
+pooled connection took the default 2MB — a ceiling arrived at by multiplying a number nobody
+chose by however many connections happened to exist.
+
+It is now explicit at 8MB per connection: larger than the default on purpose, because the store
+is the point of the app and the queries that matter are the ones a bigger cache helps. Five
+connections gives a bounded 40MB, which is the number to reach for if it ever has to come down.
+
+A test asserts the value, because it is a budget the soak was measured against and a change to it
+should be a decision rather than a drift. Writing that test found that the query fixture opens
+raw connections and never calls `configure`, so it was measuring the default rather than the
+setting — the test now configures a connection explicitly.

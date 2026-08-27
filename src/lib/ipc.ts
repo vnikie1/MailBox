@@ -531,6 +531,7 @@ export async function messageBody(messageId: number, loadRemote: boolean): Promi
     return {
       html: '<pre class="halcyon-plain">Message bodies are only available in the desktop app.</pre>',
       blockedRemote: 0,
+      loadedRemote: 0,
       inlined: 0,
       fromPlainText: true,
     }
@@ -750,6 +751,24 @@ export async function composeDiscardDraft(id: number): Promise<void> {
 export async function contactsSuggest(prefix: string, limit?: number): Promise<Contact[]> {
   if (!runningInTauri) return []
   return invoke<Contact[]>('contacts_suggest', { prefix, limit: limit ?? null })
+}
+
+/**
+ * Whether remote images load without being asked for.
+ *
+ * Defaults to **on**, at the owner's request. A remote image is the standard read receipt
+ * nobody consented to — a unique URL per recipient tells the sender when a message was opened
+ * and roughly from where — so this is the one default in the app chosen against the security
+ * advice, and it is a setting rather than a decision baked in.
+ */
+export async function remoteImagesEnabled(): Promise<boolean> {
+  if (!runningInTauri) return true
+  return invoke<boolean>('remote_images_enabled')
+}
+
+export async function setRemoteImagesEnabled(enabled: boolean): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('set_remote_images_enabled', { enabled })
 }
 
 /**

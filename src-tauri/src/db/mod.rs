@@ -110,6 +110,23 @@ fn configure(conn: &Connection) -> Result<(), rusqlite::Error> {
     // Keeps the temp b-trees an ORDER BY or a large FTS query needs off the disk.
     conn.pragma_update(None, "temp_store", "MEMORY")?;
 
+    // The page cache, set deliberately rather than left to the default.
+    //
+    // SQLite's default is -2000, which is 2MB **per connection**. With `READER_POOL_SIZE`
+    // readers plus the writer that is a ceiling of six times the default, arrived at by
+    // multiplying a number nobody chose by however many connections happen to exist. The
+    // twelve-hour soak measured the result: memory flat for 200 minutes, then a single 7MB step
+    // as the pool warmed and the caches filled, settling +21.2% above where it started. That
+    // passed its 25% threshold, and passing a threshold by accident is not the same as knowing
+    // what the number is.
+    //
+    // Negative means kibibytes rather than pages, so this is independent of `page_size`. 8MB
+    // per connection is larger than the default on purpose: the mail store is the whole point
+    // of the app and the queries that matter — the list, a search over 100,000 messages — are
+    // exactly the ones a bigger cache helps. Five connections gives a bounded 40MB, which is
+    // the number to reach for if this ever needs to come down on a smaller machine.
+    conn.pragma_update(None, "cache_size", -8 * 1024)?;
+
     Ok(())
 }
 

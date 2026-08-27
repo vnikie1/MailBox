@@ -18,6 +18,15 @@ blockedRemote: number,
  */
 inlined: number, 
 /**
+ * How many remote images were actually fetched and inlined.
+ *
+ * Distinct from `blocked_remote`, and needed because the two banners ask opposite
+ * questions. "Some were withheld — load them?" needs the blocked count; "these loaded,
+ * which told the sender you opened this — block them?" needs this one, and with the
+ * setting on by default that second banner is the only per-message control there is.
+ */
+loadedRemote: number, 
+/**
  * True when the message had no HTML part and this is its plain text, wrapped.
  */
 fromPlainText: boolean, };

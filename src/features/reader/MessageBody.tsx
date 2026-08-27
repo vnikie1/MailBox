@@ -3,6 +3,7 @@ import { ImageOff } from 'lucide-react'
 
 import { openExternal } from '@/lib/ipc'
 import { useMessageBody } from '@/app/queries'
+import { remoteImagesEnabled } from '@/lib/ipc'
 import { Button } from '@/ui'
 
 import styles from './MessageBody.module.css'
@@ -94,21 +95,36 @@ export interface MessageBodyProps {
 
 export function MessageBody({ messageId, className }: MessageBodyProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
-  const [loadRemote, setLoadRemote] = useState(false)
+  // `null` until the setting has been read, so the body is not rendered twice — once with
+  // images blocked and again a moment later with them allowed, which flashes the banner on
+  // screen for every message.
+  const [preference, setPreference] = useState<boolean | null>(null)
+  const [override, setOverride] = useState<boolean | null>(null)
   const [height, setHeight] = useState(0)
 
-  // Consent is per message and never remembered. Someone who wanted to see one newsletter's
-  // pictures has not agreed to tell every future sender when their mail was opened.
   useEffect(() => {
-    setLoadRemote(false)
+    void remoteImagesEnabled().then(setPreference)
+  }, [])
+
+  // The per-message override is cleared on every message. Someone who blocked one sender's
+  // pictures has not asked to block the next one's, and someone who allowed one has not
+  // changed their standing preference.
+  useEffect(() => {
+    setOverride(null)
     setHeight(0)
   }, [messageId])
+
+  const loadRemote = override ?? preference ?? false
 
   // A query, not an effect, so it is invalidated by `messages:updated` when the body
   // finishes downloading. Bodies are fetched lazily *after* selection, so the first render
   // of a message that has just been clicked legitimately has nothing to show — and without
   // the invalidation it would go on showing nothing until the user clicked away and back.
-  const { data: rendered, isPending } = useMessageBody(messageId, loadRemote)
+  // Held back until the preference is known, so the first render is the right one.
+  const { data: rendered, isPending } = useMessageBody(
+    preference === null ? null : messageId,
+    loadRemote,
+  )
 
   const hasContent = rendered !== undefined && rendered.html.trim() !== ''
   const empty = rendered !== undefined && !hasContent
@@ -235,10 +251,31 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
           <Button
             variant="bordered"
             onClick={() => {
-              setLoadRemote(true)
+              setOverride(true)
             }}
           >
             Load Images
+          </Button>
+        </div>
+      )}
+
+      {/* The other direction, and it only appears when images *did* load. Someone who opens a
+          message from a stranger and realises what that just told them needs a way to stop it
+          for the rest of the thread — and with the setting on by default, this is the only
+          per-message control they have. */}
+      {loadRemote && rendered.loadedRemote > 0 && (
+        <div className={styles.banner} role="status">
+          <ImageOff className={styles.bannerIcon} aria-hidden />
+          <span className={styles.bannerText}>
+            Remote images loaded, which tells the sender you opened this.
+          </span>
+          <Button
+            variant="bordered"
+            onClick={() => {
+              setOverride(false)
+            }}
+          >
+            Block Images
           </Button>
         </div>
       )}
