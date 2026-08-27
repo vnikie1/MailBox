@@ -752,6 +752,23 @@ export async function contactsSuggest(prefix: string, limit?: number): Promise<C
 }
 
 /**
+ * How long Undo Send holds a message, in seconds. `0` is off.
+ *
+ * Read from the core rather than kept in the UI, so the compose window and the settings sheet
+ * — separate OS windows with separate React trees — cannot disagree about it.
+ */
+export async function getUndoSeconds(): Promise<number> {
+  if (!runningInTauri) return 10
+  return invoke<number>('compose_undo_seconds')
+}
+
+/** Returns the value actually stored, which is the clamped one. */
+export async function setUndoSeconds(seconds: number): Promise<number> {
+  if (!runningInTauri) return seconds
+  return invoke<number>('compose_set_undo_seconds', { seconds })
+}
+
+/**
  * Runs a handler when the user tries to close this window, and lets it stop the close.
  *
  * Compose uses it to offer Save as Draft / Delete / Cancel, per docs/01 §6. Closing a window

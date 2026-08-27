@@ -112,6 +112,35 @@ async fn hold_seconds(db: &Db) -> i64 {
         .clamp(0, 60)
 }
 
+/// The Undo Send delay, for the settings sheet. docs/01 §6.
+#[tauri::command]
+pub async fn compose_undo_seconds(db: State<'_, Db>) -> Result<i64, AppError> {
+    Ok(hold_seconds(&db).await)
+}
+
+/// Sets the Undo Send delay. `0` turns it off.
+///
+/// Clamped rather than validated-and-rejected: the choices in the UI are 0, 10, 20 and 30, and
+/// a value from anywhere else is a bug in the caller rather than something to put an error
+/// message in front of the user about. The ceiling matters more than the floor — a window that
+/// holds a message for an hour looks exactly like a window that failed to send it.
+#[tauri::command]
+pub async fn compose_set_undo_seconds(db: State<'_, Db>, seconds: i64) -> Result<i64, AppError> {
+    let clamped = seconds.clamp(0, 60);
+
+    db.write(move |tx| {
+        tx.execute(
+            "INSERT INTO setting (key, value) VALUES ('compose.undoSeconds', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![clamped.to_string()],
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(clamped)
+}
+
 /// Builds the reply a compose window should open with.
 #[tauri::command]
 pub async fn compose_reply(

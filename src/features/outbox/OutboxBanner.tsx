@@ -12,6 +12,7 @@ import {
 } from '@/lib/ipc'
 import { Button } from '@/ui'
 
+import { SendLaterSheet } from './SendLaterSheet'
 import styles from './OutboxBanner.module.css'
 
 /**
@@ -56,6 +57,8 @@ function tomorrowMorning(): number {
 
 export function OutboxBanner() {
   const [rows, setRows] = useState<OutboxRow[]>([])
+  /** The row a custom Send Later is being chosen for, if any. */
+  const [scheduling, setScheduling] = useState<number | null>(null)
   const [, forceTick] = useState(0)
   const timer = useRef<number | undefined>(undefined)
 
@@ -145,6 +148,14 @@ export function OutboxBanner() {
               </Button>
               <Button
                 variant="bordered"
+                onClick={() => {
+                  setScheduling(row.id)
+                }}
+              >
+                Later…
+              </Button>
+              <Button
+                variant="bordered"
                 icon={Undo2}
                 onClick={() => {
                   void composeUndo(row.id).then(refresh)
@@ -179,6 +190,18 @@ export function OutboxBanner() {
           </span>
         </div>
       ))}
+
+      <SendLaterSheet
+        open={scheduling !== null}
+        onOpenChange={(next) => {
+          if (!next) setScheduling(null)
+        }}
+        onChoose={(sendAfter) => {
+          if (scheduling === null) return
+          void outboxSchedule(scheduling, sendAfter).then(refresh)
+          setScheduling(null)
+        }}
+      />
     </div>
   )
 }

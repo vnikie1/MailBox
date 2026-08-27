@@ -1,4 +1,11 @@
-import { useId, useRef, useState, type ClipboardEvent, type KeyboardEvent } from 'react'
+import {
+  useId,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent,
+} from 'react'
 
 import { cx } from '@/lib/cx'
 
@@ -47,6 +54,17 @@ export interface TokenFieldProps {
   onDraftChange?: (value: string) => void
   /** Show a 16px avatar on each chip, as the compose window does. */
   showAvatars?: boolean
+  /**
+   * Lets chips be dragged between fields that share this name.
+   *
+   * Named rather than a bare boolean so a chip cannot be dropped somewhere unrelated. To, Cc
+   * and Bcc are one group because moving a recipient between them is the whole point; a tag
+   * field elsewhere in the app is not, and dropping an address into it would be nonsense the
+   * user has to undo.
+   *
+   * Omitted, the field behaves exactly as before and its chips do not drag.
+   */
+  dragGroup?: string
   disabled?: boolean
   className?: string | undefined
 }
@@ -57,6 +75,41 @@ export interface TokenFieldProps {
  * "Ada Lovelace <ada@example.com>" has to survive being typed in full.
  */
 const SEPARATORS = new Set([',', ';'])
+
+/**
+ * The drag payload's MIME type, scoped to the group.
+ *
+ * A custom type rather than `text/plain`, and scoped rather than shared: it means `dragover`
+ * can ask "is this one of mine?" before offering to accept, so dragging a file or a line of
+ * text from another window never lights up a recipient field as a drop target.
+ */
+function mimeFor(group: string): string {
+  return `application/x-halcyon-token+${group.toLowerCase()}`
+}
+
+/** Reads a dragged chip back, tolerating anything that is not one. */
+function parseDragged(raw: string): Token | null {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      typeof (parsed as { value?: unknown }).value !== 'string' ||
+      typeof (parsed as { label?: unknown }).label !== 'string'
+    ) {
+      return null
+    }
+
+    const { value, label } = parsed as { value: string; label: string }
+
+    // A fresh id: the chip is being added to *this* field's list, and reusing the source's id
+    // would collide the moment the same address exists in two fields at once.
+    return { id: `${label}-${value}-${String(Math.random()).slice(2, 8)}`, value, label }
+  } catch {
+    return null
+  }
+}
 
 let nextTokenId = 0
 
@@ -97,11 +150,13 @@ export function TokenField({
   suggestions = [],
   onDraftChange,
   showAvatars = false,
+  dragGroup,
   disabled = false,
   className,
 }: TokenFieldProps) {
   const [draft, setDraft] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   // Which suggestion is highlighted. -1 means none, so Enter commits what was typed rather
   // than whatever happens to be first in a list the user has not looked at.
@@ -266,7 +321,41 @@ export function TokenField({
       </span>
 
       <div
-        className={styles.body}
+        className={cx(styles.body, dragOver && styles.dragOver)}
+        {...(dragGroup === undefined || disabled
+          ? {}
+          : {
+              onDragOver: (event: DragEvent<HTMLDivElement>) => {
+                if (!event.dataTransfer.types.includes(mimeFor(dragGroup))) return
+                // Both calls are required. Without `preventDefault` the browser refuses the
+                // drop entirely, and without `dropEffect` the source field cannot tell a
+                // completed move from an abandoned one.
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDragOver(true)
+              },
+              onDragLeave: (event: DragEvent<HTMLDivElement>) => {
+                // Ignore the events fired as the pointer crosses a child. Without this the
+                // highlight flickers off and on over every chip the pointer passes.
+                if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+                setDragOver(false)
+              },
+              onDrop: (event: DragEvent<HTMLDivElement>) => {
+                event.preventDefault()
+                setDragOver(false)
+
+                const raw = event.dataTransfer.getData(mimeFor(dragGroup))
+                if (raw === '') return
+
+                const dropped = parseDragged(raw)
+                if (dropped === null) return
+
+                // A chip dropped back where it started is a no-op rather than a duplicate.
+                if (tokens.some((token) => token.value === dropped.value)) return
+
+                onTokensChange([...tokens, dropped])
+              },
+            })}
         onMouseDown={(event) => {
           // Clicking the empty space to the right of the last chip should put the caret
           // in the field, exactly as clicking the padding of a text input does.
@@ -278,7 +367,30 @@ export function TokenField({
       >
         <ul className={styles.tokens}>
           {tokens.map((token, index) => (
-            <li key={token.id} className={styles.token}>
+            <li
+              key={token.id}
+              className={styles.token}
+              {...(dragGroup === undefined || disabled
+                ? {}
+                : {
+                    draggable: true,
+                    onDragStart: (event: DragEvent<HTMLLIElement>) => {
+                      event.dataTransfer.effectAllowed = 'move'
+                      event.dataTransfer.setData(
+                        mimeFor(dragGroup),
+                        JSON.stringify({ value: token.value, label: token.label }),
+                      )
+                    },
+                    onDragEnd: (event: DragEvent<HTMLLIElement>) => {
+                      // Removed here rather than in the drop handler, because the drop lands in
+                      // a *different* component that has no way to reach back into this one.
+                      // `dropEffect` is the only signal that the drag was accepted somewhere;
+                      // a drag abandoned over the desktop reports `none` and the chip stays.
+                      if (event.dataTransfer.dropEffect !== 'move') return
+                      onTokensChange(tokens.filter((other) => other.id !== token.id))
+                    },
+                  })}
+            >
               <Chip
                 label={token.label}
                 tone={token.invalid === true ? 'invalid' : 'neutral'}

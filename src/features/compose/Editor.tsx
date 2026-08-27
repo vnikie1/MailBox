@@ -2,6 +2,9 @@ import { useCallback, useEffect, useRef } from 'react'
 import { $generateHtmlFromNodes, $generateNodesFromDOM } from '@lexical/html'
 import { LinkNode } from '@lexical/link'
 import { ListItemNode, ListNode } from '@lexical/list'
+// From `@lexical/extension` rather than `@lexical/react`: the react package's copy is
+// deprecated in favour of this one, which is the pure-Lexical implementation.
+import { HorizontalRuleNode } from '@lexical/extension'
 import { LexicalComposer } from '@lexical/react/LexicalComposer'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
 import { LexicalErrorBoundary } from '@lexical/react/LexicalErrorBoundary'
@@ -39,7 +42,7 @@ import styles from './Editor.module.css'
  * render, and mail clients are the least capable renderers in software — a table or a nested
  * float that looks right here arrives broken somewhere else, and the sender never learns.
  */
-const NODES = [HeadingNode, QuoteNode, ListNode, ListItemNode, LinkNode]
+const NODES = [HeadingNode, QuoteNode, ListNode, ListItemNode, LinkNode, HorizontalRuleNode]
 
 export interface EditorProps {
   /** Initial HTML, used once. Later changes to this prop are ignored. */

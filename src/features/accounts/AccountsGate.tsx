@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react'
 import { Sheet } from '@/ui'
 
 import { AccountAssistant } from './AccountAssistant'
+import { ComposingSettings } from '@/features/compose/ComposingSettings'
+
 import { AccountsSettings } from './AccountsSettings'
 import styles from './AccountsGate.module.css'
 
@@ -42,6 +44,7 @@ export function AccountsGate({ firstRun, settingsOpen, onCloseSettings }: Accoun
         className={styles.settingsSheet}
       >
         <AccountsSettings />
+        <ComposingSettings />
       </Sheet>
     </>
   )

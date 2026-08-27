@@ -90,6 +90,9 @@ export function RecipientField({ label, tokens, onTokensChange, validate }: Reci
       suggestions={suggestions}
       onDraftChange={onDraftChange}
       {...(validate === undefined ? {} : { validate })}
+      // To, Cc and Bcc share one group, so a recipient can be moved between them by dragging
+      // — which is how people fix "I meant to Cc them" without retyping the address.
+      dragGroup="recipients"
       showAvatars
     />
   )
