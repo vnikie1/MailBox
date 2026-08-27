@@ -117,6 +117,7 @@ panic = "abort"
 strip = true
 
 [dev-dependencies]
+proptest = "1.9.0"
 tempfile = "3"
 
 # Development seed tool. Tauri bundles only the productName binary, so this is built in

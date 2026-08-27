@@ -7,6 +7,7 @@
 pub mod accounts;
 pub mod db;
 pub mod mail;
+pub mod rules;
 pub mod sync;
 
 mod ipc;
