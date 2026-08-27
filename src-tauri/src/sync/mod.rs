@@ -15,6 +15,7 @@ pub mod sender;
 pub mod session;
 pub mod smtp;
 pub mod threading;
+pub mod upkeep;
 
 #[cfg(test)]
 mod threading_tests;

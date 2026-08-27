@@ -137,6 +137,16 @@ pub fn run() {
             }
             app.manage(sender);
 
+            // The upkeep tick: reminders that come due, follow-up detection. Started here for
+            // the same reason as the sender — a reminder that fell due while the app was closed
+            // has to fire on the first tick after launch, not be lost.
+            {
+                let events: std::sync::Arc<dyn sync::events::Events> =
+                    std::sync::Arc::new(app.handle().clone());
+                let db: db::Db = app.state::<db::Db>().inner().clone();
+                sync::upkeep::spawn(db, events);
+            }
+
             platform::install(app.handle(), &main)?;
 
             // The window is created hidden so the DWM backdrop and the theme attribute

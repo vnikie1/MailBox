@@ -16,12 +16,19 @@ use super::fetch::Fetched;
 use super::threading::{thread_messages, Threadable};
 
 /// What one batch did, for progress reporting and for the caller's logs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Written {
     pub inserted: usize,
     pub updated: usize,
     /// The lowest UID in the batch, so backfill knows where to continue from.
     pub lowest_uid: u32,
+    /// Row ids of the messages this batch newly inserted.
+    ///
+    /// Carried so the caller can run rules over exactly what just arrived. Deriving the set
+    /// afterwards is not possible without a marker column, and the obvious substitute — "every
+    /// message with no verdict yet" — would run every rule over all fifty thousand messages of
+    /// an initial sync. A rule that files mail would empty the user's Inbox on first launch.
+    pub inserted_ids: Vec<i64>,
 }
 
 /// Inserts or updates a batch of fetched messages.
@@ -131,6 +138,7 @@ pub fn write_batch(
         )?;
 
         written.inserted += 1;
+        written.inserted_ids.push(tx.last_insert_rowid());
     }
 
     if written.lowest_uid == u32::MAX {

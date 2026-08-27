@@ -149,6 +149,15 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
         sql.push_str(" AND flag_seen = 0");
     }
 
+    // Snoozed mail is hidden until it comes due. Without this the whole of Remind Me is a
+    // column nothing reads: the message stays exactly where it was, in the list the user asked
+    // not to see it in.
+    //
+    // The comparison is against SQLite's own clock rather than a bound timestamp so that a list
+    // held open across the moment a reminder fires shows it on the next page rather than on the
+    // next restart.
+    sql.push_str(" AND (snooze_until IS NULL OR snooze_until <= strftime('%s', 'now'))");
+
     if let Some(cursor) = query.cursor {
         let date_index = params.len() + 1;
         let id_index = params.len() + 2;

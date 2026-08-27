@@ -865,6 +865,32 @@ async fn incremental(
 
             inserted = written.inserted;
             tracing::debug!(path, range, inserted, "incremental: new messages stored");
+
+            // Rules and the junk filter run **here and nowhere else**: this is the only path
+            // that carries genuinely new arrivals. Running them on the initial sync or on
+            // backfill would apply every rule to fifty thousand messages the user has already
+            // dealt with, and a rule that files mail would empty their Inbox on first launch.
+            //
+            // Rules first, then the filter, so a rule saying "this is never junk" is not
+            // overruled a moment later by a classifier that disagrees.
+            match crate::rules::engine::run_on_arrival(db, written.inserted_ids.clone()).await {
+                Ok(report) if report.matched > 0 => {
+                    tracing::debug!(path, matched = report.matched, "rules applied on arrival");
+                }
+                Ok(_) => {}
+                // Logged and carried on. A broken rule must not stop mail arriving — the
+                // message is already stored, and failing the sync here would mean retrying the
+                // fetch forever over something the network had nothing to do with.
+                Err(error) => tracing::warn!(%error, path, "rules failed on arrival"),
+            }
+
+            match crate::sync::upkeep::score_new_mail(db, mailbox_id).await {
+                Ok(filed) if filed > 0 => {
+                    tracing::debug!(path, filed, "junk filed on arrival");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, path, "junk scoring failed on arrival"),
+            }
         }
     }
 
