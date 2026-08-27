@@ -204,6 +204,13 @@ fn describe(error: &SyncError) -> String {
             "The saved sign-in for this account was refused. Signing in again will fix it."
                 .to_string()
         }
+        // Deliberately not "sign in again". The credential is fine and the server is not, so
+        // sending the user through a sign-in would waste their time and teach them that the
+        // banner lies.
+        SyncError::AuthUnavailable { .. } => {
+            "The mail server could not complete the sign-in. Halcyon will keep trying."
+                .to_string()
+        }
         SyncError::Unreachable { .. } | SyncError::Timeout { .. } | SyncError::Io(_) => {
             "Could not reach the mail server.".to_string()
         }

@@ -314,6 +314,41 @@ async fn gate_5_twelve_hour_soak() {
     println!("  messages delivered {delivered}");
     println!("  csv                {}", csv_path.display());
 
+    // ---- liveness, checked first -------------------------------------------------------------
+    //
+    // Before anything else, because the other two checks are *trivially satisfied by a dead
+    // client*: a process that has stopped connecting uses no memory and opens no connections.
+    //
+    // That is not hypothetical. The first twelve-hour run passed both — memory flat at 33.4MB,
+    // peak one connection — while the client had in fact stopped checking mail at minute 146
+    // and sat there for the following six and a half hours. A soak whose criteria a corpse can
+    // meet is not measuring anything.
+    let final_messages = samples.last().map(|s| s.messages).unwrap_or(0);
+    let first_messages = samples.first().map(|s| s.messages).unwrap_or(0);
+    let picked_up = final_messages - first_messages;
+
+    println!("  messages picked up  {picked_up} of {delivered} delivered");
+
+    assert!(
+        picked_up > 0,
+        "the client picked up none of the {delivered} messages delivered during the soak — \
+         it stopped working, and a flat memory graph from a dead process is not a pass"
+    );
+
+    // Most, not all: the last delivery lands after the final sample, and a debounce may
+    // coalesce two that arrive together.
+    assert!(
+        picked_up as u64 >= delivered * 3 / 4,
+        "the client picked up only {picked_up} of {delivered} deliveries"
+    );
+
+    let idle_samples = samples.iter().filter(|s| s.connections == 0).count();
+    assert!(
+        idle_samples <= samples.len() / 4,
+        "{idle_samples} of {} samples had no connection at all; the watcher was not running",
+        samples.len()
+    );
+
     // Compared late-against-middle rather than late-against-start: the store legitimately grows
     // as mail arrives, and a process that has settled by the second quarter is not leaking
     // whatever it did while warming up.

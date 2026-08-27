@@ -86,6 +86,21 @@ pub enum SyncError {
     #[error("{host} rejected the sign-in")]
     Rejected { host: String, detail: String },
 
+    /// The sign-in failed for a reason that is not the credential.
+    ///
+    /// Distinct from [`Rejected`] because the two need opposite handling, and conflating them
+    /// cost a soak run. Every login failure used to become `Rejected`, which is not retryable,
+    /// which permanently stops the IDLE watcher — so when the test server's auth backend broke
+    /// for ninety seconds, the client stopped checking mail **for the next six and a half
+    /// hours** and said nothing. In the app that is mail silently ceasing to arrive until
+    /// someone restarts it.
+    ///
+    /// RFC 5530 is what separates them: `AUTHENTICATIONFAILED`, `AUTHORIZATIONFAILED` and
+    /// `EXPIRED` are about the credential, and `UNAVAILABLE`, `SERVERBUG`, `CONTACTADMIN` and
+    /// an auth process that simply did not answer are about the server having a bad minute.
+    #[error("{host} could not complete the sign-in: {detail}")]
+    AuthUnavailable { host: String, detail: String },
+
     #[error("imap error: {0}")]
     Imap(#[from] async_imap::error::Error),
 
@@ -127,6 +142,48 @@ impl SyncError {
                 | SyncError::Insecure { .. }
                 | SyncError::ShuttingDown
         )
+    }
+}
+
+/// Decides whether a failed sign-in was the credential's fault or the server's.
+///
+/// The distinction is the whole point: a credential the server has refused must **not** be
+/// retried, because hammering it is how an account gets locked out — and a server having a bad
+/// minute must **be** retried, because the alternative is a client that silently stops
+/// checking mail until someone restarts it.
+///
+/// Default to retryable. Getting it wrong in that direction costs one extra connection after a
+/// backoff; getting it wrong the other way costs the user their mail, which is what happened
+/// during the first soak run.
+fn login_failure(host: &str, detail: &str) -> SyncError {
+    let upper = detail.to_ascii_uppercase();
+
+    // RFC 5530 codes that name the credential, plus the plain-language forms servers send
+    // instead of a code. Only these stop the retry loop.
+    const CREDENTIAL: &[&str] = &[
+        "AUTHENTICATIONFAILED",
+        "AUTHORIZATIONFAILED",
+        "AUTHZFAILED",
+        "EXPIRED",
+        "PRIVACYREQUIRED",
+        "INVALID CREDENTIALS",
+        "INVALID USER",
+        "INVALID PASSWORD",
+        "LOGIN FAILED",
+        "APPLICATION-SPECIFIC PASSWORD REQUIRED",
+        "WEBALERT",
+    ];
+
+    if CREDENTIAL.iter().any(|needle| upper.contains(needle)) {
+        return SyncError::Rejected {
+            host: host.to_string(),
+            detail: detail.to_string(),
+        };
+    }
+
+    SyncError::AuthUnavailable {
+        host: host.to_string(),
+        detail: detail.to_string(),
     }
 }
 
@@ -320,15 +377,10 @@ async fn handshake(
     }
 
     let mut session = match credential {
-        Credential::Password(secret) => {
-            client
-                .login(email, secret.expose())
-                .await
-                .map_err(|(error, _)| SyncError::Rejected {
-                    host: server.host.clone(),
-                    detail: error.to_string(),
-                })?
-        }
+        Credential::Password(secret) => client
+            .login(email, secret.expose())
+            .await
+            .map_err(|(error, _)| login_failure(&server.host, &error.to_string()))?,
 
         Credential::OAuth(token) => {
             let authenticator = XOAuth2 {
@@ -340,10 +392,7 @@ async fn handshake(
             client
                 .authenticate("XOAUTH2", authenticator)
                 .await
-                .map_err(|(error, _)| SyncError::Rejected {
-                    host: server.host.clone(),
-                    detail: error.to_string(),
-                })?
+                .map_err(|(error, _)| login_failure(&server.host, &error.to_string()))?
         }
     };
 
@@ -511,6 +560,58 @@ mod tests {
 
         // And it stays empty however many challenges arrive.
         assert_eq!(authenticator.process(b"more"), "");
+    }
+
+    #[test]
+    fn a_refused_credential_stops_the_retries_and_a_broken_auth_server_does_not() {
+        // The distinction a twelve-hour soak run was lost to. Every login failure used to
+        // become `Rejected`, which is not retryable, which permanently stops the IDLE watcher.
+        // When the test server's auth backend broke for ninety seconds, the client stopped
+        // checking mail for the next six and a half hours and said nothing about it.
+
+        // The credential really is the problem. Retrying locks the account.
+        for detail in [
+            "NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)",
+            "NO [AUTHORIZATIONFAILED] no",
+            "NO [EXPIRED] password expired",
+            "NO Invalid credentials",
+            "NO [ALERT] Application-specific password required",
+        ] {
+            let error = login_failure("imap.example.test", detail);
+            assert!(
+                matches!(error, SyncError::Rejected { .. }),
+                "should not be retried: {detail}"
+            );
+            assert!(!error.is_retryable(), "{detail}");
+        }
+
+        // The server is having a bad minute. Waiting is exactly the right response, and the
+        // first of these is the one that actually happened.
+        for detail in [
+            "Login aborted: Auth process broken (disconnected before auth was ready)",
+            "NO [UNAVAILABLE] Temporary authentication failure",
+            "NO [SERVERBUG] internal error",
+            "NO [CONTACTADMIN] ask your administrator",
+            "connection closed",
+        ] {
+            let error = login_failure("imap.example.test", detail);
+            assert!(
+                matches!(error, SyncError::AuthUnavailable { .. }),
+                "should be retried: {detail}"
+            );
+            assert!(error.is_retryable(), "{detail}");
+        }
+    }
+
+    #[test]
+    fn a_sign_in_failure_still_carries_no_secret() {
+        // Standing rule 12. The detail is a server response, and a server that echoes back
+        // what it was sent must not turn that into a logged password.
+        let error = login_failure("imap.example.test", "NO [UNAVAILABLE] try later");
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("imap.example.test"));
+        assert!(!rendered.contains("halcyon-test-only"));
     }
 
     #[test]
