@@ -11,6 +11,7 @@ pub mod mailboxes;
 pub mod ops;
 pub mod outbox;
 pub mod persist;
+pub mod sender;
 pub mod session;
 pub mod smtp;
 pub mod threading;

@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod attachments;
 pub mod body;
+pub mod compose;
 pub mod mail;
 pub mod sync;
 pub mod window;

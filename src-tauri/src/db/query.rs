@@ -447,3 +447,127 @@ pub fn explain(conn: &Connection, sql: &str) -> Result<String, DbError> {
 
     Ok(lines.join("\n"))
 }
+
+/// What a reply needs from the message it answers.
+///
+/// Assembled here rather than in the IPC layer because it is one row and three columns, and
+/// pulling it apart across the seam would mean three round trips for one compose window.
+pub struct ReplySource {
+    pub account_id: i64,
+    pub envelope: crate::sync::envelope::Envelope,
+    /// The parent's `References`, oldest first.
+    pub references: Vec<String>,
+    /// The original, quoted and ready to place below the cursor.
+    pub quoted_html: String,
+}
+
+/// Reads one message as the basis for a reply.
+///
+/// The quoted body is built from the **stored, already-sanitised** HTML. Quoting the raw body
+/// would put a sender's markup into a document the user is about to edit and send under their
+/// own name, which is the one place hostile HTML would escape the reader's sandbox entirely.
+pub fn reply_source(conn: &Connection, message_id: i64) -> Option<ReplySource> {
+    let row = conn
+        .query_row(
+            "SELECT account_id, message_id, subject, from_name, from_addr,
+                    to_json, cc_json, references_, body_html, body_text, date_sent
+               FROM message WHERE id = ?1",
+            rusqlite::params![message_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
+                ))
+            },
+        )
+        .ok()?;
+
+    let (
+        account_id,
+        rfc_message_id,
+        subject,
+        from_name,
+        from_addr,
+        to_json,
+        cc_json,
+        references,
+        body_html,
+        body_text,
+        date_sent,
+    ) = row;
+
+    let addresses = |json: Option<String>| -> Vec<crate::sync::envelope::Address> {
+        let Some(json) = json else { return Vec::new() };
+        serde_json::from_str::<Vec<serde_json::Value>>(&json)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| {
+                let email = entry.get("email")?.as_str()?.to_string();
+                Some(crate::sync::envelope::Address {
+                    name: entry
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    email,
+                })
+            })
+            .collect()
+    };
+
+    let from = match from_addr {
+        Some(email) if !email.trim().is_empty() => vec![crate::sync::envelope::Address {
+            name: from_name,
+            email,
+        }],
+        _ => Vec::new(),
+    };
+
+    let envelope = crate::sync::envelope::Envelope {
+        message_id: rfc_message_id,
+        subject: subject.unwrap_or_default(),
+        from,
+        to: addresses(to_json),
+        cc: addresses(cc_json),
+        date_sent,
+        ..crate::sync::envelope::Envelope::default()
+    };
+
+    // Sanitised again on the way out. It was sanitised on the way in, and doing it twice costs
+    // a millisecond — but this copy is about to be placed inside a document the user will send
+    // under their own name, which is the one path where a mistake in the stored copy would
+    // escape the reader's sandbox.
+    let quoted_html = match body_html.as_deref() {
+        Some(html) if !html.trim().is_empty() => {
+            crate::mail::render::sanitise_for_enumeration(html)
+        }
+        _ => {
+            let text = body_text.unwrap_or_default();
+            format!(
+                "<pre>{}</pre>",
+                text.replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+            )
+        }
+    };
+
+    Some(ReplySource {
+        account_id,
+        envelope,
+        references: references
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        quoted_html,
+    })
+}

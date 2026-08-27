@@ -55,6 +55,10 @@ pub fn run() {
             ipc::sync::sync_all,
             ipc::sync::bodies_ensure,
             ipc::sync::sync_watch,
+            ipc::compose::compose_reply,
+            ipc::compose::compose_send,
+            ipc::compose::compose_undo,
+            ipc::compose::outbox_list,
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,
@@ -73,6 +77,22 @@ pub fn run() {
             app.manage(db::Db::open(&path)?);
             app.manage(sync::engine::SyncEngine::new());
             app.manage(sync::idle::Watchers::new());
+
+            // The outbox sender. Started here rather than on first send, because its first
+            // job is to resolve whatever a previous run left in flight — a message that was
+            // mid-send when the app was killed must be settled before anything else is sent.
+            let sender = sync::sender::Sender::new();
+            {
+                let events: std::sync::Arc<dyn sync::events::Events> =
+                    std::sync::Arc::new(app.handle().clone());
+                let db: db::Db = app.state::<db::Db>().inner().clone();
+                let root = path
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_default();
+                sender.start(events, db, root);
+            }
+            app.manage(sender);
 
             platform::install(app.handle(), &main)?;
 
