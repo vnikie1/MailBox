@@ -2040,9 +2040,16 @@ about what the same saved search means.
 
   **That hypothesis was wrong.** The next launch succeeded — window shown in 405ms, 44 mailboxes
   synced, no panic — with _no_ intervention: same boot time, `dwm.exe` still at 20,938 handles,
-  RustDesk still running, process count slightly higher. The failure was transient and cleared
-  by itself, most likely a WebView2 environment left wedged while its profile directory was
-  being moved aside and back during this very investigation.
+  RustDesk still running, process count slightly higher.
+
+  I then attributed it to a WebView2 environment left wedged while its profile directory was
+  moved aside and back during the investigation. **That was wrong too.** It recurred later the
+  same day with nothing having been touched, failed three launches in a row, and succeeded on
+  the fourth — again with no intervention, and with handle counts and process counts within a
+  percent of the failing attempts. The failure is intermittent on this machine and no cause has
+  been established. What is established is the response: **relaunch, up to about four times,
+  before changing anything.** Two plausible-sounding explanations have now been offered and
+  neither survived; a third would be worth less than the empirical instruction.
 
   Two things worth keeping from it. The first is that the correct response to this error is to
   **try again before changing anything** — every "fix" attempted here was a null result, and had
