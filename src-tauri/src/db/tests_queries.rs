@@ -527,3 +527,37 @@ fn message_get_returns_none_for_an_id_that_is_not_there() -> Result<(), DbError>
     assert!(query::message_get(&conn, 999)?.is_none());
     Ok(())
 }
+
+/// Remind Me hides a message from the list until it comes due. docs/01 §8.
+///
+/// Worth a test of its own because the filter is a comparison between an integer column and
+/// whatever the clock expression returns, and SQLite does not compare across storage classes the
+/// way arithmetic would: an INTEGER is *always* less than a TEXT value, whatever the digits say.
+/// A filter written the obvious way is therefore true for every row and hides nothing, and the
+/// symptom is not an error — it is Remind Me quietly doing nothing at all.
+#[test]
+fn a_snoozed_message_is_hidden_until_it_comes_due() {
+    let conn = fixture();
+
+    let far_future = i64::MAX / 2;
+    conn.execute(
+        "UPDATE message SET snooze_until = ?1 WHERE id = 1",
+        [far_future],
+    )
+    .expect("snooze");
+
+    let visible = page(&conn, None, 10);
+    assert!(
+        !visible.contains(&1),
+        "a message snoozed until the far future is still in the list: {visible:?}"
+    );
+
+    // And one whose reminder has passed is back, rather than hidden forever.
+    conn.execute("UPDATE message SET snooze_until = 1 WHERE id = 1", [])
+        .expect("unsnooze");
+
+    assert!(
+        page(&conn, None, 10).contains(&1),
+        "a message whose reminder has passed did not come back"
+    );
+}

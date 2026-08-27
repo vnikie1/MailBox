@@ -88,7 +88,12 @@ impl Sender {
     ///
     /// Returning the future instead lets the caller spawn it on a runtime it actually has, and
     /// keeps this module free of Tauri, which is what `Events` exists for.
-    pub fn run(&self, events: Arc<dyn Events>, db: Db, root: PathBuf) -> impl std::future::Future<Output = ()> + Send + 'static {
+    pub fn run(
+        &self,
+        events: Arc<dyn Events>,
+        db: Db,
+        root: PathBuf,
+    ) -> impl std::future::Future<Output = ()> + Send + 'static {
         let wake = Arc::clone(&self.wake);
 
         async move {

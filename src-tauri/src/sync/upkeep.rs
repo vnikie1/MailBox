@@ -147,42 +147,41 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64) -> Result<usize, DbError> 
 
 /// Runs the tick forever, telling the UI when something comes due.
 ///
-/// Returns the loop rather than spawning it, for the reason spelled out in `sender::run`:
+/// An `async fn` rather than a spawn, for the reason spelled out in `sender::run`:
 /// `tokio::spawn` panics unless it is called from inside a runtime, and Tauri's `setup` is not
-/// one. It holds only a `Db` and an `Events`, so it cannot be what keeps anything else alive.
-pub fn run(db: Db, events: Arc<dyn Events>) -> impl std::future::Future<Output = ()> + Send + 'static {
-    async move {
-        let mut count: u64 = 0;
+/// one. The caller spawns this on a runtime it actually has. It holds only a `Db` and an
+/// `Events`, so it cannot be what keeps anything else alive.
+pub async fn run(db: Db, events: Arc<dyn Events>) {
+    let mut count: u64 = 0;
 
-        loop {
-            tokio::time::sleep(INTERVAL).await;
-            count = count.wrapping_add(1);
+    loop {
+        tokio::time::sleep(INTERVAL).await;
+        count = count.wrapping_add(1);
 
-            match tick(&db, count).await {
-                Ok(ticked) => {
-                    // Only when something actually happened. An event every minute would have
-                    // the UI refetching a list nobody is looking at, forever.
-                    if !ticked.woken.is_empty() || ticked.followed_up > 0 {
-                        tracing::debug!(
-                            woken = ticked.woken.len(),
-                            followed_up = ticked.followed_up,
-                            "upkeep tick"
-                        );
-                        events.emit("mailbox:changed", serde_json::Value::Null);
-                    }
-
-                    if !ticked.woken.is_empty() {
-                        // A separate event so Phase 10 can raise a notification for exactly the
-                        // messages that reappeared, rather than for every list change.
-                        events.emit("snooze:due", serde_json::json!({ "ids": ticked.woken }));
-                    }
+        match tick(&db, count).await {
+            Ok(ticked) => {
+                // Only when something actually happened. An event every minute would have the
+                // UI refetching a list nobody is looking at, forever.
+                if !ticked.woken.is_empty() || ticked.followed_up > 0 {
+                    tracing::debug!(
+                        woken = ticked.woken.len(),
+                        followed_up = ticked.followed_up,
+                        "upkeep tick"
+                    );
+                    events.emit("mailbox:changed", serde_json::Value::Null);
                 }
-                Err(error) => {
-                    // Logged and carried on. A tick that fails once — a locked database during a
-                    // large sync — must not end the loop, or reminders stop working for the rest
-                    // of the session with nothing on screen to say so.
-                    tracing::warn!(%error, "upkeep tick failed");
+
+                if !ticked.woken.is_empty() {
+                    // A separate event so Phase 10 can raise a notification for exactly the
+                    // messages that reappeared, rather than for every list change.
+                    events.emit("snooze:due", serde_json::json!({ "ids": ticked.woken }));
                 }
+            }
+            Err(error) => {
+                // Logged and carried on. A tick that fails once — a locked database during a
+                // large sync — must not end the loop, or reminders stop working for the rest of
+                // the session with nothing on screen to say so.
+                tracing::warn!(%error, "upkeep tick failed");
             }
         }
     }
