@@ -370,6 +370,112 @@ pub async fn pending(db: &Db) -> Result<Vec<Entry>, DbError> {
     .await
 }
 
+/// Puts a failed message back in the queue, at the user's request.
+///
+/// The attempt count is reset, because the user has taken a decision: they looked at the
+/// failure, decided the cause has passed — a mailbox that was full, a network that was down —
+/// and asked again. Carrying the old count would give them one attempt and then the same
+/// banner, which reads as the button not working.
+pub fn retry(tx: &Transaction<'_>, id: i64) -> Result<bool, DbError> {
+    let changed = tx.execute(
+        "UPDATE outbox
+            SET state = 'queued', attempts = 0, last_error = NULL, send_after = ?2
+          WHERE id = ?1 AND state = 'failed'",
+        params![id, now()],
+    )?;
+
+    Ok(changed > 0)
+}
+
+/// Moves a held message's send time. This is **Send Later**.
+///
+/// Only from `holding`: once a message is queued the hold is over, and pretending otherwise
+/// would mean a "Send Later" that silently did nothing to a message already on its way.
+pub fn reschedule(tx: &Transaction<'_>, id: i64, send_at: i64) -> Result<bool, DbError> {
+    let changed = tx.execute(
+        "UPDATE outbox SET send_after = ?2 WHERE id = ?1 AND state = 'holding'",
+        params![id, send_at],
+    )?;
+
+    Ok(changed > 0)
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    #[test]
+    fn retrying_a_failed_message_gives_it_a_full_set_of_attempts_again() {
+        // The user looked at the failure, decided the cause has passed, and asked again.
+        // Carrying the old count would give them one attempt and the same banner, which reads
+        // as the button not working.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+        let id = insert(&tx, "failed", 0);
+
+        tx.execute(
+            "UPDATE outbox SET attempts = ?2, last_error = 'nope' WHERE id = ?1",
+            params![id, MAX_ATTEMPTS],
+        )
+        .expect("exhaust");
+
+        assert!(retry(&tx, id).expect("retry"));
+
+        let (state, attempts, error): (String, i64, Option<String>) = tx
+            .query_row(
+                "SELECT state, attempts, last_error FROM outbox WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read");
+
+        assert_eq!(state, "queued");
+        assert_eq!(attempts, 0);
+        assert_eq!(error, None, "a stale error would still be on the banner");
+    }
+
+    #[test]
+    fn only_a_failed_message_can_be_retried() {
+        // Retrying something already sending would send it twice.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        for state in ["holding", "queued", "sending", "sent"] {
+            let id = insert(&tx, state, 0);
+            assert!(!retry(&tx, id).expect("retry"), "retried a {state} message");
+        }
+    }
+
+    #[test]
+    fn send_later_moves_a_held_message_and_nothing_else() {
+        // Once a message is queued the hold is over. A Send Later that silently did nothing to
+        // a message already on its way would be worse than one that refused.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        let held = insert(&tx, "holding", 0);
+        assert!(reschedule(&tx, held, 4_000_000_000).expect("reschedule"));
+
+        let when: i64 = tx
+            .query_row(
+                "SELECT send_after FROM outbox WHERE id = ?1",
+                params![held],
+                |row| row.get(0),
+            )
+            .expect("read");
+        assert_eq!(when, 4_000_000_000);
+
+        for state in ["queued", "sending", "sent", "failed"] {
+            let id = insert(&tx, state, 0);
+            assert!(
+                !reschedule(&tx, id, 4_000_000_000).expect("reschedule"),
+                "rescheduled a {state} message"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests_support {
     use super::*;
@@ -532,111 +638,5 @@ mod tests_support {
             .expect("attempts");
 
         assert_eq!(attempts, 0);
-    }
-}
-
-/// Puts a failed message back in the queue, at the user's request.
-///
-/// The attempt count is reset, because the user has taken a decision: they looked at the
-/// failure, decided the cause has passed — a mailbox that was full, a network that was down —
-/// and asked again. Carrying the old count would give them one attempt and then the same
-/// banner, which reads as the button not working.
-pub fn retry(tx: &Transaction<'_>, id: i64) -> Result<bool, DbError> {
-    let changed = tx.execute(
-        "UPDATE outbox
-            SET state = 'queued', attempts = 0, last_error = NULL, send_after = ?2
-          WHERE id = ?1 AND state = 'failed'",
-        params![id, now()],
-    )?;
-
-    Ok(changed > 0)
-}
-
-/// Moves a held message's send time. This is **Send Later**.
-///
-/// Only from `holding`: once a message is queued the hold is over, and pretending otherwise
-/// would mean a "Send Later" that silently did nothing to a message already on its way.
-pub fn reschedule(tx: &Transaction<'_>, id: i64, send_at: i64) -> Result<bool, DbError> {
-    let changed = tx.execute(
-        "UPDATE outbox SET send_after = ?2 WHERE id = ?1 AND state = 'holding'",
-        params![id, send_at],
-    )?;
-
-    Ok(changed > 0)
-}
-
-#[cfg(test)]
-mod retry_tests {
-    use super::tests_support::*;
-    use super::*;
-
-    #[test]
-    fn retrying_a_failed_message_gives_it_a_full_set_of_attempts_again() {
-        // The user looked at the failure, decided the cause has passed, and asked again.
-        // Carrying the old count would give them one attempt and the same banner, which reads
-        // as the button not working.
-        let mut conn = store();
-        let tx = conn.transaction().expect("tx");
-        let id = insert(&tx, "failed", 0);
-
-        tx.execute(
-            "UPDATE outbox SET attempts = ?2, last_error = 'nope' WHERE id = ?1",
-            params![id, MAX_ATTEMPTS],
-        )
-        .expect("exhaust");
-
-        assert!(retry(&tx, id).expect("retry"));
-
-        let (state, attempts, error): (String, i64, Option<String>) = tx
-            .query_row(
-                "SELECT state, attempts, last_error FROM outbox WHERE id = ?1",
-                params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read");
-
-        assert_eq!(state, "queued");
-        assert_eq!(attempts, 0);
-        assert_eq!(error, None, "a stale error would still be on the banner");
-    }
-
-    #[test]
-    fn only_a_failed_message_can_be_retried() {
-        // Retrying something already sending would send it twice.
-        let mut conn = store();
-        let tx = conn.transaction().expect("tx");
-
-        for state in ["holding", "queued", "sending", "sent"] {
-            let id = insert(&tx, state, 0);
-            assert!(!retry(&tx, id).expect("retry"), "retried a {state} message");
-        }
-    }
-
-    #[test]
-    fn send_later_moves_a_held_message_and_nothing_else() {
-        // Once a message is queued the hold is over. A Send Later that silently did nothing to
-        // a message already on its way would be worse than one that refused.
-        let mut conn = store();
-        let tx = conn.transaction().expect("tx");
-
-        let held = insert(&tx, "holding", 0);
-        assert!(reschedule(&tx, held, 4_000_000_000).expect("reschedule"));
-
-        let when: i64 = tx
-            .query_row(
-                "SELECT send_after FROM outbox WHERE id = ?1",
-                params![held],
-                |row| row.get(0),
-            )
-            .expect("read");
-        assert_eq!(when, 4_000_000_000);
-
-        for state in ["queued", "sending", "sent", "failed"] {
-            let id = insert(&tx, state, 0);
-            assert!(
-                !reschedule(&tx, id, 4_000_000_000).expect("reschedule"),
-                "rescheduled a {state} message"
-            );
-        }
     }
 }

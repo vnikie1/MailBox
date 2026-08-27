@@ -64,6 +64,8 @@ pub struct OutgoingMessage {
     pub text: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// Absolute paths of files to attach. Read by the core rather than sent as bytes.
+    pub attachments: Vec<String>,
 }
 
 /// Everything the compose window needs to open as a reply.
@@ -189,6 +191,28 @@ pub async fn compose_send(
         email: account.email.clone(),
     };
 
+    // Read here rather than carried through the IPC boundary as bytes. A 20MB attachment
+    // base64-encoded into a JSON payload is 27MB of string on both sides of the seam, for a
+    // file the core can open itself in one call.
+    let mut attachments = Vec::with_capacity(message.attachments.len());
+    for path in &message.attachments {
+        let bytes = std::fs::read(path).map_err(|error| AppError {
+            code: "attachment-unreadable".into(),
+            message: format!("{path} could not be read: {error}"),
+        })?;
+
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "attachment".to_string());
+
+        attachments.push(crate::mail::outgoing::Attachment {
+            mime: mime_for(&filename),
+            filename,
+            bytes,
+        });
+    }
+
     let draft = Draft {
         from,
         to: message.to.iter().map(Address::from).collect(),
@@ -199,6 +223,7 @@ pub async fn compose_send(
         text: message.text.clone(),
         references: message.references.clone(),
         in_reply_to: message.in_reply_to.clone(),
+        attachments,
         message_id: None,
     };
 
@@ -392,4 +417,93 @@ pub async fn outbox_schedule(db: State<'_, Db>, id: i64, send_at: i64) -> Result
     Ok(db
         .write(move |tx| outbox::reschedule(tx, id, send_at))
         .await?)
+}
+
+/// Guesses a content type from a filename.
+///
+/// A short table rather than sniffing the bytes. The extension is what the *recipient's* client
+/// will use anyway, so agreeing with it is more useful than being right about the contents —
+/// and a wrong guess degrades to `application/octet-stream`, which every client can save.
+fn mime_for(filename: &str) -> String {
+    let extension = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let mime = match extension.as_str() {
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "heic" => "image/heic",
+        "svg" => "image/svg+xml",
+        "txt" | "log" | "md" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "mp4" => "video/mp4",
+        "mp3" => "audio/mpeg",
+        _ => "application/octet-stream",
+    };
+
+    mime.to_string()
+}
+
+/// One file the user picked, described for the compose window.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedFile {
+    pub path: String,
+    pub filename: String,
+    #[ts(type = "number")]
+    pub size: i64,
+}
+
+/// Opens the system file picker and reports what was chosen.
+///
+/// The paths are returned rather than the contents: the window needs a name and a size to draw
+/// a chip, and reading a 20MB file across the IPC boundary to show "20 MB" would be absurd. The
+/// core opens them again at send time.
+#[tauri::command]
+pub async fn compose_pick_files() -> Result<Vec<PickedFile>, AppError> {
+    let chosen = tokio::task::spawn_blocking(crate::platform::files::open_files_dialog)
+        .await
+        .map_err(|_| AppError {
+            code: "cancelled".into(),
+            message: "Choosing files was interrupted.".into(),
+        })?;
+
+    Ok(chosen
+        .into_iter()
+        .map(|path| {
+            let size = std::fs::metadata(&path)
+                .map(|meta| meta.len() as i64)
+                .unwrap_or(0);
+            let filename = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| "attachment".to_string());
+
+            PickedFile {
+                path: path.to_string_lossy().to_string(),
+                filename,
+                size,
+            }
+        })
+        .collect())
+}
+
+/// The size at which the compose window warns. `mail::outgoing::ATTACHMENT_WARN_BYTES`.
+#[tauri::command]
+pub async fn compose_size_limit() -> Result<i64, AppError> {
+    Ok(crate::mail::outgoing::ATTACHMENT_WARN_BYTES as i64)
 }

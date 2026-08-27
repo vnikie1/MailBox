@@ -111,6 +111,73 @@ pub fn save_file_dialog(suggested: &str) -> Option<PathBuf> {
     )))
 }
 
+/// Shows the system "Open" dialog, allowing several files. Empty when cancelled.
+///
+/// Blocking, like [`save_file_dialog`], and for the same reason: it runs a modal message loop.
+///
+/// Multi-select returns its result in a shape worth spelling out, because it is easy to get
+/// subtly wrong and the failure is silent. With one file the buffer holds a full path. With
+/// several it holds the *directory*, then a NUL, then each bare filename, then a NUL, and a
+/// final NUL to end the list. Reading it as a single path gives the directory and no files at
+/// all — an attachment button that appears to do nothing.
+pub fn open_files_dialog() -> Vec<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::core::PWSTR;
+    use windows::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_ALLOWMULTISELECT, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR,
+        OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+
+    // Large, because it has to hold every selected name at once. A user attaching forty
+    // photographs is not doing anything unusual.
+    let mut buffer: Vec<u16> = vec![0; 65_536];
+
+    let mut options = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFile: PWSTR(buffer.as_mut_ptr()),
+        nMaxFile: buffer.len() as u32,
+        Flags: OFN_EXPLORER
+            | OFN_ALLOWMULTISELECT
+            | OFN_FILEMUSTEXIST
+            | OFN_PATHMUSTEXIST
+            | OFN_NOCHANGEDIR,
+        ..Default::default()
+    };
+
+    if !unsafe { GetOpenFileNameW(&mut options) }.as_bool() {
+        return Vec::new();
+    }
+
+    // Split on NULs, stopping at the empty string that ends the list.
+    let mut parts: Vec<String> = Vec::new();
+    let mut start = 0usize;
+    for index in 0..buffer.len() {
+        if buffer[index] != 0 {
+            continue;
+        }
+        if index == start {
+            break;
+        }
+        parts.push(
+            std::ffi::OsString::from_wide(&buffer[start..index])
+                .to_string_lossy()
+                .to_string(),
+        );
+        start = index + 1;
+    }
+
+    match parts.len() {
+        0 => Vec::new(),
+        // One entry is a complete path: the user chose a single file.
+        1 => vec![PathBuf::from(&parts[0])],
+        // Otherwise the first entry is the directory and the rest are bare names.
+        _ => {
+            let directory = PathBuf::from(&parts[0]);
+            parts[1..].iter().map(|name| directory.join(name)).collect()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

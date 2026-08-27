@@ -41,6 +41,8 @@ pub struct Draft {
     pub references: Vec<String>,
     /// The immediate parent, for `In-Reply-To`.
     pub in_reply_to: Option<String>,
+    /// Files to send with the message.
+    pub attachments: Vec<Attachment>,
     /// This message's own `Message-ID`. Generated when absent.
     ///
     /// Ours rather than the library's, and that matters for one specific reason: it is how a
@@ -50,6 +52,23 @@ pub struct Draft {
     /// twice. See `sync::outbox`.
     pub message_id: Option<String>,
 }
+
+/// One file travelling with a message.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// The name the recipient will see. Sanitised on the way out — see below.
+    pub filename: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
+/// What most providers will accept in one message.
+///
+/// 25MB is Gmail's limit and the de facto standard; a few allow more and none of the common
+/// ones allow less. Enforced as a warning in the UI rather than a refusal here, because the
+/// user may know their own server takes more — but a message that is silently too large comes
+/// back as a bounce hours later, addressed to nobody the user recognises.
+pub const ATTACHMENT_WARN_BYTES: u64 = 25 * 1024 * 1024;
 
 /// A built message and the identity it will be known by.
 #[derive(Debug, Clone)]
@@ -269,6 +288,35 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
                 .body(draft.html.clone()),
         );
 
+    // With attachments the alternative becomes the first part of a `multipart/mixed`. That
+    // nesting is the part clients disagree about least: a flat mixed part containing both a
+    // text and an HTML body is read by some clients as two attachments and by others as a
+    // message with the HTML shown as a file.
+    let body = if draft.attachments.is_empty() {
+        body
+    } else {
+        let mut mixed = MultiPart::mixed().multipart(body);
+
+        for attachment in &draft.attachments {
+            let content_type = ContentType::parse(&attachment.mime).unwrap_or_else(|_| {
+                ContentType::parse("application/octet-stream").unwrap_or(ContentType::TEXT_PLAIN)
+            });
+
+            // The filename is sanitised even though it is going *out*. It came from the local
+            // filesystem, but it lands in the recipient's download folder, and the traversal
+            // and right-to-left tricks that matter on the way in matter identically on the way
+            // out — this app must not be the thing that sends them.
+            mixed = mixed.singlepart(
+                lettre::message::Attachment::new(crate::platform::files::safe_file_name(
+                    &attachment.filename,
+                ))
+                .body(attachment.bytes.clone(), content_type),
+            );
+        }
+
+        mixed
+    };
+
     let message = builder
         .multipart(body)
         .map_err(|error| BuildError::Assembly(error.to_string()))?;
@@ -476,5 +524,124 @@ mod tests {
         let quoted = quote_text("First.\n\nSecond.");
 
         assert_eq!(quoted, "> First.\r\n>\r\n> Second.");
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    fn draft_with(attachments: Vec<Attachment>) -> Draft {
+        Draft {
+            from: Address {
+                name: Some("Me".into()),
+                email: "me@halcyon.test".into(),
+            },
+            to: vec![Address {
+                name: None,
+                email: "ada@example.test".into(),
+            }],
+            subject: "Here it is".into(),
+            html: "<p>Attached.</p>".into(),
+            attachments,
+            ..Draft::default()
+        }
+    }
+
+    fn rendered(draft: &Draft) -> String {
+        String::from_utf8_lossy(&build(draft).expect("build").bytes).to_string()
+    }
+
+    #[test]
+    fn an_attachment_nests_the_alternative_inside_a_mixed_part() {
+        // The nesting clients disagree about least. A flat mixed part holding both bodies is
+        // read by some as two attachments and by others as a message whose HTML is a file.
+        let output = rendered(&draft_with(vec![Attachment {
+            filename: "notes.txt".into(),
+            mime: "text/plain".into(),
+            bytes: b"hello".to_vec(),
+        }]));
+
+        let mixed = output.find("multipart/mixed").expect("mixed part");
+        let alternative = output
+            .find("multipart/alternative")
+            .expect("alternative part");
+
+        assert!(
+            mixed < alternative,
+            "the alternative must be inside the mixed part"
+        );
+        assert!(output.contains("notes.txt"), "{output}");
+    }
+
+    #[test]
+    fn a_message_without_attachments_is_not_wrapped_in_a_mixed_part() {
+        // An empty mixed wrapper is legal and pointless, and some clients draw a paperclip for
+        // it — a message that claims an attachment and has none.
+        let output = rendered(&draft_with(Vec::new()));
+
+        assert!(!output.contains("multipart/mixed"), "{output}");
+        assert!(output.contains("multipart/alternative"));
+    }
+
+    #[test]
+    fn an_outgoing_filename_is_sanitised_too() {
+        // It came from this machine's filesystem, but it lands in the recipient's download
+        // folder. Traversal and right-to-left overrides matter identically on the way out, and
+        // this app must not be the thing that sends them.
+        let output = rendered(&draft_with(vec![Attachment {
+            filename: "../../evil\u{202E}fdp.exe".into(),
+            mime: "application/octet-stream".into(),
+            bytes: b"x".to_vec(),
+        }]));
+
+        let disposition = output
+            .lines()
+            .find(|line| line.starts_with("Content-Disposition:"))
+            .expect("a disposition header");
+
+        // What actually matters is that there are no path *separators* left. A literal ".."
+        // with nothing to separate is an ordinary, harmless filename component — checking for
+        // the substring alone would also match the base64 body and the MIME boundary, which is
+        // what the first version of this assertion did.
+        assert!(!disposition.contains('/'), "{disposition}");
+        assert!(!disposition.contains('\\'), "{disposition}");
+        assert!(!disposition.contains('\u{202E}'), "{disposition}");
+
+        // And the real extension is still the last thing in the name, which is the whole point
+        // of stripping the override.
+        assert!(disposition.contains(".exe\""), "{disposition}");
+    }
+
+    #[test]
+    fn an_unusable_mime_type_falls_back_rather_than_failing_the_send() {
+        // Standing rule 13. A file whose type could not be guessed is still a file the user
+        // asked to send, and octet-stream is what every client falls back to anyway.
+        let output = rendered(&draft_with(vec![Attachment {
+            filename: "mystery.bin".into(),
+            mime: "not/a/valid/type".into(),
+            bytes: b"x".to_vec(),
+        }]));
+
+        assert!(output.contains("mystery.bin"), "{output}");
+    }
+
+    #[test]
+    fn several_attachments_all_travel() {
+        let output = rendered(&draft_with(vec![
+            Attachment {
+                filename: "one.txt".into(),
+                mime: "text/plain".into(),
+                bytes: b"1".to_vec(),
+            },
+            Attachment {
+                filename: "two.txt".into(),
+                mime: "text/plain".into(),
+                bytes: b"2".to_vec(),
+            },
+        ]));
+
+        assert!(output.contains("one.txt"), "{output}");
+        assert!(output.contains("two.txt"), "{output}");
     }
 }

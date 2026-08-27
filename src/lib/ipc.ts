@@ -507,6 +507,7 @@ import type { LinkOutcome } from './generated/LinkOutcome'
 import type { Rendered } from './generated/Rendered'
 import type { AttachmentData } from './generated/AttachmentData'
 import type { OutgoingMessage } from './generated/OutgoingMessage'
+import type { PickedFile } from './generated/PickedFile'
 import type { OutboxRow } from './generated/OutboxRow'
 import type { ReplyDraft } from './generated/ReplyDraft'
 
@@ -673,4 +674,22 @@ export async function outboxRetry(id: number): Promise<boolean> {
 export async function outboxSchedule(id: number, sendAt: number): Promise<boolean> {
   if (!runningInTauri) return false
   return invoke<boolean>('outbox_schedule', { id, sendAt })
+}
+
+/**
+ * Opens the system file picker for attachments.
+ *
+ * Returns paths rather than contents: the window needs a name and a size to draw a chip, and
+ * moving a 20MB file across the IPC boundary to show "20 MB" would be absurd. The core opens
+ * them again at send time.
+ */
+export async function composePickFiles(): Promise<PickedFile[]> {
+  if (!runningInTauri) return []
+  return invoke<PickedFile[]>('compose_pick_files')
+}
+
+/** The total attachment size at which to warn. Decided by the core. */
+export async function composeSizeLimit(): Promise<number> {
+  if (!runningInTauri) return 25 * 1024 * 1024
+  return invoke<number>('compose_size_limit')
 }

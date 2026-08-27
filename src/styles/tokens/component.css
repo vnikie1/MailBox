@@ -187,6 +187,9 @@
   --compose-toolbar-gap: var(--sp-2);
   --compose-format-bar-height: 36px;
   --compose-format-divider-height: 16px;
+  --compose-chip-height: 24px;
+  --compose-chip-icon: 13px;
+  --compose-chip-max-width: 260px;
 
   /* ---------- outbox banner — docs/01 §6 ----------
    * Bottom-centre and floating, never in the layout: it comes and goes on its own schedule,

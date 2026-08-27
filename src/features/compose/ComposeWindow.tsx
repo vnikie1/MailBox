@@ -1,10 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Send } from 'lucide-react'
+import { Paperclip, Send, X } from 'lucide-react'
 
 import type { ComposeAddress } from '@/lib/generated/ComposeAddress'
+import type { PickedFile } from '@/lib/generated/PickedFile'
 import type { ReplyDraft } from '@/lib/generated/ReplyDraft'
-import { composeReply, composeSend, closeThisWindow, accountsList } from '@/lib/ipc'
-import { Button, TextField, TokenField, type Token } from '@/ui'
+import {
+  accountsList,
+  closeThisWindow,
+  composePickFiles,
+  composeReply,
+  composeSend,
+  composeSizeLimit,
+} from '@/lib/ipc'
+import { Button, IconButton, TextField, TokenField, type Token } from '@/ui'
+
+import { formatFileSize as formatSize } from '@/lib/date'
 
 import { Editor } from './Editor'
 import styles from './ComposeWindow.module.css'
@@ -70,11 +80,24 @@ export function ComposeWindow() {
     references: [],
   })
 
+  const [attachments, setAttachments] = useState<PickedFile[]>([])
+  const [sizeLimit, setSizeLimit] = useState(25 * 1024 * 1024)
   const [sending, setSending] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
 
   // The editor reports both forms on every change; neither is derived from the other.
   const body = useRef({ html: '', text: '' })
+
+  const totalSize = useMemo(
+    () => attachments.reduce((sum, file) => sum + file.size, 0),
+    [attachments],
+  )
+
+  // The limit is the core's to decide, so the warning and the format agree with whatever the
+  // builder actually enforces.
+  useEffect(() => {
+    void composeSizeLimit().then(setSizeLimit)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -137,6 +160,7 @@ export function ComposeWindow() {
         text: body.current.text,
         inReplyTo: threading.inReplyTo,
         references: threading.references,
+        attachments: attachments.map((file) => file.path),
       })
 
       // The core has the message on disk and in the outbox before this resolves, so closing
@@ -150,11 +174,25 @@ export function ComposeWindow() {
           : 'The message could not be queued.'
       setProblem(message)
     }
-  }, [accountId, to, cc, bcc, subject, threading])
+  }, [accountId, to, cc, bcc, subject, threading, attachments])
 
   return (
     <div className={styles.window}>
       <header className={styles.toolbar} data-tauri-drag-region>
+        <IconButton
+          icon={Paperclip}
+          label="Attach Files"
+          onClick={() => {
+            void composePickFiles().then((picked) => {
+              // Appended rather than replaced: attaching twice is how people add a file they
+              // forgot, and replacing would silently drop the first set.
+              setAttachments((current) => {
+                const seen = new Set(current.map((file) => file.path))
+                return [...current, ...picked.filter((file) => !seen.has(file.path))]
+              })
+            })
+          }}
+        />
         <span className={styles.spacer} />
         <Button
           variant="filled"
@@ -220,6 +258,36 @@ export function ComposeWindow() {
           />
         </div>
       </div>
+
+      {attachments.length > 0 && (
+        <div className={styles.attachments}>
+          {attachments.map((file) => (
+            <span key={file.path} className={styles.attachment}>
+              <Paperclip className={styles.attachmentIcon} aria-hidden strokeWidth={1.5} />
+              <span className={styles.attachmentName}>{file.filename}</span>
+              <span className={styles.attachmentSize}>{formatSize(file.size)}</span>
+              <IconButton
+                icon={X}
+                label={`Remove ${file.filename}`}
+                size="sm"
+                onClick={() => {
+                  setAttachments((current) => current.filter((entry) => entry.path !== file.path))
+                }}
+              />
+            </span>
+          ))}
+
+          {/* A warning, not a refusal. The user may know their own server takes more than the
+              25MB most providers allow — but a message that is silently too large comes back
+              as a bounce hours later, addressed to nobody they recognise. */}
+          {totalSize > sizeLimit && (
+            <span className={styles.tooLarge} role="status">
+              {formatSize(totalSize)} of attachments. Most providers refuse more than{' '}
+              {formatSize(sizeLimit)}.
+            </span>
+          )}
+        </div>
+      )}
 
       {problem !== null && (
         <p className={styles.problem} role="alert">

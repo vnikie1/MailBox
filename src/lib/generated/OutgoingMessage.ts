@@ -4,4 +4,8 @@ import type { ComposeAddress } from "./ComposeAddress";
 /**
  * What the compose window sends back when the user presses Send.
  */
-export type OutgoingMessage = { accountId: number, to: Array<ComposeAddress>, cc: Array<ComposeAddress>, bcc: Array<ComposeAddress>, subject: string, html: string, text: string | null, inReplyTo: string | null, references: Array<string>, };
+export type OutgoingMessage = { accountId: number, to: Array<ComposeAddress>, cc: Array<ComposeAddress>, bcc: Array<ComposeAddress>, subject: string, html: string, text: string | null, inReplyTo: string | null, references: Array<string>, 
+/**
+ * Absolute paths of files to attach. Read by the core rather than sent as bytes.
+ */
+attachments: Array<string>, };

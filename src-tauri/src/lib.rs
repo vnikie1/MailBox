@@ -62,6 +62,8 @@ pub fn run() {
             ipc::compose::compose_open,
             ipc::compose::outbox_retry,
             ipc::compose::outbox_schedule,
+            ipc::compose::compose_pick_files,
+            ipc::compose::compose_size_limit,
             ipc::body::message_body,
             ipc::body::open_external,
             ipc::body::open_external_confirmed,
