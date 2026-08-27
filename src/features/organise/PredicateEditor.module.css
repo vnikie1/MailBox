@@ -1,0 +1,61 @@
+/* The condition builder. docs/01 §8. Ordered by ascending specificity, as elsewhere. */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.header {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+}
+
+.matchLabel {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+
+  /* The value column takes the slack, so a long search term grows while the two dropdowns
+   * beside it stay put. Condition builders whose controls resize as you type are the reason
+   * they feel unsteady. */
+  grid-template-columns: minmax(0, 10rem) minmax(0, 10rem) minmax(0, 1fr) auto auto;
+  gap: var(--sp-3);
+  align-items: center;
+}
+
+/* Holds the value column open for a condition that takes no value, so switching to
+ * "Is flagged" does not slide the two buttons left. Standing rule 6. */
+.spacer {
+  display: block;
+}
+
+.select {
+  min-width: 0;
+  height: var(--field-height);
+  padding: 0 var(--field-pad-x);
+  font: inherit;
+  color: var(--label-1);
+  background: var(--fill-hover);
+  border: 0;
+  border-radius: var(--field-radius);
+}
+
+.select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}

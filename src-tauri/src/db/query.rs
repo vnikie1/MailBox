@@ -571,3 +571,66 @@ pub fn reply_source(conn: &Connection, message_id: i64) -> Option<ReplySource> {
         quoted_html,
     })
 }
+
+/// Qualifies a bare column list with `message.`.
+///
+/// Needed because this is the only query that joins `mailbox`, and both tables have an `id` and
+/// an `account_id`. A blind string replace would also hit `thread_id` and `mailbox_id`.
+fn qualified(columns: &str) -> String {
+    columns
+        .split(',')
+        .map(|column| format!("message.{}", column.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The messages a smart-mailbox predicate matches.
+///
+/// Compiled to SQL rather than evaluated row by row in Rust: a smart mailbox over 50,000
+/// messages is opened from the sidebar and has to draw immediately, and pulling every row
+/// across the seam to filter it would be the slowest thing in the app.
+///
+/// Snoozed messages are excluded here as they are everywhere else. A message the user asked to
+/// be reminded about later should not reappear in a smart mailbox in the meantime — that is
+/// precisely the thing they asked not to see.
+pub fn messages_matching(
+    conn: &Connection,
+    predicate: &crate::rules::predicate::Predicate,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<MessageRow>, DbError> {
+    let compiled = predicate.compile();
+
+    // The join is what lets a predicate read `mailbox.display_name`; `compile` assumes it.
+    let sql = format!(
+        "SELECT {}
+           FROM message
+           JOIN mailbox ON mailbox.id = message.mailbox_id
+          WHERE ({})
+            AND (message.snooze_until IS NULL OR message.snooze_until <= strftime('%s', 'now'))
+          ORDER BY message.date_received DESC, message.id DESC
+          LIMIT ?{} OFFSET ?{}",
+        qualified(MESSAGE_ROW_COLUMNS),
+        compiled.sql,
+        compiled.params.len() + 1,
+        compiled.params.len() + 2,
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = compiled
+        .params
+        .into_iter()
+        .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>)
+        .collect();
+
+    params.push(Box::new(i64::from(limit)));
+    params.push(Box::new(i64::from(offset)));
+
+    let borrowed: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(borrowed.as_slice(), message_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(rows)
+}

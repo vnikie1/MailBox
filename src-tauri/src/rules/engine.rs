@@ -30,8 +30,11 @@ use super::predicate::{Predicate, Subject};
 #[serde(rename_all = "camelCase", tag = "type", content = "value")]
 pub enum Action {
     /// Move to a mailbox, by id.
-    #[ts(type = "{ type: \"moveTo\", value: number }")]
-    MoveTo(i64),
+    ///
+    /// Annotated on the inner field rather than the variant: without it ts-rs emits `bigint`,
+    /// and a mailbox id that arrives as a `bigint` will not compare equal to the `number` the
+    /// rest of the UI holds.
+    MoveTo(#[ts(type = "number")] i64),
     MarkRead,
     MarkUnread,
     Flag,

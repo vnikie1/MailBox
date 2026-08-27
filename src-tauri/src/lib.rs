@@ -70,6 +70,33 @@ pub fn run() {
             ipc::compose::signature_set,
             ipc::compose::compose_blank,
             ipc::compose::compose_save_draft,
+            ipc::organise::smart_list,
+            ipc::organise::smart_save,
+            ipc::organise::smart_delete,
+            ipc::organise::smart_messages,
+            ipc::organise::rules_list,
+            ipc::organise::rule_save,
+            ipc::organise::rule_delete,
+            ipc::organise::rules_run,
+            ipc::organise::flag_names,
+            ipc::organise::flag_rename,
+            ipc::organise::flag_set,
+            ipc::organise::vips_list,
+            ipc::organise::vip_add,
+            ipc::organise::vip_remove,
+            ipc::organise::junk_status,
+            ipc::organise::junk_mark,
+            ipc::organise::junk_scan,
+            ipc::organise::blocked_list,
+            ipc::organise::block_sender,
+            ipc::organise::unblock_sender,
+            ipc::organise::snooze,
+            ipc::organise::unsnooze,
+            ipc::organise::mute_thread,
+            ipc::organise::follow_ups_detect,
+            ipc::organise::undo_available,
+            ipc::organise::undo_perform,
+            ipc::organise::redo_perform,
             ipc::compose::compose_discard_draft,
             ipc::compose::contacts_suggest,
             ipc::body::message_body,
@@ -90,6 +117,9 @@ pub fn run() {
             app.manage(db::Db::open(&path)?);
             app.manage(sync::engine::SyncEngine::new());
             app.manage(sync::idle::Watchers::new());
+            // Behind an `Arc` because `Db::write` moves its closure to the writer thread, so
+            // an undo command has to hand the stack across that boundary rather than borrow it.
+            app.manage(std::sync::Arc::new(undo::Stack::new()));
 
             // The outbox sender. Started here rather than on first send, because its first
             // job is to resolve whatever a previous run left in flight — a message that was

@@ -299,6 +299,14 @@ export interface MenuItemProps extends Omit<ComponentPropsWithRef<'button'>, 'ch
   shortcut?: string
   /** Renders a checkmark in the leading column and reports `aria-checked`. */
   checked?: boolean
+  /**
+   * A colour swatch in the trailing column — one of the seven flag colours by name.
+   *
+   * Here rather than in the feature because the alternative is a feature reaching past this
+   * barrel to style a raw element, which is the one thing the design system forbids. It sits
+   * in the trailing column so it never competes with the checkmark for the leading one.
+   */
+  swatch?: string
   destructive?: boolean
 }
 
@@ -314,6 +322,7 @@ export function MenuItem({
   icon: Icon,
   shortcut,
   checked,
+  swatch,
   destructive = false,
   disabled = false,
   className,
@@ -355,6 +364,17 @@ export function MenuItem({
         )}
       </span>
       <span className={styles.label}>{label}</span>
+      {swatch !== undefined && (
+        <span
+          className={styles.swatch}
+          // The only inline colour in the design system. There are exactly seven, they are
+          // named by the core, and the alternative is seven near-identical classes plus a
+          // lookup mapping strings to them — the same indirection with more places to forget
+          // one. The value is a token name, never a colour literal, so standing rule 1 holds.
+          style={{ background: `var(--flag-${swatch})` }}
+          aria-hidden="true"
+        />
+      )}
       {shortcut !== undefined && (
         <span className={cx(styles.shortcut, 'tabular')} aria-hidden="true">
           {shortcut}

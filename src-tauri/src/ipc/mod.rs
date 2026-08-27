@@ -5,5 +5,6 @@ pub mod attachments;
 pub mod body;
 pub mod compose;
 pub mod mail;
+pub mod organise;
 pub mod sync;
 pub mod window;

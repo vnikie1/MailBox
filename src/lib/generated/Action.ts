@@ -3,4 +3,4 @@
 /**
  * What a rule does to a message it matches.
  */
-export type Action = { "type": "moveTo", "value": bigint } | { "type": "markRead" } | { "type": "markUnread" } | { "type": "flag" } | { "type": "unflag" } | { "type": "setColour", "value": string } | { "type": "markJunk" } | { "type": "delete" } | { "type": "stopEvaluating" };
+export type Action = { "type": "moveTo", "value": number } | { "type": "markRead" } | { "type": "markUnread" } | { "type": "flag" } | { "type": "unflag" } | { "type": "setColour", "value": string } | { "type": "markJunk" } | { "type": "delete" } | { "type": "stopEvaluating" };

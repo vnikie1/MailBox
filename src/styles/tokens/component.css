@@ -146,6 +146,10 @@
   --menu-shortcut-gap: var(--sp-8);
   --menu-icon: 14px;
   --menu-lead-width: 16px;
+
+  /* The flag-colour dot. Smaller than the icon column: it is a mark beside a label, not an
+   * icon in its own right, and at icon size it reads as a bullet point. */
+  --menu-swatch: 10px;
   --menu-sep-margin: var(--sp-2) var(--sp-4);
   --menu-submenu-delay: 150ms;
 

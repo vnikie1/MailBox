@@ -13,7 +13,10 @@ import {
 } from 'lucide-react'
 
 import type { AccountRow } from '@/lib/generated/AccountRow'
+import type { FlagName } from '@/lib/generated/FlagName'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
+import type { Predicate } from '@/lib/generated/Predicate'
+import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
 
 /**
  * The sidebar tree. docs/01 §3.
@@ -37,6 +40,14 @@ export interface SidebarNode {
    * every row that happened to share a mailbox.
    */
   mailboxIds: number[]
+  /**
+   * Set on rows that are a saved search rather than a folder: smart mailboxes, Flagged, and
+   * each flag colour under it. The list queries by this instead of by mailbox id.
+   *
+   * A row has one or the other, never both. Carrying both would leave two ways to ask the
+   * same question and no rule about which wins.
+   */
+  predicate?: Predicate
   unreadCount: number
   children: SidebarNode[]
   depth: number
@@ -108,21 +119,69 @@ function unifiedNode(
 /** Mail's order within an account, which is not alphabetical. */
 const ACCOUNT_ROLE_ORDER = ['inbox', 'drafts', 'sent', 'junk', 'trash', 'archive']
 
-export function buildSidebar(accounts: AccountRow[], mailboxes: MailboxRow[]): SidebarSection[] {
+/** `is flagged` — the predicate behind the Flagged favourite. */
+function flaggedPredicate(): Predicate {
+  return { type: 'is', value: { field: 'isFlagged', op: 'isTrue', value: '' } }
+}
+
+/**
+ * `is flagged, and mentions this colour`.
+ *
+ * There is deliberately no `flagColor` field on `Field`. Adding one would let a user write a
+ * smart mailbox against a colour and then rename that colour out from under themselves, and the
+ * mailbox would silently stop matching. These children are built by the app rather than saved,
+ * so they can be rebuilt whenever the names change.
+ */
+function colourPredicate(color: string): Predicate {
+  return {
+    type: 'all',
+    value: [
+      flaggedPredicate(),
+      { type: 'is', value: { field: 'anyText', op: 'contains', value: color } },
+    ],
+  }
+}
+
+/**
+ * Flagged, with one child per colour. docs/01 §8.
+ *
+ * Children are only offered when a colour has been renamed or used, because seven identical
+ * children under every Flagged row is noise in a sidebar that is meant to be quiet.
+ */
+function flaggedNode(flagNames: FlagName[]): SidebarNode {
+  return {
+    id: 'flagged',
+    label: 'Flagged',
+    icon: Flag,
+    mailboxIds: [],
+    predicate: flaggedPredicate(),
+    unreadCount: 0,
+    children: flagNames.map((flag) => ({
+      id: `flag-${flag.color}`,
+      label: flag.name,
+      icon: Flag,
+      mailboxIds: [],
+      predicate: colourPredicate(flag.color),
+      unreadCount: 0,
+      children: [],
+      depth: 1,
+    })),
+    depth: 0,
+  }
+}
+
+export function buildSidebar(
+  accounts: AccountRow[],
+  mailboxes: MailboxRow[],
+  smart: SmartMailbox[] = [],
+  flagNames: FlagName[] = [],
+): SidebarSection[] {
   const favourites: SidebarSection = {
     id: 'favourites',
     title: 'Favourites',
     nodes: [
       unifiedNode(mailboxes, accounts, 'all-inboxes', 'All Inboxes', 'inbox'),
-      {
-        id: 'flagged',
-        label: 'Flagged',
-        icon: Flag,
-        mailboxIds: [],
-        unreadCount: 0,
-        children: [],
-        depth: 0,
-      },
+      flaggedNode(flagNames),
       unifiedNode(mailboxes, accounts, 'all-drafts', 'All Drafts', 'drafts'),
       unifiedNode(mailboxes, accounts, 'all-sent', 'All Sent', 'sent'),
     ],
@@ -160,7 +219,25 @@ export function buildSidebar(accounts: AccountRow[], mailboxes: MailboxRow[]): S
     }
   })
 
-  return [favourites, { id: 'smart', title: 'Smart Mailboxes', nodes: [] }, ...accountSections]
+  const smartSection: SidebarSection = {
+    id: 'smart',
+    title: 'Smart Mailboxes',
+    nodes: smart.map((box) => ({
+      id: `smart-${String(box.id)}`,
+      label: box.name,
+      icon: Star,
+      mailboxIds: [],
+      predicate: box.predicate,
+      // Deliberately not counted. An unread badge on a smart mailbox means running its
+      // predicate on every sidebar render, and a sidebar that stalls on a five-condition
+      // search over 50,000 messages is worse than one without a number on it.
+      unreadCount: 0,
+      children: [],
+      depth: 0,
+    })),
+  }
+
+  return [favourites, smartSection, ...accountSections]
 }
 
 /** Flattens the tree to the rows actually on screen, honouring what is collapsed. */

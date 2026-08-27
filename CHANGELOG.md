@@ -1821,3 +1821,203 @@ Stated plainly rather than left to be discovered:
   Outlook and Apple Mail, with Outlook Windows named as the strictest. Gmail can be checked with
   the real account already configured; the other two need accounts that do not exist yet. Until
   then Phase 7 is feature-complete and unproven, which is a different thing from done.
+
+---
+
+## 2026-08-27 — Phase 8: organising mail
+
+Rules, smart mailboxes, flags, VIPs, reminders, the junk filter and undo. Built on one shared
+predicate engine, because docs/06 requires it and because two matchers would eventually disagree
+about what the same saved search means.
+
+### Added — the predicate engine
+
+- **`rules/predicate.rs`** — one predicate type that both **compiles to SQL** and **evaluates in
+  memory**, because a smart mailbox asks "which stored messages match?" and a rule asks "does
+  this arriving message match?" — the same question from two directions. Values are always bound
+  parameters, never spliced; `%` and `_` in a user's search term are escaped, so someone
+  searching for a literal percent sign gets what they typed rather than a wildcard.
+
+  A **property test** asserts the two agree on randomly generated predicates. It was verified
+  non-vacuous by injecting a case-sensitivity bug: it failed, shrank to a minimal input, and
+  passed again on revert. A property test nobody has seen fail is a test nobody should trust.
+
+### Added — rules
+
+- **`rules/engine.rs`** — actions, storage, and one evaluation path used by both triggers. "Run
+  Rules" on a selection and the automatic pass on arrival are literally the same function, so
+  they cannot drift; that difference is exactly what people test against and find broken.
+
+  A later rule **re-reads the message**, so it sees what an earlier one did. Rules that depend on
+  each other in order — "file it, then flag everything in that folder" — are how people actually
+  build them, and evaluating them all against the original state would quietly break that while
+  looking correct in every individual rule.
+
+  **Delete moves to Trash, never destroys.** A rule that permanently deletes mail, on a predicate
+  written in thirty seconds, is not something anyone recovers from.
+
+  **"Run script" is deliberately not implemented.** docs/01 §8 lists it among Mail's actions. A
+  rule action that executes an arbitrary program, triggered by mail _from anyone who knows the
+  user's address_, is a remote code execution primitive with a friendly editor in front of it.
+  Mail can offer it because AppleScript runs inside a sandbox the OS arbitrates; there is no
+  equivalent here, and "the user configured it" is not a defence when the trigger is
+  attacker-controlled. **Play sound** is absent for a duller reason — it belongs with
+  notifications in Phase 10, and doing it here would mean two sound paths.
+
+### Added — the junk filter, and the gate that rewrote it
+
+- **`rules/junk.rs`** — a local Bayesian classifier. Standing rule 16 rules out every hosted spam
+  service and shared reputation list, which is not a limitation to work around: it is the reason
+  a local classifier is the right answer rather than a compromise.
+
+- **The first gate was worthless, and it passed.** Scored against the live database it reported
+  **97.3% accuracy** while catching **0.3% of the junk**. Both numbers were correct. The corpus
+  was 97% ham, so a classifier answering "clean" for everything scores 97.2% — the accuracy
+  figure was measuring the imbalance, not the filter. It was also the wrong corpus entirely:
+  almost all of that mail was seeded test data whose Junk folder holds randomly assigned
+  generated text, so nothing distinguished it and nothing could. The one real account had
+  **twelve** messages in Spam.
+
+  Replaced with the **SpamAssassin public corpus** — human-labelled, published for this purpose,
+  and not written by me, since a corpus I write measures my imagination rather than the filter.
+  The headline is now **balanced accuracy**, which a do-nothing classifier scores 50% on whatever
+  the mix, plus floors on junk caught and a ceiling on real mail misfiled. The ceiling is the one
+  that matters: a false negative leaves one more piece of spam in the Inbox, a false positive
+  hides a message someone needed.
+
+- **Naive Bayes could not meet that ceiling, so the combining rule changed.** The product form
+  reached 96.7% balanced accuracy while misfiling **1.16% of real mail**, and no threshold fixed
+  it — at 0.999 it was still 0.73%. The product saturates: a handful of extreme tokens pin the
+  result at 0 or 1 and every later token is arithmetically ignored, so legitimate mail containing
+  three spammy words becomes indistinguishable from spam. **Fisher's chi-square combination**,
+  per Robinson, computes two independent statistics — how ham-like the evidence is and how
+  junk-like — and a message that reads as both lands in the middle. That middle is where the
+  newsletters live.
+
+  The threshold was then **measured rather than chosen**: `junkgate` prints what each setting
+  costs, and 0.99 trades seven points of catch rate to stop roughly one misfiled message in every
+  three hundred.
+
+  **Final result on the held-out half: 91.08% balanced accuracy, 82.6% of junk caught, 0.44% of
+  real mail misfiled.** Trained and tested on disjoint, stratified halves — scoring the messages
+  it trained on would report a number that means nothing.
+
+- **Training only ever reads labels a human applied.** `junk_by_user` exists for exactly this. A
+  classifier fed its own guesses converges on its own mistakes with growing confidence, and a
+  test asserts a filter-marked message never enters the corpus.
+
+### Added — VIPs, flags, reminders and follow-up
+
+- **`rules/vip.rs`** — everything here keys off an **address**, and an address compared the wrong
+  way is a feature that silently does nothing. `Ada@Example.com` and `ada@example.com` are one
+  mailbox to every provider alive; the local part is case-sensitive per RFC 5321 §2.4 and nothing
+  on earth treats it that way, so honouring the RFC would mean a VIP that stops working when the
+  sender's client changes how it capitalises their own name.
+
+- **The seven flag colours are validated, not trusted.** The stored value names a CSS custom
+  property, so an unrecognised one is a token that does not resolve — an invisible flag rather
+  than an error. The spec prose says "grey" and the token is `--flag-gray`; the code follows the
+  token, because that is the string that has to resolve.
+
+- **Remind Me leaves the message where it is** and hides it until due, rather than moving it to a
+  holding folder. A move syncs to every other client the user owns, and a message that vanishes
+  from the server's copy of the Inbox is one they cannot find on their phone.
+
+- **Follow Up is deliberately conservative** — a question mark, no later inbound message in the
+  thread, and three days elapsed — and a reply arriving later clears the mark. A list that fills
+  with everything the user has ever sent is one they stop looking at, and a badge that stays on
+  an answered conversation teaches them to ignore the badge.
+
+- **Block Sender is retroactive.** The reason anyone blocks a sender is usually the mail already
+  in the Inbox; a block that only applies to future mail leaves them to clear the rest by hand.
+
+### Added — undo
+
+- **`undo.rs`** — every entry stores **the state it replaced**, not a description of what
+  happened. "Moved to Archive" cannot be reversed without knowing where the message was, and
+  reconstructing that afterwards means guessing — "the Inbox" is the usual answer and the usual
+  answer is wrong exactly when undo matters most.
+
+  The stack lives **in memory**, deliberately. One restored from disk would offer to reverse an
+  action from last Tuesday against a mailbox since synced, moved and re-threaded by other
+  clients. Closing the window ends the undo history, which is what Mail does and what everyone
+  already expects.
+
+  Redo captures its inverse _before_ restoring, rather than re-running the original command.
+  Re-running would be wrong for anything whose effect depends on when it happens — a rule, a
+  snooze, a filter verdict.
+
+### Added — the UI
+
+- **One condition editor** for rules and smart mailboxes, since they are one type in the core.
+  Two editors would diverge, and the whole point of a shared engine is that a rule and a smart
+  mailbox written the same way behave the same way.
+
+  The editor offers a **flat** list joined by all-or-any. `Predicate` nests arbitrarily and the
+  core evaluates whatever it is given, but a UI for arbitrary nesting is a UI nobody can use, and
+  Mail makes the same choice. A nested predicate loads, matches and runs; it is shown **read-only
+  with an explanation** rather than flattened, because flattening would save back something
+  meaning something different from what the user opened — and for a rule that files mail
+  unattended, a silent change of meaning is the worst outcome there is.
+
+- **The flag swatch went into the `Menu` primitive** rather than the feature. The alternative was
+  a feature reaching past the `@/ui` barrel to style a raw element, which is the one thing the
+  design system forbids. It is the only inline colour in the app, and the value is a token name
+  rather than a colour literal, so standing rule 1 holds.
+
+- **Remind Me computes dates against the user's calendar**, not by adding seconds. "Tomorrow" is
+  a date, not 24 hours, and on the two nights a year the clocks change those differ. "This
+  weekend" clicked on a Saturday afternoon means _next_ Saturday, not a reminder already past.
+
+- **Ctrl+Z ignores events from inside a text field.** Ctrl+Z in a message list means "put that
+  message back"; in a search box it means "undo my typing", and taking that away would be
+  maddening.
+
+- **Smart mailboxes carry no unread badge.** A count means running the predicate on every sidebar
+  render, and a sidebar that stalls on a five-condition search over 50,000 messages is worse than
+  one without a number on it.
+
+### Incidents
+
+- **The junk gate passed before it measured anything.** Recorded above in full because it is the
+  same failure as the Phase 6 soak criteria "a corpse could satisfy" — a metric chosen before
+  asking what a broken implementation would score on it. The fix both times was to state the
+  do-nothing baseline in the output, every run, so nobody has to work it out.
+
+- **A duplicate column in migration 0007.** `snooze_until` and its index were already in 0001. My
+  grep of the existing schema listed five column names and did not include the one I was about to
+  add. Caught immediately — the migration failed inside its transaction and rolled back — but the
+  habit that caused it is worth naming: grepping for what I expect to find rather than for what I
+  am about to write.
+
+- **A sweep leaked into the verdict it was informing.** The threshold table left its tuning object
+  holding the _last_ row's settings, and the gate then scored the final verdict with a
+  configuration nobody ships — reporting a failure that was not real. Now reloaded from defaults,
+  with a comment saying why.
+
+- **My own test fixtures invented fields.** `AccountRow` has no `color` or `sortOrder`;
+  `MailboxRow` has no `remotePath` or `depth`. Only the typechecker caught it, which is the
+  argument for ts-rs generating these rather than hand-writing them.
+
+- **`bigint` in the generated `Action`.** `#[ts(type = ...)]` on an enum _variant_ is ignored; it
+  has to go on the inner field. A mailbox id arriving as a `bigint` would not compare equal to the
+  `number` the rest of the UI holds — a bug that would have shown up as a rule quietly filing
+  nowhere.
+
+- **Shell heredocs and `node -e` mangled source repeatedly** — backticks eaten inside double
+  quotes, template literals emptied, a `println!` split across two lines. Every one was caught by
+  the compiler or a test, but the pattern is now unambiguous: multi-line source with backticks or
+  quotes goes through the file-writing tool, not through the shell.
+
+### Notes — what Phase 8 does not yet have
+
+- **The rules editor is not reachable from a menu yet.** `RulesEditor` is built and tested but
+  nothing opens it, and Alt+Ctrl+L is not bound. Both wait on the menu bar, which is Phase 10.
+- **Move/copy by drag-and-drop and the Ctrl+Shift+M mailbox picker** are not implemented.
+- **Snoozed messages are excluded from smart mailboxes but not yet from the main list**, and
+  nothing wakes them on a timer — `wake_due` exists and is tested, but has no caller.
+- **`junk_scan` is never called automatically.** The classifier files nothing on its own until
+  something invokes it on arrival, which belongs with the sync loop rather than here.
+- **The junk gate needs a corpus downloaded separately.** It is not vendored — 5MB of third-party
+  mail in the repo would be worse — so `junkgate` prints where to get it and refuses to report a
+  pass or a fail without it.
