@@ -10,6 +10,7 @@ import {
   composePickFiles,
   composeReply,
   composeSend,
+  composeBlank,
   composeSizeLimit,
 } from '@/lib/ipc'
 import { Button, IconButton, TextField, TokenField, type Token } from '@/ui'
@@ -63,6 +64,25 @@ function toToken(address: ComposeAddress): Token {
   }
 }
 
+/**
+ * Assembles the body the editor opens with: the signature, the quote, in the order the account
+ * asked for.
+ *
+ * "Above" puts the signature under what the user just wrote and before the quoted history,
+ * which is what people who reply inline expect. "Below" puts it at the very bottom, which is
+ * what people who top-post expect. Getting it wrong makes every reply look like a mistake,
+ * which is why it is a stored choice rather than a guess.
+ */
+function bodyWithSignature(draft: ReplyDraft): string {
+  if (draft.signatureHtml.trim() === '') return draft.quotedHtml
+
+  const signature = `<p><br></p><div></div>`
+
+  return draft.signaturePlacement === 'below'
+    ? draft.quotedHtml + signature
+    : signature + draft.quotedHtml
+}
+
 export function ComposeWindow() {
   const parameters = useMemo(() => new URLSearchParams(window.location.search), [])
   const replyTo = parameters.get('message')
@@ -100,19 +120,23 @@ export function ComposeWindow() {
   }, [])
 
   useEffect(() => {
-    let cancelled = false
+    // A mutable holder rather than a plain boolean: TypeScript narrows a captured boolean
+    // and cannot see the cleanup closure flip it, so it reports the checks after each await as
+    // redundant. They are not — the window can close mid-request — and a property read is
+    // re-checked after every call, which is exactly the behaviour wanted here.
+    const alive = { current: true }
 
     const load = async () => {
       if (replyTo !== null) {
         const draft: ReplyDraft = await composeReply(Number(replyTo), replyKind)
-        if (cancelled) return
+        if (!alive.current) return
 
         setAccountId(draft.accountId)
         setTo(draft.to.map(toToken))
         setCc(draft.cc.map(toToken))
         setShowCopies(draft.cc.length > 0)
         setSubject(draft.subject)
-        setQuoted(draft.quotedHtml)
+        setQuoted(bodyWithSignature(draft))
         setThreading({ inReplyTo: draft.inReplyTo, references: draft.references })
         return
       }
@@ -120,15 +144,22 @@ export function ComposeWindow() {
       // A new message. The first account is the default sender; the picker below only appears
       // when there is more than one, per docs/01 §6.
       const accounts = await accountsList()
-      if (!cancelled && accounts.length > 0) setAccountId(accounts[0]?.id ?? null)
+      const first = accounts[0]?.id ?? null
+      if (first === null) return
+
+      setAccountId(first)
+
+      // A new message still gets the signature, which is the only thing in it.
+      const blank = await composeBlank(first)
+      if (alive.current) setQuoted(bodyWithSignature(blank))
     }
 
     load().catch((cause: unknown) => {
-      if (!cancelled) setProblem(String(cause))
+      if (alive.current) setProblem(String(cause))
     })
 
     return () => {
-      cancelled = true
+      alive.current = false
     }
   }, [replyTo, replyKind])
 

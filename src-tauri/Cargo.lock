@@ -1539,6 +1539,7 @@ dependencies = [
  "async-native-tls",
  "base64 0.22.1",
  "charset",
+ "chrono",
  "futures",
  "hickory-resolver",
  "keyring",

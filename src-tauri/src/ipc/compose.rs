@@ -82,6 +82,9 @@ pub struct ReplyDraft {
     pub quoted_html: String,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// The account's signature, already sanitised, and where the window should put it.
+    pub signature_html: String,
+    pub signature_placement: String,
 }
 
 /// How long a message waits in `holding` before it is transmitted.
@@ -151,15 +154,18 @@ pub async fn compose_reply(
         .await?;
 
     let recipients = reply::recipients(&source.envelope, kind, &mine);
+    let signature = signature_for(db.inner(), source.account_id).await;
 
     Ok(ReplyDraft {
         account_id: source.account_id,
         to: recipients.to.iter().map(ComposeAddress::from).collect(),
         cc: recipients.cc.iter().map(ComposeAddress::from).collect(),
         subject: reply::subject(&source.envelope.subject, kind),
-        quoted_html: source.quoted_html,
+        quoted_html: quoted_block(&source, kind),
         in_reply_to: source.envelope.message_id.clone(),
         references: reply::references(&source.references, source.envelope.message_id.as_deref()),
+        signature_html: signature.html,
+        signature_placement: signature.placement,
     })
 }
 
@@ -506,4 +512,184 @@ pub async fn compose_pick_files() -> Result<Vec<PickedFile>, AppError> {
 #[tauri::command]
 pub async fn compose_size_limit() -> Result<i64, AppError> {
     Ok(crate::mail::outgoing::ATTACHMENT_WARN_BYTES as i64)
+}
+
+/// The signature for an account, and where it goes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct Signature {
+    pub html: String,
+    /// `above` or `below`, relative to a quoted reply.
+    pub placement: String,
+}
+
+/// Reads an account's signature.
+#[tauri::command]
+pub async fn signature_get(db: State<'_, Db>, account_id: i64) -> Result<Signature, AppError> {
+    let row: Option<(Option<String>, String)> = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT signature_html, signature_placement FROM account WHERE id = ?1",
+                    rusqlite::params![account_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok())
+        })
+        .await?;
+
+    let (html, placement) = row.unwrap_or((None, "above".to_string()));
+
+    Ok(Signature {
+        html: html.unwrap_or_default(),
+        placement,
+    })
+}
+
+/// Stores an account's signature.
+///
+/// Sanitised on the way in. It is the user's own markup, but it is markup, and it will be
+/// placed into every message they send — a broken tag pasted from a web page would corrupt the
+/// structure of every one of them, which is a slow and confusing way to discover a problem.
+#[tauri::command]
+pub async fn signature_set(
+    db: State<'_, Db>,
+    account_id: i64,
+    html: String,
+    placement: String,
+) -> Result<(), AppError> {
+    let placement = if placement == "below" {
+        "below"
+    } else {
+        "above"
+    };
+    let clean = crate::mail::render::sanitise_for_enumeration(&html);
+
+    db.write(move |tx| {
+        tx.execute(
+            "UPDATE account SET signature_html = ?2, signature_placement = ?3 WHERE id = ?1",
+            rusqlite::params![account_id, clean, placement],
+        )?;
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
+}
+
+/// Formats a message's date the way Apple Mail's attribution line does.
+///
+/// `27 Aug 2026, at 09:34` — in the **user's** local time, not the sender's. A reply that
+/// attributes a message to a time the recipient never saw it is confusing in exactly the way
+/// that makes someone distrust a client's dates generally.
+fn attribution_date(epoch_seconds: i64) -> String {
+    use chrono::{Local, TimeZone};
+
+    match Local.timestamp_opt(epoch_seconds, 0).single() {
+        Some(when) => when.format("%-d %b %Y, at %H:%M").to_string(),
+        // A message with an unparseable date still deserves a reply. Standing rule 13.
+        None => "an earlier date".to_string(),
+    }
+}
+
+/// Escapes text for placement in the reply document.
+fn escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// The quoted original, with its attribution line, ready to sit below the cursor.
+///
+/// A forward is not a reply and does not get one: Mail heads a forward with the original's
+/// headers — who it was from, when, to whom, what it was about — because the recipient of a
+/// forward was never part of the conversation and needs all four.
+fn quoted_block(source: &crate::db::query::ReplySource, kind: reply::Kind) -> String {
+    let when = attribution_date(source.envelope.date_sent);
+    let sender = source.envelope.from.first();
+
+    if kind == reply::Kind::Forward {
+        let from = sender
+            .map(|address| match &address.name {
+                Some(name) if !name.trim().is_empty() => {
+                    format!("{} &lt;{}&gt;", escape(name.trim()), escape(&address.email))
+                }
+                _ => escape(&address.email),
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let to = source
+            .envelope
+            .to
+            .iter()
+            .map(|address| escape(&address.email))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        return format!(
+            "<p><br></p><div><p>---------- Forwarded message ----------</p>\
+             <p>From: {from}<br>Date: {when}<br>Subject: {}<br>To: {to}</p>{}</div>",
+            escape(&source.envelope.subject),
+            source.quoted_html
+        );
+    }
+
+    // The attribution, then the original inside a blockquote. The empty paragraph above is
+    // where the caret lands: a reply whose cursor starts inside the quote is the single most
+    // annoying thing a mail client can do, and it is the default in more of them than it
+    // should be.
+    format!(
+        "<p><br></p><p>{}</p><blockquote>{}</blockquote>",
+        escape(&reply::attribution(sender, &when)),
+        source.quoted_html
+    )
+}
+
+/// Reads a signature without going through the command layer.
+async fn signature_for(db: &Db, account_id: i64) -> Signature {
+    let row: Option<(Option<String>, String)> = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT signature_html, signature_placement FROM account WHERE id = ?1",
+                    rusqlite::params![account_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .ok())
+        })
+        .await
+        .ok()
+        .flatten();
+
+    let (html, placement) = row.unwrap_or((None, "above".to_string()));
+
+    Signature {
+        html: html.unwrap_or_default(),
+        placement,
+    }
+}
+
+/// A new message, with only the signature in it.
+///
+/// Its own command rather than `compose_reply` with a null id: a new message has no source to
+/// read, no recipients to compute and no quote to build, and threading a "maybe there is a
+/// parent" branch through all of that would make the reply path harder to follow for the sake
+/// of the simpler case.
+#[tauri::command]
+pub async fn compose_blank(db: State<'_, Db>, account_id: i64) -> Result<ReplyDraft, AppError> {
+    let signature = signature_for(db.inner(), account_id).await;
+
+    Ok(ReplyDraft {
+        account_id,
+        to: Vec::new(),
+        cc: Vec::new(),
+        subject: String::new(),
+        quoted_html: String::new(),
+        in_reply_to: None,
+        references: Vec::new(),
+        signature_html: signature.html,
+        signature_placement: signature.placement,
+    })
 }

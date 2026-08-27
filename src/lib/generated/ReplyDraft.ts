@@ -8,4 +8,8 @@ export type ReplyDraft = { accountId: number, to: Array<ComposeAddress>, cc: Arr
 /**
  * The quoted original, already sanitised, ready to be placed below the cursor.
  */
-quotedHtml: string, inReplyTo: string | null, references: Array<string>, };
+quotedHtml: string, inReplyTo: string | null, references: Array<string>, 
+/**
+ * The account's signature, already sanitised, and where the window should put it.
+ */
+signatureHtml: string, signaturePlacement: string, };

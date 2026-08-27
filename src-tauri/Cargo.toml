@@ -101,6 +101,10 @@ lettre = { version = "0.11", default-features = false, features = [
   "smtp-transport",
   "hostname",
 ] }
+# Only for formatting the attribution line above a quoted reply. Apple Mail's exact shape is
+# "On 27 Aug 2026, at 09:34, Ada <ada@x> wrote:", which needs a local-time conversion and a
+# month name — the two parts of date handling that are genuinely not worth writing by hand.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [profile.dev]
 incremental = true

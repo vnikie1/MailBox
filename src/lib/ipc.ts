@@ -510,6 +510,7 @@ import type { OutgoingMessage } from './generated/OutgoingMessage'
 import type { PickedFile } from './generated/PickedFile'
 import type { OutboxRow } from './generated/OutboxRow'
 import type { ReplyDraft } from './generated/ReplyDraft'
+import type { Signature } from './generated/Signature'
 
 /**
  * A message body, sanitised and ready for the sandboxed frame. docs/03 §6.
@@ -692,4 +693,25 @@ export async function composePickFiles(): Promise<PickedFile[]> {
 export async function composeSizeLimit(): Promise<number> {
   if (!runningInTauri) return 25 * 1024 * 1024
   return invoke<number>('compose_size_limit')
+}
+
+/** A new message, carrying only the account's signature. */
+export async function composeBlank(accountId: number): Promise<ReplyDraft> {
+  if (!runningInTauri) throw new Error('Composing is only available in the app.')
+  return invoke<ReplyDraft>('compose_blank', { accountId })
+}
+
+/** An account's signature and where it should sit relative to a quoted reply. */
+export async function signatureGet(accountId: number): Promise<Signature> {
+  if (!runningInTauri) return { html: '', placement: 'above' }
+  return invoke<Signature>('signature_get', { accountId })
+}
+
+export async function signatureSet(
+  accountId: number,
+  html: string,
+  placement: string,
+): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('signature_set', { accountId, html, placement })
 }
