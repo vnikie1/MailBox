@@ -92,6 +92,7 @@ import type { AccountRow } from './generated/AccountRow'
 import type { ComposeAddress } from './generated/ComposeAddress'
 import type { FlagPatch } from './generated/FlagPatch'
 import type { ListQuery } from './generated/ListQuery'
+import type { EmlMessage } from './generated/EmlMessage'
 import type { MailboxRow } from './generated/MailboxRow'
 export type { MailtoRequest } from './generated/MailtoRequest'
 import type { MailtoRequest } from './generated/MailtoRequest'
@@ -899,4 +900,14 @@ export async function onJumpListTask(handler: (task: string) => void): Promise<U
 export async function soundSent(accountId: number): Promise<void> {
   if (!runningInTauri) return
   await invoke('sound_sent', { accountId })
+}
+
+/**
+ * Reads and renders a `.eml` from disk for the viewer window.
+ *
+ * Goes through the same sanitiser a mailbox message does — see `ipc/eml.rs`. A file that
+ * arrived as a download has had less scrutiny than a synced message, not more.
+ */
+export async function emlRead(path: string): Promise<EmlMessage> {
+  return invoke<EmlMessage>('eml_read', { path })
 }

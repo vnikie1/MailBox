@@ -58,6 +58,16 @@ async function rootElement(): Promise<ReactNode> {
     return <ComposeWindow />
   }
 
+  /**
+   * A `.eml` opened from Explorer, in its own read-only window. Same reasoning as compose: a
+   * query parameter rather than a path, so neither the dev server nor the packaged app has to
+   * route anything.
+   */
+  if (new URLSearchParams(window.location.search).has('eml')) {
+    const { EmlWindow } = await import('./features/reader/EmlWindow')
+    return <EmlWindow />
+  }
+
   return <App />
 }
 

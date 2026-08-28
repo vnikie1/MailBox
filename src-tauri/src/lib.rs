@@ -54,6 +54,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
+            ipc::eml::eml_read,
             platform::sound::sound_sent,
             ipc::mail::accounts_list,
             ipc::mail::mailboxes_tree,

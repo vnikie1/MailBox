@@ -1,0 +1,84 @@
+/* The .eml viewer window. docs/06 Phase 10 — see EmlWindow.tsx for why it is read-only. */
+
+.window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--bg-content);
+}
+
+/* Divided from the body by a hairline, matching the reader. No toolbar above it: there is
+ * nothing this window can do to the message, and an empty toolbar is worse than none. */
+.header {
+  flex: 0 0 auto;
+  padding: var(--sp-6) var(--sp-6) var(--sp-4);
+  border-bottom: var(--hairline) solid var(--separator);
+}
+
+.subject {
+  margin: 0 0 var(--sp-4);
+  color: var(--label-1);
+  font-size: var(--t-title3-size);
+  font-weight: var(--t-title3-weight);
+  line-height: var(--t-title3-leading);
+  letter-spacing: var(--t-title3-tracking);
+}
+
+/* A definition list, so a screen reader reads "From, Ada Lovelace" rather than two loose
+ * strings whose relationship is only visual. */
+.fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0;
+}
+
+.label {
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+  line-height: var(--t-footnote-leading);
+  text-align: right;
+}
+
+.value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--label-1);
+  font-size: var(--t-footnote-size);
+  line-height: var(--t-footnote-leading);
+
+  /* Headers are content, not chrome — docs/01 §9.10. */
+  user-select: text;
+}
+
+.attachments {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: var(--sp-4) 0 0;
+  color: var(--label-2);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+}
+
+.clip {
+  flex: 0 0 auto;
+  width: var(--sp-5);
+  height: var(--sp-5);
+}
+
+.body {
+  flex: 1 1 auto;
+  padding: var(--sp-4) var(--sp-6) var(--sp-6);
+}
+
+/* Below the message, not above it. The count is a footnote about what was withheld, and there
+ * is no action attached — putting it on top would give it the weight of a banner it cannot
+ * earn, since this window cannot load them. */
+.blocked {
+  margin: var(--sp-4) 0 0;
+  color: var(--label-2);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+}

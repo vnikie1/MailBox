@@ -184,7 +184,16 @@ pub fn handle_arguments(app: &AppHandle, argv: &[String]) {
         }
 
         if is_eml(argument) {
-            let _ = app.emit("eml:open", argument.clone());
+            // A window rather than an event, for the same reason as mailto: the viewer is a real
+            // OS window and Rust is what creates one. Nothing in the main window changes.
+            let handle = app.clone();
+            let path = argument.clone();
+
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = crate::ipc::eml::open(handle, path).await {
+                    tracing::warn!(?error, "could not open a message file");
+                }
+            });
         }
     }
 }
