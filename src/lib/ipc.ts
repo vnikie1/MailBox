@@ -148,6 +148,18 @@ export async function msgSetFlags(ids: number[], patch: FlagPatch): Promise<numb
   return invoke<number>('msg_set_flags', { ids, patch })
 }
 
+/**
+ * Toggles read and unread, with the core deciding which way. Ctrl+U.
+ *
+ * The direction is not passed in: the window would have to keep its own idea of what is read,
+ * which is a second copy of state the database already holds and is stale the moment another
+ * client marks something read. Returns the state everything ended up in.
+ */
+export async function msgToggleRead(ids: number[]): Promise<boolean> {
+  if (!runningInTauri) return true
+  return invoke<boolean>('msg_toggle_read', { ids })
+}
+
 export async function msgMove(ids: number[], mailboxId: number): Promise<number> {
   if (!runningInTauri) return browser.moveTo(ids, mailboxId).changed
   return invoke<number>('msg_move', { ids, mailboxId })

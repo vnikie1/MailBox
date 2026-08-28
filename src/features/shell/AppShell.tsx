@@ -3,7 +3,7 @@ import { ChevronLeft } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { LIST_MAX, LIST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, useLayoutStore } from '@/store/layout'
-import { useAccounts, useMailboxes, useMoveMessages } from '@/app/queries'
+import { useAccounts, useMailboxes, useMoveMessages, useToggleRead } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
 import { Button, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
@@ -59,6 +59,7 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
   const { data: mailboxes = [] } = useMailboxes()
   const { data: accounts = [] } = useAccounts()
   const move = useMoveMessages()
+  const toggleRead = useToggleRead()
   const toast = useToast()
 
   const [movingTo, setMovingTo] = useState(false)
@@ -79,6 +80,11 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
     onMoveTo: useCallback(() => {
       setMovingTo(true)
     }, []),
+    // Ctrl+U. The core decides the direction from the stored rows, so the window keeps no
+    // second copy of what is read — which would be stale the moment another client changed it.
+    onToggleRead: useCallback(() => {
+      toggleRead.mutate(selectedMessageIds)
+    }, [selectedMessageIds, toggleRead]),
     onRunRules: useCallback(() => {
       void rulesRun(selectedMessageIds)
         .then((report) => {

@@ -7,6 +7,7 @@ import { useEffect } from 'react'
  * |---|---|
  * | Ctrl+Shift+M | move the selection to a mailbox chosen by typing |
  * | Alt+Ctrl+L | run the rules over the selection |
+ * | Ctrl+U | toggle read and unread |
  *
  * Handlers are registered on the window rather than on a focused element, because both act on
  * the *selection*, and the selection stays put while focus moves between the list, the reader
@@ -22,6 +23,8 @@ export interface OrganiseShortcuts {
   hasSelection: boolean
   onMoveTo: () => void
   onRunRules: () => void
+  /** docs/01 §14 lists Ctrl+U. It is also how someone undoes an automatic mark-as-read. */
+  onToggleRead: () => void
 }
 
 function inTextField(target: EventTarget | null): boolean {
@@ -38,6 +41,7 @@ export function useOrganiseShortcuts({
   hasSelection,
   onMoveTo,
   onRunRules,
+  onToggleRead,
 }: OrganiseShortcuts): void {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -60,6 +64,13 @@ export function useOrganiseShortcuts({
         if (!hasSelection) return
         event.preventDefault()
         onMoveTo()
+        return
+      }
+
+      if (!event.shiftKey && key === 'u') {
+        if (!hasSelection) return
+        event.preventDefault()
+        onToggleRead()
       }
     }
 
@@ -67,5 +78,5 @@ export function useOrganiseShortcuts({
     return () => {
       window.removeEventListener('keydown', onKey)
     }
-  }, [hasSelection, onMoveTo, onRunRules])
+  }, [hasSelection, onMoveTo, onRunRules, onToggleRead])
 }

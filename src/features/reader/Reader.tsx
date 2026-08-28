@@ -19,6 +19,7 @@ import { useThread } from '@/app/queries'
 import { AttachmentPreview } from './AttachmentPreview'
 import { JunkBanner } from './JunkBanner'
 import { MessageBody } from './MessageBody'
+import { useMarkRead } from './useMarkRead'
 import { useThreadBodies } from './useBodyPrefetch'
 import { composeOpen, storeNow } from '@/lib/ipc'
 
@@ -316,6 +317,10 @@ export function Reader({ toolbar }: ReaderProps) {
   // a thread reaches across mailboxes, so a message in the conversation may never appear as a
   // row. See `useThreadBodies`.
   useThreadBodies(messages)
+
+  // Marks what is on screen as read, after a pause. Nothing did this before: opening a message
+  // left it bold for ever and the unread badge never came down.
+  useMarkRead(messages)
 
   const newestId = messages[messages.length - 1]?.id
 

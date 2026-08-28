@@ -183,6 +183,24 @@ export function useSetFlags() {
   })
 }
 
+export function useToggleRead() {
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (ids: number[]) => ipc.msgToggleRead(ids),
+    onSuccess: (_result, ids) => {
+      ipc.notifyBrowserMailboxChange([])
+      invalidateAfterMutation(client)
+      for (const id of ids) {
+        void client.invalidateQueries({ queryKey: keys.message(id) })
+      }
+      // The reader reads a thread, not a message, so that key has to go too or the row
+      // changes in the list while the open message stays bold.
+      void client.invalidateQueries({ queryKey: ['thread'] })
+    },
+  })
+}
+
 export function useMoveMessages() {
   const client = useQueryClient()
 

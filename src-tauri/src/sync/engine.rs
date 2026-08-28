@@ -867,6 +867,8 @@ async fn reconcile_expunged(
         })
         .await?;
 
+    tracing::debug!(path, local, server = server_exists, "expunge check");
+
     // The common case, and the reason this is affordable: nothing has been removed, so there is
     // nothing to ask the server.
     if local <= i64::from(server_exists) {

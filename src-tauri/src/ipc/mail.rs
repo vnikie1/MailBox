@@ -136,6 +136,81 @@ pub async fn search(db: State<'_, Db>, query: SearchQuery) -> Response<Vec<Messa
         .await?)
 }
 
+/// Whether any of these messages is unread, which is what decides a toggle's direction.
+///
+/// Separate from the command so the rule can be tested against real rows without a Tauri
+/// `State`. The rule itself is the interesting part: **a mixed selection becomes read.**
+pub fn any_unread(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, DbError> {
+    if ids.is_empty() {
+        return Ok(false);
+    }
+
+    let list = (0..ids.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!("SELECT COUNT(*) FROM message WHERE id IN ({list}) AND flag_seen = 0");
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let unread: i64 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+
+    Ok(unread > 0)
+}
+
+/// Toggles read and unread across a selection. Ctrl+U, docs/01 §14.
+///
+/// The *core* decides which way it goes, not the UI. The alternative is the window keeping its
+/// own idea of what is read and sending an explicit `seen: true|false`, which is wrong twice
+/// over: it is a second copy of state the database already holds, and it is stale the moment
+/// another client marks something read while the user is looking at it.
+///
+/// A mixed selection becomes **read**. Someone who selects forty messages and presses Ctrl+U
+/// means "clear these"; marking the already-read half unread instead would be a mess to undo.
+#[tauri::command]
+pub async fn msg_toggle_read(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Response<bool> {
+    if ids.is_empty() {
+        return Ok(false);
+    }
+
+    let asked = ids.clone();
+
+    let now_seen = db.read(move |conn| any_unread(conn, &asked)).await?;
+
+    let patch = FlagPatch {
+        seen: Some(now_seen),
+        flagged: None,
+    };
+
+    let affected = ids.clone();
+
+    let (_, mailboxes) = db
+        .write(move |tx| {
+            // Queued inside the same transaction as the local write, so closing the lid between
+            // them cannot lose the change. Same contract as `msg_set_flags`.
+            for group in ops::locate(tx, &affected)? {
+                ops::enqueue(
+                    tx,
+                    group.account_id,
+                    &ops::Op::Flag {
+                        mailbox: group.mailbox,
+                        uids: group.uids,
+                        seen: Some(now_seen),
+                        flagged: None,
+                    },
+                )?;
+            }
+
+            let changed = write::set_flags(tx, &affected, patch)?;
+            let mailboxes = write::mailboxes_of(tx, &affected)?;
+            Ok((changed, mailboxes))
+        })
+        .await?;
+
+    announce(&app, &db, mailboxes, &ids);
+    Ok(now_seen)
+}
+
 #[tauri::command]
 pub async fn msg_set_flags(
     app: AppHandle,
@@ -322,4 +397,89 @@ fn trash_for(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Result<Option<i64>,
         .ok();
 
     Ok(trash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn store() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+            [],
+        )
+        .expect("account");
+
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (1, 1, 'INBOX', 'Inbox', 'inbox')",
+            [],
+        )
+        .expect("mailbox");
+
+        conn
+    }
+
+    fn add(conn: &Connection, id: i64, seen: bool) {
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                 from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+             ) VALUES (?1, 1, 1, ?1, 'S', 0, 0, 10, 'a@b.test', '', '', 0, ?2, 0, 0)",
+            rusqlite::params![id, i64::from(seen)],
+        )
+        .expect("message");
+    }
+
+    #[test]
+    fn an_unread_message_toggles_to_read() {
+        let conn = store();
+        add(&conn, 1, false);
+
+        assert!(any_unread(&conn, &[1]).expect("query"));
+    }
+
+    #[test]
+    fn a_read_message_toggles_to_unread() {
+        let conn = store();
+        add(&conn, 1, true);
+
+        assert!(!any_unread(&conn, &[1]).expect("query"));
+    }
+
+    #[test]
+    fn a_mixed_selection_becomes_read() {
+        // Someone who selects forty messages and presses Ctrl+U means "clear these". Marking
+        // the already-read half unread instead would be a mess to undo, one message at a time.
+        let conn = store();
+        add(&conn, 1, true);
+        add(&conn, 2, false);
+        add(&conn, 3, true);
+
+        assert!(
+            any_unread(&conn, &[1, 2, 3]).expect("query"),
+            "a mixed selection should have been marked read"
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_changes_nothing() {
+        let conn = store();
+        assert!(!any_unread(&conn, &[]).expect("query"));
+    }
+
+    #[test]
+    fn a_message_that_no_longer_exists_is_not_counted_as_unread() {
+        // Deleted between the keystroke and the query. Counting it as unread would mark the
+        // rest of the selection read on the strength of a row that is gone.
+        let conn = store();
+        add(&conn, 1, true);
+
+        assert!(!any_unread(&conn, &[1, 999]).expect("query"));
+    }
 }
