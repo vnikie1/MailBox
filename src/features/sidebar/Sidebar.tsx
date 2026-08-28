@@ -1,5 +1,5 @@
 import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react'
-import { ChevronRight, PanelLeft, Settings } from 'lucide-react'
+import { AlertTriangle, ChevronRight, PanelLeft, Settings } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { useLayoutStore } from '@/store/layout'
@@ -12,7 +12,7 @@ import {
   useVips,
 } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
-import { Badge, IconButton, ScrollArea, Tooltip } from '@/ui'
+import { Badge, Button, EmptyState, IconButton, ScrollArea, Tooltip } from '@/ui'
 
 import { useSyncState } from '@/app/useSync'
 
@@ -22,6 +22,15 @@ import { buildSidebar, visibleRows, type SidebarNode } from './model'
 import styles from './Sidebar.module.css'
 
 const DRAG_TYPE = 'application/x-mailbox-threads'
+
+/**
+ * The absent case, as one array rather than a fresh one per render.
+ *
+ * `data ?? []` looks equivalent and is not: it allocates on every render, so the memo that
+ * builds the tree sees a new dependency every time and rebuilds the whole sidebar. The
+ * destructuring default this replaced had the same flaw and eslint could not see it.
+ */
+const NONE: never[] = []
 
 interface SidebarRowProps {
   node: SidebarNode
@@ -152,8 +161,11 @@ export interface SidebarProps {
 }
 
 export function Sidebar({ onOpenSettings }: SidebarProps) {
-  const { data: accounts = [] } = useAccounts()
-  const { data: mailboxes = [] } = useMailboxes()
+  const accountsQuery = useAccounts()
+  const mailboxesQuery = useMailboxes()
+
+  const accounts = accountsQuery.data ?? NONE
+  const mailboxes = mailboxesQuery.data ?? NONE
 
   const selectedNodeId = useMailStore((state) => state.selection.nodeId)
   const selectMailbox = useMailStore((state) => state.selectMailbox)
@@ -164,6 +176,11 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const moveMessages = useMoveMessages()
 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
+
+  // Not "no accounts" — that is first-run, and AccountsGate handles it. This is the query
+  // itself failing, which used to render an empty tree and say nothing at all: the sidebar
+  // looked like a fresh install, and the gate did not appear because it requires isSuccess.
+  const failed = accountsQuery.isError || mailboxesQuery.isError
 
   const sync = useSyncState()
   const accountNames = useMemo(
@@ -213,41 +230,62 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
         />
       </header>
 
-      <ScrollArea className={styles.sidebar}>
-        <div role="tree" aria-label="Mailboxes" className={styles.tree}>
-          {sections.map((section) => (
-            <div
-              key={section.id}
-              role="group"
-              aria-label={section.title}
-              className={styles.section}
+      {failed ? (
+        <EmptyState
+          className={styles.failed}
+          icon={AlertTriangle}
+          tone="error"
+          title="Your mailboxes could not be read"
+          description="The local database did not answer. Your mail is still on the server."
+          action={
+            <Button
+              variant="bordered"
+              onClick={() => {
+                void accountsQuery.refetch()
+                void mailboxesQuery.refetch()
+              }}
             >
-              <h2 className={styles.sectionTitle}>{section.title}</h2>
+              Try Again
+            </Button>
+          }
+        />
+      ) : (
+        <ScrollArea className={styles.sidebar}>
+          <div role="tree" aria-label="Mailboxes" className={styles.tree}>
+            {sections.map((section) => (
+              <div
+                key={section.id}
+                role="group"
+                aria-label={section.title}
+                className={styles.section}
+              >
+                <h2 className={styles.sectionTitle}>{section.title}</h2>
 
-              {visibleRows(section.nodes, collapsed).map((node) => (
-                <SidebarRow
-                  key={node.id}
-                  node={node}
-                  selected={node.id === selectedNodeId}
-                  collapsed={collapsed.has(node.id)}
-                  dropTarget={node.id === dropTargetId}
-                  onSelect={onSelect}
-                  onToggle={toggleSection}
-                  onDragOverRow={(target) => {
-                    setDropTargetId(target?.id ?? null)
-                  }}
-                  onDropRow={(target, messageIds) => {
-                    const destination = target.mailboxIds[0]
-                    if (target.mailboxIds.length === 1 && destination !== undefined) {
-                      moveMessages.mutate({ ids: messageIds, mailboxId: destination })
-                    }
-                  }}
-                />
-              ))}
-            </div>
-          ))}
-        </div>
-      </ScrollArea>
+                {visibleRows(section.nodes, collapsed).map((node) => (
+                  <SidebarRow
+                    key={node.id}
+                    node={node}
+                    selected={node.id === selectedNodeId}
+                    collapsed={collapsed.has(node.id)}
+                    dropTarget={node.id === dropTargetId}
+                    onSelect={onSelect}
+                    onToggle={toggleSection}
+                    onDragOverRow={(target) => {
+                      setDropTargetId(target?.id ?? null)
+                    }}
+                    onDropRow={(target, messageIds) => {
+                      const destination = target.mailboxIds[0]
+                      if (target.mailboxIds.length === 1 && destination !== undefined) {
+                        moveMessages.mutate({ ids: messageIds, mailboxId: destination })
+                      }
+                    }}
+                  />
+                ))}
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
 
       {/* Outside the ScrollArea on purpose: a problem that scrolls out of sight is one the
           user stops seeing, and this is the one part of the sidebar that has to stay put. */}

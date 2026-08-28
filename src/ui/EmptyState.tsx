@@ -6,8 +6,13 @@ import styles from './EmptyState.module.css'
 export interface EmptyStateProps {
   icon?: LucideIcon
   title: string
-  /** One sentence. Anything longer is not read in a pane somebody expected mail in. */
-  description?: string
+  /**
+   * One sentence. Anything longer is not read in a pane somebody expected mail in.
+   *
+   * Explicitly `| undefined` — as with `className` below — so a caller can pass a value that
+   * may be absent without having to build the prop conditionally at every call site.
+   */
+  description?: string | undefined
   /** A way out. See the note on dead ends. */
   action?: ReactNode
   /**

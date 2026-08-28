@@ -80,23 +80,15 @@ export function useSwipe(actions: SwipeActions) {
     const node = element.current
     if (node === null) return
 
-    const onWheel = (event: WheelEvent) => {
-      // A vertical scroll that drifts sideways is not a swipe. Requiring the horizontal
-      // component to dominate is what keeps the rows still while the list is being scrolled.
-      if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return
+    const limitFor = () => (node.getBoundingClientRect().width || 1) * COMMIT_AT
 
-      // Only once it is actually a gesture: preventing default on every stray deltaX would
-      // break horizontal scrolling anywhere this row is nested.
-      event.preventDefault()
-
-      const width = node.getBoundingClientRect().width || 1
-      const limit = width * COMMIT_AT
-
-      const next = offset.current - event.deltaX
-      const past = Math.abs(next) - limit
+    /** Applies a displacement and updates what the row shows. Shared by both inputs. */
+    const move = (to: number) => {
+      const limit = limitFor()
+      const past = Math.abs(to) - limit
 
       // Damped past the commit point, one-to-one before it.
-      offset.current = past <= 0 ? next : Math.sign(next) * (limit + past * RUBBER_BAND)
+      offset.current = past <= 0 ? to : Math.sign(to) * (limit + past * RUBBER_BAND)
 
       const travelled = Math.abs(offset.current)
       const progress = Math.min(travelled / limit, 1)
@@ -107,30 +99,115 @@ export function useSwipe(actions: SwipeActions) {
         armed:
           travelled < MIN_TRAVEL || progress < 1 ? null : offset.current > 0 ? 'right' : 'left',
       })
+    }
 
-      // The gesture ends when the deltas stop. Every event pushes that moment out.
+    /** Commits or springs back, then returns the row to rest. */
+    const release = () => {
+      const final = offset.current
+      const committed = Math.abs(final) >= limitFor() && Math.abs(final) >= MIN_TRAVEL
+
+      // Reset first. Both actions can remove this row from the list, and leaving the offset
+      // set means the next row to occupy this position appears already swiped.
+      reset()
+
+      if (!committed) return
+
+      if (final > 0) latest.current.onRight()
+      else latest.current.onLeft()
+    }
+
+    const onWheel = (event: WheelEvent) => {
+      // A vertical scroll that drifts sideways is not a swipe. Requiring the horizontal
+      // component to dominate is what keeps the rows still while the list is being scrolled.
+      if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return
+
+      // Only once it is actually a gesture: preventing default on every stray deltaX would
+      // break horizontal scrolling anywhere this row is nested.
+      event.preventDefault()
+
+      move(offset.current - event.deltaX)
+
+      // A pan has no end event, so the end is inferred from the deltas stopping. Every event
+      // pushes that moment out.
       window.clearTimeout(timer.current)
-      timer.current = window.setTimeout(() => {
-        const final = offset.current
-        const committed = Math.abs(final) >= limit && Math.abs(final) >= MIN_TRAVEL
+      timer.current = window.setTimeout(release, SETTLE_MS)
+    }
 
-        // Reset first. Both actions can remove this row from the list, and leaving the offset
-        // set means the next row to occupy this position appears already swiped.
-        reset()
+    /**
+     * Touch, which docs/06 asks for alongside the touchpad.
+     *
+     * Simpler than the pan in the one way that matters: a touch gesture has a real end, so
+     * `pointerup` commits directly and none of the settle-timer guesswork applies. The
+     * arithmetic in between is identical, which is why it is shared above — two implementations
+     * of the commit threshold would be two thresholds.
+     */
+    let start: number | null = null
 
-        if (!committed) return
+    const onPointerDown = (event: PointerEvent) => {
+      // Touch and pen only. A mouse drag across a row is a text selection or a drag-to-move,
+      // both of which already mean something here.
+      if (event.pointerType === 'mouse') return
+      start = event.clientX
+    }
 
-        if (final > 0) latest.current.onRight()
-        else latest.current.onLeft()
-      }, SETTLE_MS)
+    const onPointerMove = (event: PointerEvent) => {
+      if (start === null) return
+
+      const travelled = event.clientX - start
+
+      // Below the threshold this is still possibly a vertical scroll, so the list keeps the
+      // gesture. Capturing earlier would make the list impossible to scroll by touch.
+      if (Math.abs(travelled) < MIN_TRAVEL) return
+
+      // Once it is a swipe, this row owns the pointer: without capture, moving past the row's
+      // own bounds ends the gesture mid-swipe and leaves it displaced.
+      if (!node.hasPointerCapture(event.pointerId)) node.setPointerCapture(event.pointerId)
+
+      move(travelled)
+    }
+
+    const onPointerUp = (event: PointerEvent) => {
+      if (start === null) return
+      start = null
+
+      if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId)
+
+      release()
+    }
+
+    /**
+     * The gesture was taken away rather than finished.
+     *
+     * Springs back without committing, and the distinction matters: `pointercancel` fires when
+     * the system claims the gesture for itself or the finger leaves the digitiser, neither of
+     * which is the user deciding to archive something. Treating it as a release would archive
+     * a message nobody let go of — the precise failure the distance threshold exists to
+     * prevent, arriving through the one door that bypasses it.
+     */
+    const onPointerCancel = (event: PointerEvent) => {
+      if (start === null) return
+      start = null
+
+      if (node.hasPointerCapture(event.pointerId)) node.releasePointerCapture(event.pointerId)
+
+      reset()
     }
 
     // Not passive: the handler calls preventDefault once it decides this is a gesture, and a
     // passive listener would make that a no-op with a console warning and no other symptom.
     node.addEventListener('wheel', onWheel, { passive: false })
+    node.addEventListener('pointerdown', onPointerDown)
+    node.addEventListener('pointermove', onPointerMove)
+    node.addEventListener('pointerup', onPointerUp)
+
+    node.addEventListener('pointercancel', onPointerCancel)
 
     return () => {
       node.removeEventListener('wheel', onWheel)
+      node.removeEventListener('pointerdown', onPointerDown)
+      node.removeEventListener('pointermove', onPointerMove)
+      node.removeEventListener('pointerup', onPointerUp)
+      node.removeEventListener('pointercancel', onPointerCancel)
       window.clearTimeout(timer.current)
     }
   }, [reset])

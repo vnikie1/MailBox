@@ -176,3 +176,11 @@
  * [data-window-inactive], so both selection states desaturate on their own — which is the
  * 'one remap, whole app' promise in docs/02 §3 actually paying off.
  */
+
+/* Replaces the tree when it could not be read. Given the tree's own height so the strip below
+ * stays where it was — a sidebar that reflows on an error moves the retry button away from
+ * wherever the user was about to click. */
+.failed {
+  flex: 1 1 auto;
+  min-height: 0;
+}

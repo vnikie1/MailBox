@@ -201,3 +201,85 @@ describe('rubber banding', () => {
     expect(Number(row.getAttribute('data-progress'))).toBe(1)
   })
 })
+
+describe('touch', () => {
+  /**
+   * docs/06 asks for the gesture by touch as well as by touchpad. The two share the arithmetic
+   * and differ in one way that matters: a touch gesture has a real end, so `pointerup` commits
+   * directly rather than through the settle timer the pan has to guess with.
+   */
+  function touch(row: HTMLElement, type: string, clientX: number, pointerType = 'touch') {
+    const event = new Event(type, { bubbles: true, cancelable: true }) as PointerEvent &
+      Record<string, unknown>
+
+    Object.assign(event, { clientX, pointerId: 1, pointerType })
+    act(() => {
+      row.dispatchEvent(event)
+    })
+  }
+
+  it('commits on release past the threshold', () => {
+    const { row, onRight, onLeft } = setup()
+
+    row.hasPointerCapture = () => false
+    row.setPointerCapture = () => undefined
+    row.releasePointerCapture = () => undefined
+
+    touch(row, 'pointerdown', 0)
+    touch(row, 'pointermove', WIDTH * 0.6)
+    touch(row, 'pointerup', WIDTH * 0.6)
+
+    // No timer advance: a touch release is the end of the gesture, not a pause in it.
+    expect(onRight).toHaveBeenCalledTimes(1)
+    expect(onLeft).not.toHaveBeenCalled()
+  })
+
+  it('springs back when released short', () => {
+    const { row, onRight, onLeft } = setup()
+
+    row.hasPointerCapture = () => false
+    row.setPointerCapture = () => undefined
+    row.releasePointerCapture = () => undefined
+
+    touch(row, 'pointerdown', 0)
+    touch(row, 'pointermove', 40)
+    touch(row, 'pointerup', 40)
+
+    expect(onRight).not.toHaveBeenCalled()
+    expect(onLeft).not.toHaveBeenCalled()
+    expect(row.getAttribute('data-offset')).toBe('0')
+  })
+
+  it('leaves a mouse drag alone', () => {
+    const { row, onRight, onLeft } = setup()
+
+    // A mouse drag across a row is a text selection or a drag-to-move, both of which already
+    // mean something. Only touch and pen start a swipe.
+    touch(row, 'pointerdown', 0, 'mouse')
+    touch(row, 'pointermove', WIDTH * 0.8, 'mouse')
+    touch(row, 'pointerup', WIDTH * 0.8, 'mouse')
+
+    expect(onRight).not.toHaveBeenCalled()
+    expect(onLeft).not.toHaveBeenCalled()
+  })
+
+  it('commits nothing when the system cancels the pointer', () => {
+    const { row, onRight, onLeft } = setup()
+
+    row.hasPointerCapture = () => false
+    row.setPointerCapture = () => undefined
+    row.releasePointerCapture = () => undefined
+
+    touch(row, 'pointerdown', 0)
+    touch(row, 'pointermove', WIDTH * 0.6)
+
+    // Well past the threshold, so this is the dangerous case. pointercancel fires when the
+    // system claims the gesture or the finger leaves the digitiser — neither is the user
+    // deciding to archive. Committing here would archive a message nobody let go of.
+    touch(row, 'pointercancel', WIDTH * 0.6)
+
+    expect(onRight).not.toHaveBeenCalled()
+    expect(onLeft).not.toHaveBeenCalled()
+    expect(row.getAttribute('data-offset')).toBe('0')
+  })
+})

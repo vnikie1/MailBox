@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { ImageOff } from 'lucide-react'
+import { AlertTriangle, ImageOff } from 'lucide-react'
 
 import { useMessageBody } from '@/app/queries'
 import { remoteImagesEnabled } from '@/lib/ipc'
-import { Button } from '@/ui'
+import { Button, EmptyState } from '@/ui'
 
 import { MessageFrame } from './MessageFrame'
 
@@ -48,10 +48,13 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
   // of a message that has just been clicked legitimately has nothing to show — and without
   // the invalidation it would go on showing nothing until the user clicked away and back.
   // Held back until the preference is known, so the first render is the right one.
-  const { data: rendered, isPending } = useMessageBody(
-    preference === null ? null : messageId,
-    loadRemote,
-  )
+  const {
+    data: rendered,
+    isPending,
+    isError,
+    error,
+    refetch,
+  } = useMessageBody(preference === null ? null : messageId, loadRemote)
 
   const hasContent = rendered !== undefined && rendered.html.trim() !== ''
   const empty = rendered !== undefined && !hasContent
@@ -68,7 +71,33 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
     )
   }
 
-  if (rendered === undefined) return <div className={className} />
+  // The body failed to load. Previously this returned an empty div, which is indistinguishable
+  // from a message that happens to be blank — so a failed fetch looked like an empty email and
+  // the user's only recourse was to wonder. docs/06's gate calls that a dead end.
+  // `isError` alone: with isPending already returned above, the query is either this or a
+  // success, and TypeScript narrows `rendered` to defined on the strength of it.
+  if (isError) {
+    return (
+      <div className={className}>
+        <EmptyState
+          icon={AlertTriangle}
+          tone="error"
+          title="This message could not be loaded"
+          description={error instanceof Error ? error.message : undefined}
+          action={
+            <Button
+              variant="bordered"
+              onClick={() => {
+                void refetch()
+              }}
+            >
+              Try Again
+            </Button>
+          }
+        />
+      </div>
+    )
+  }
 
   return (
     <div className={className}>
