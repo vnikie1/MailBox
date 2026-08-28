@@ -160,6 +160,23 @@ export async function msgToggleRead(ids: number[]): Promise<boolean> {
   return invoke<boolean>('msg_toggle_read', { ids })
 }
 
+/** Toggles the flag, with the core deciding the direction. Ctrl+L. */
+export async function msgToggleFlag(ids: number[]): Promise<boolean> {
+  if (!runningInTauri) return true
+  return invoke<boolean>('msg_toggle_flag', { ids })
+}
+
+/**
+ * Archives into each message's *own* account Archive. Ctrl+Shift+A.
+ *
+ * Resolved per message in the core, because "All Inboxes" means a selection routinely spans
+ * two accounts and there is no single archive to move it to.
+ */
+export async function msgArchive(ids: number[]): Promise<number> {
+  if (!runningInTauri) return 0
+  return invoke<number>('msg_archive', { ids })
+}
+
 export async function msgMove(ids: number[], mailboxId: number): Promise<number> {
   if (!runningInTauri) return browser.moveTo(ids, mailboxId).changed
   return invoke<number>('msg_move', { ids, mailboxId })

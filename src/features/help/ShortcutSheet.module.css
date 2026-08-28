@@ -1,0 +1,72 @@
+/* The keyboard reference. docs/06 Phase 10. */
+
+.sheet {
+  max-width: var(--shortcuts-sheet-width);
+}
+
+/* Two columns above a comfortable width: twenty-six rows in one column is a scroll, and the
+ * point of a reference sheet is to be read at a glance. */
+.groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(var(--shortcuts-column-min), 1fr));
+  gap: var(--sp-6) var(--sp-8);
+  align-items: start;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  break-inside: avoid;
+}
+
+.heading {
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-caption-size);
+  letter-spacing: var(--t-caption-tracking);
+  text-transform: uppercase;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: 0;
+}
+
+.row {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.label {
+  min-width: 0;
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+}
+
+.keys {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-1);
+  align-items: center;
+  margin: 0;
+}
+
+/* A key cap, not a code span. The raised edge is what makes it read as a thing you press
+ * rather than as text about a thing you press. */
+.key {
+  min-width: var(--key-cap-min);
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--label-1);
+  font-family: inherit;
+  font-size: var(--t-caption-size);
+  line-height: 1;
+  text-align: center;
+  background: var(--fill-hover);
+  border-radius: var(--r-sm);
+  box-shadow: inset 0 -1px 0 var(--separator);
+}

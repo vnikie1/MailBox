@@ -3,16 +3,27 @@ import { ChevronLeft } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { LIST_MAX, LIST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, useLayoutStore } from '@/store/layout'
-import { useAccounts, useMailboxes, useMoveMessages, useToggleRead } from '@/app/queries'
+import {
+  useAccounts,
+  useArchiveMessages,
+  useDeleteMessages,
+  useMailboxes,
+  useMoveMessages,
+  useToggleFlag,
+  useToggleRead,
+} from '@/app/queries'
 import { useMailStore } from '@/store/mail'
 import { Button, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
 import { Reader } from '@/features/reader/Reader'
 import { Sidebar } from '@/features/sidebar/Sidebar'
-import { MailboxPicker, useOrganiseShortcuts, useUndo } from '@/features/organise'
+import { MailboxPicker, useUndo } from '@/features/organise'
+import { useShortcuts } from '@/app/useShortcuts'
+import { ShortcutSheet } from '@/features/help/ShortcutSheet'
 import { ScopeBar, useSearch } from '@/features/search'
 import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
-import { rulesRun } from '@/lib/organise'
+import { junkMark, rulesRun } from '@/lib/organise'
+import { composeBlank, composeOpen, syncAll } from '@/lib/ipc'
 
 import { PaneDivider } from './PaneDivider'
 import { useBreakpoint } from './useBreakpoint'
@@ -49,6 +60,7 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
   const classicLayout = useLayoutStore((state) => state.classicLayout)
   const setSidebarWidth = useLayoutStore((state) => state.setSidebarWidth)
   const setListWidth = useLayoutStore((state) => state.setListWidth)
+  const toggleSidebar = useLayoutStore((state) => state.toggleSidebar)
 
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
   const selectedNodeId = useMailStore((state) => state.selection.nodeId)
@@ -59,50 +71,132 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
   const { data: mailboxes = [] } = useMailboxes()
   const { data: accounts = [] } = useAccounts()
   const move = useMoveMessages()
+  const remove = useDeleteMessages()
+  const archive = useArchiveMessages()
   const toggleRead = useToggleRead()
+  const toggleFlag = useToggleFlag()
   const toast = useToast()
 
   const [movingTo, setMovingTo] = useState(false)
   const [savingSearch, setSavingSearch] = useState(false)
+  const [showingShortcuts, setShowingShortcuts] = useState(false)
+
+  // The one selected message, when there is exactly one. Reply and forward act on a single
+  // message; with several selected there is no message to reply to.
+  const only = selectedMessageIds.length === 1 ? selectedMessageIds[0] : undefined
 
   const search = useSearch(selectionMailboxIds)
   const searching = search.text.trim() !== ''
 
-  // Called for its effect: the hook owns the Ctrl+Z handler and raises its own toast. The
-  // return value describes what undo would do, which the menu bar will want in Phase 10 and
-  // nothing needs yet.
-  useUndo()
+  // Ctrl+Z and Ctrl+Shift+Z. Owned by the hook because undo has to reverse a *database*
+  // change, and the stack lives in the core rather than in React.
+  const { undo, redo } = useUndo()
 
-  // Registered here rather than in the list: both act on the selection, and the selection
-  // stays put while focus moves between the three panes.
-  useOrganiseShortcuts({
-    hasSelection: selectedMessageIds.length > 0,
-    onMoveTo: useCallback(() => {
-      setMovingTo(true)
-    }, []),
-    // Ctrl+U. The core decides the direction from the stored rows, so the window keeps no
-    // second copy of what is read — which would be stale the moment another client changed it.
-    onToggleRead: useCallback(() => {
-      toggleRead.mutate(selectedMessageIds)
-    }, [selectedMessageIds, toggleRead]),
-    onRunRules: useCallback(() => {
-      void rulesRun(selectedMessageIds)
-        .then((report) => {
-          toast.show({
-            title:
-              report.matched === 0
-                ? 'No rules matched'
-                : `${String(report.matched)} of ${String(report.examined)} messages matched`,
+  const failed = useCallback(
+    (title: string) => (error: unknown) => {
+      toast.show({
+        title,
+        description: error instanceof Error ? error.message : String(error),
+      })
+    },
+    [toast],
+  )
+
+  // One dispatcher for the whole application. See `app/shortcuts.ts` for why they are not
+  // registered where they are used.
+  useShortcuts(
+    {
+      newMessage: useCallback(() => {
+        // The account whose mailbox is open, falling back to the first. Composing from an
+        // arbitrary account would put the wrong address in the From line.
+        const account =
+          mailboxes.find((mailbox) => selectionMailboxIds.includes(mailbox.id))?.accountId ??
+          accounts[0]?.id
+
+        if (account === undefined) return
+        void composeBlank(account).catch(failed('A new message could not be opened'))
+      }, [mailboxes, selectionMailboxIds, accounts, failed]),
+
+      reply: useCallback(() => {
+        if (only !== undefined) void composeOpen(only, 'reply').catch(failed('Reply failed'))
+      }, [only, failed]),
+      replyAll: useCallback(() => {
+        if (only !== undefined) void composeOpen(only, 'replyAll').catch(failed('Reply failed'))
+      }, [only, failed]),
+      forward: useCallback(() => {
+        if (only !== undefined) void composeOpen(only, 'forward').catch(failed('Forward failed'))
+      }, [only, failed]),
+
+      // Each message goes to its *own* account's Archive, resolved in the core. "All Inboxes"
+      // means a selection routinely spans two accounts, and there is no single archive.
+      archive: useCallback(() => {
+        archive.mutate(selectedMessageIds)
+      }, [selectedMessageIds, archive]),
+
+      delete: useCallback(() => {
+        remove.mutate({ ids: selectedMessageIds, permanent: false })
+      }, [selectedMessageIds, remove]),
+
+      deletePermanently: useCallback(() => {
+        remove.mutate({ ids: selectedMessageIds, permanent: true })
+      }, [selectedMessageIds, remove]),
+
+      // The core decides the direction from the stored rows, so the window keeps no second copy
+      // of what is read — which would be stale the moment another client changed it.
+      toggleRead: useCallback(() => {
+        toggleRead.mutate(selectedMessageIds)
+      }, [selectedMessageIds, toggleRead]),
+
+      flag: useCallback(() => {
+        toggleFlag.mutate(selectedMessageIds)
+      }, [selectedMessageIds, toggleFlag]),
+
+      markJunk: useCallback(() => {
+        void junkMark(selectedMessageIds, true).catch(failed('That could not be marked as junk'))
+      }, [selectedMessageIds, failed]),
+
+      moveTo: useCallback(() => {
+        setMovingTo(true)
+      }, []),
+
+      runRules: useCallback(() => {
+        void rulesRun(selectedMessageIds)
+          .then((report) => {
+            toast.show({
+              title:
+                report.matched === 0
+                  ? 'No rules matched'
+                  : `${String(report.matched)} of ${String(report.examined)} messages matched`,
+            })
           })
-        })
-        .catch((error: unknown) => {
-          toast.show({
-            title: 'The rules could not be run',
-            description: error instanceof Error ? error.message : String(error),
-          })
-        })
-    }, [selectedMessageIds, toast]),
-  })
+          .catch(failed('The rules could not be run'))
+      }, [selectedMessageIds, toast, failed]),
+
+      undo,
+      redo,
+
+      search: useCallback(() => {
+        // Focus rather than a mode: the field is always there, and Ctrl+F should put the caret
+        // in it exactly as it would in any other application.
+        document
+          .querySelector<HTMLInputElement>('input[type="text"][placeholder="Search"]')
+          ?.focus()
+      }, []),
+
+      getMail: useCallback(() => {
+        void syncAll().catch(failed('Could not check for new mail'))
+      }, [failed]),
+
+      toggleSidebar: useCallback(() => {
+        toggleSidebar()
+      }, [toggleSidebar]),
+
+      showShortcuts: useCallback(() => {
+        setShowingShortcuts(true)
+      }, []),
+    },
+    { hasSelection: selectedMessageIds.length > 0 },
+  )
 
   // Open on the first account's inbox once the mailboxes arrive. The store starts with no
   // selection because it no longer owns the data and cannot know what exists.
@@ -245,6 +339,8 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
           </div>
         )}
       </div>
+
+      <ShortcutSheet open={showingShortcuts} onOpenChange={setShowingShortcuts} />
 
       <SaveSearchSheet open={savingSearch} onOpenChange={setSavingSearch} text={search.text} />
 

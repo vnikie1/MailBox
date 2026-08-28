@@ -201,6 +201,34 @@ export function useToggleRead() {
   })
 }
 
+export function useToggleFlag() {
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (ids: number[]) => ipc.msgToggleFlag(ids),
+    onSuccess: (_result, ids) => {
+      ipc.notifyBrowserMailboxChange([])
+      invalidateAfterMutation(client)
+      for (const id of ids) {
+        void client.invalidateQueries({ queryKey: keys.message(id) })
+      }
+      void client.invalidateQueries({ queryKey: ['thread'] })
+    },
+  })
+}
+
+export function useArchiveMessages() {
+  const client = useQueryClient()
+
+  return useMutation({
+    mutationFn: (ids: number[]) => ipc.msgArchive(ids),
+    onSuccess: () => {
+      ipc.notifyBrowserMailboxChange([])
+      invalidateAfterMutation(client)
+    },
+  })
+}
+
 export function useMoveMessages() {
   const client = useQueryClient()
 

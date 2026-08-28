@@ -136,6 +136,27 @@ pub async fn search(db: State<'_, Db>, query: SearchQuery) -> Response<Vec<Messa
         .await?)
 }
 
+/// Whether any of these messages is unflagged, which decides a flag toggle's direction.
+///
+/// Mirrors [`any_unread`], including the rule: a mixed selection becomes flagged.
+pub fn any_unflagged(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, DbError> {
+    if ids.is_empty() {
+        return Ok(false);
+    }
+
+    let list = (0..ids.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!("SELECT COUNT(*) FROM message WHERE id IN ({list}) AND flag_flagged = 0");
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let unflagged: i64 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
+
+    Ok(unflagged > 0)
+}
+
 /// Whether any of these messages is unread, which is what decides a toggle's direction.
 ///
 /// Separate from the command so the rule can be tested against real rows without a Tauri
@@ -156,6 +177,137 @@ pub fn any_unread(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, DbEr
     let unread: i64 = conn.query_row(&sql, params.as_slice(), |row| row.get(0))?;
 
     Ok(unread > 0)
+}
+
+/// Toggles the flag across a selection. Ctrl+L, docs/01 §14.
+///
+/// The same shape as `msg_toggle_read` and for the same reason: the direction is decided from
+/// the stored rows rather than passed in, so the window keeps no second copy of state the
+/// database already holds. A mixed selection becomes flagged.
+#[tauri::command]
+pub async fn msg_toggle_flag(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Response<bool> {
+    if ids.is_empty() {
+        return Ok(false);
+    }
+
+    let asked = ids.clone();
+    let now_flagged = db.read(move |conn| any_unflagged(conn, &asked)).await?;
+
+    let patch = FlagPatch {
+        seen: None,
+        flagged: Some(now_flagged),
+    };
+
+    let affected = ids.clone();
+
+    let (_, mailboxes) = db
+        .write(move |tx| {
+            for group in ops::locate(tx, &affected)? {
+                ops::enqueue(
+                    tx,
+                    group.account_id,
+                    &ops::Op::Flag {
+                        mailbox: group.mailbox,
+                        uids: group.uids,
+                        seen: None,
+                        flagged: Some(now_flagged),
+                    },
+                )?;
+            }
+
+            let changed = write::set_flags(tx, &affected, patch)?;
+            let mailboxes = write::mailboxes_of(tx, &affected)?;
+            Ok((changed, mailboxes))
+        })
+        .await?;
+
+    announce(&app, &db, mailboxes, &ids);
+    Ok(now_flagged)
+}
+
+/// Archives a selection into **each message's own account** Archive. Ctrl+Shift+A.
+///
+/// Resolved per message rather than once, and that is the whole reason this is a command rather
+/// than a move the window works out for itself. With several accounts on screen at the same
+/// time — "All Inboxes" is the default view — a selection routinely spans two of them, and
+/// there is no single Archive to move it to. Picking one would file somebody's mail into a
+/// different account, which is both wrong and tedious to undo.
+///
+/// Returns how many were moved. A message whose account has no Archive mailbox is skipped
+/// rather than failing the whole command, because the alternative is one misconfigured account
+/// stopping the user archiving anything at all.
+#[tauri::command]
+pub async fn msg_archive(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Response<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let affected = ids.clone();
+
+    let (moved, mailboxes) = db
+        .write(move |tx| {
+            let mut moved = 0usize;
+
+            for id in &affected {
+                let archive: Option<i64> = tx
+                    .query_row(
+                        "SELECT archive.id
+                           FROM message
+                           JOIN mailbox archive ON archive.account_id = message.account_id
+                          WHERE message.id = ?1 AND archive.role = 'archive'",
+                        rusqlite::params![id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+
+                let Some(archive) = archive else {
+                    continue;
+                };
+
+                // Already there. Moving a message to the mailbox it is in would queue a
+                // pointless server round trip and, on some servers, change its UID.
+                let current: i64 = tx.query_row(
+                    "SELECT mailbox_id FROM message WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )?;
+
+                if current == archive {
+                    continue;
+                }
+
+                for group in ops::locate(tx, &[*id])? {
+                    let destination: Option<String> = tx
+                        .query_row(
+                            "SELECT remote_path FROM mailbox WHERE id = ?1",
+                            rusqlite::params![archive],
+                            |row| row.get(0),
+                        )
+                        .ok();
+
+                    if let Some(to) = destination {
+                        ops::enqueue(
+                            tx,
+                            group.account_id,
+                            &ops::Op::Move {
+                                from: group.mailbox,
+                                to,
+                                uids: group.uids,
+                            },
+                        )?;
+                    }
+                }
+
+                moved += write::move_to(tx, &[*id], archive)?;
+            }
+
+            let mailboxes = write::mailboxes_of(tx, &affected)?;
+            Ok((moved, mailboxes))
+        })
+        .await?;
+
+    announce(&app, &db, mailboxes, &ids);
+    Ok(moved)
 }
 
 /// Toggles read and unread across a selection. Ctrl+U, docs/01 §14.

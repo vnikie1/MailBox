@@ -40,6 +40,8 @@ pub fn run() {
             ipc::mail::search,
             ipc::mail::msg_set_flags,
             ipc::mail::msg_toggle_read,
+            ipc::mail::msg_toggle_flag,
+            ipc::mail::msg_archive,
             ipc::mail::msg_move,
             ipc::mail::msg_delete,
             ipc::accounts::providers_list,
