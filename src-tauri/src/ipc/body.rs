@@ -451,9 +451,7 @@ pub async fn remote_images_enabled(db: State<'_, Db>) -> Result<bool, AppError> 
         })
         .await?;
 
-    // Absent means on. A fresh install gets the default without needing a row written first,
-    // and a database from before this setting existed behaves the same as a new one.
-    Ok(stored.is_none_or(|value| value == "1" || value.eq_ignore_ascii_case("true")))
+    Ok(remote_images_from(stored.as_deref()))
 }
 
 #[tauri::command]
@@ -471,9 +469,48 @@ pub async fn set_remote_images_enabled(db: State<'_, Db>, enabled: bool) -> Resu
     Ok(())
 }
 
+/// How `remote_images_enabled` reads a stored value.
+///
+/// Split out of the command so it can be tested without a `Db` and a Tauri `State`. The command
+/// is then only the plumbing that fetches the row.
+fn remote_images_from(stored: Option<&str>) -> bool {
+    // Absent means on. A fresh install gets the default without a row being written first, and a
+    // database from before this setting existed behaves the same as a new one — which is the
+    // case that would otherwise silently keep the old blocked-by-default behaviour for every
+    // existing user.
+    stored.is_none_or(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_images_default_to_on() {
+        // The setting the owner asked for, and the one default in this app chosen against the
+        // security advice. Asserted so it cannot drift back by accident.
+        assert!(
+            remote_images_from(None),
+            "a fresh install should load images"
+        );
+        assert!(
+            remote_images_from(Some("1")),
+            "an upgraded install with no row should load images"
+        );
+    }
+
+    #[test]
+    fn remote_images_can_be_turned_off() {
+        assert!(!remote_images_from(Some("0")));
+        assert!(!remote_images_from(Some("false")));
+    }
+
+    #[test]
+    fn a_stored_value_is_read_case_insensitively() {
+        // Written as "1" by this app, but a value edited by hand should still be understood.
+        assert!(remote_images_from(Some("TRUE")));
+        assert!(remote_images_from(Some("true")));
+    }
 
     #[test]
     fn a_link_whose_text_matches_its_destination_opens_without_a_prompt() {

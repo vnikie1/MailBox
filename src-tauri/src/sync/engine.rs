@@ -815,6 +815,100 @@ impl StoredState {
     }
 }
 
+/// Removes local rows for messages the server no longer has. docs/03 §5.
+///
+/// ## Why this exists
+///
+/// Nothing else deletes a message that vanished from the server. Archive a message on your
+/// phone, delete one in Gmail's web client, let a rule on the server file one away — the copy
+/// here stayed for ever. The symptom is an Inbox full of mail the user has already dealt with
+/// somewhere else, and it gets worse every day the app is used alongside another client.
+///
+/// It also explains a second symptom that looks unrelated: opening one of those messages showed
+/// a blank body for ever, because the body fetch asked the server for a UID that no longer
+/// existed and got nothing back.
+///
+/// ## Why a `UID SEARCH` and not `VANISHED`
+///
+/// docs/03 §5 says to use `VANISHED`, *"if QRESYNC"*. Gmail does not offer QRESYNC — this
+/// account reports `qresync=false` — so on the server most people are using, the spec's answer
+/// is not available. `UID SEARCH ALL` is: it works everywhere, and the response is a list of
+/// integers rather than message data.
+///
+/// ## Why it is guarded by a count
+///
+/// The search is cheap but not free, and running it for every mailbox on every sync would be
+/// 46 extra round trips a minute for an account where nothing has been deleted. `EXISTS` comes
+/// back with the `SELECT` that has already happened, so comparing it to the local count costs
+/// nothing and is right whenever it disagrees.
+///
+/// It is not a complete test: delete one message and receive another between two syncs and the
+/// counts match again while the local copy is wrong about both. That case is caught anyway,
+/// because the arrival changes `UIDNEXT` and the caller only reaches this point when something
+/// changed. The pathological case — an equal number added and removed, with `UIDNEXT` and
+/// `HIGHESTMODSEQ` both landing back where they started — cannot happen: `UIDNEXT` only ever
+/// increases.
+async fn reconcile_expunged(
+    db: &Db,
+    session: &mut ImapSession,
+    mailbox_id: i64,
+    path: &str,
+    server_exists: u32,
+) -> Result<usize, SyncError> {
+    let local: i64 = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT COUNT(*) FROM message WHERE mailbox_id = ?1",
+                    rusqlite::params![mailbox_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0))
+        })
+        .await?;
+
+    // The common case, and the reason this is affordable: nothing has been removed, so there is
+    // nothing to ask the server.
+    if local <= i64::from(server_exists) {
+        return Ok(0);
+    }
+
+    tracing::debug!(
+        path,
+        local,
+        server = server_exists,
+        "more messages here than on the server; reconciling"
+    );
+
+    let present = fetch::all_uids(session).await?;
+
+    // A mailbox that reports messages but returns no UIDs is a server being strange, not a
+    // mailbox that emptied. Deleting everything on that answer would destroy the local copy of
+    // a mailbox over a transient fault, which is the one outcome worth being paranoid about.
+    if present.is_empty() && server_exists > 0 {
+        tracing::warn!(
+            path,
+            "the server reported messages but listed no UIDs; leaving them"
+        );
+        return Ok(0);
+    }
+
+    // The decision itself lives in `persist`, where it is tested without a network.
+    let removed = db
+        .write(move |tx| persist::remove_missing(tx, mailbox_id, &present))
+        .await?;
+
+    if removed > 0 {
+        tracing::info!(
+            path,
+            removed,
+            "messages expunged on the server were removed"
+        );
+    }
+
+    Ok(removed)
+}
+
 /// The CONDSTORE path: fetch what arrived, reconcile what changed, and nothing else.
 ///
 /// Split out rather than nested in `sync_mailbox` because the two paths share almost nothing:
@@ -843,6 +937,19 @@ async fn incremental(
             modseq = server_modseq,
             "unchanged since the last sync"
         );
+
+        // Still checked, and it costs no round trip: `EXISTS` arrived with the `SELECT` and the
+        // local count is a database read. On a CONDSTORE server an expunge bumps
+        // `HIGHESTMODSEQ`, so this branch should never see one — but a server without CONDSTORE
+        // reports no modseq at all, and for that server a deletion changes nothing this
+        // condition looks at. Skipping the check here would leave those accounts with exactly
+        // the bug this whole function exists to fix.
+        let expunged = reconcile_expunged(db, session, mailbox_id, path, selected.exists).await?;
+
+        if expunged > 0 {
+            app.emit("messages:added", payload(&mailbox_id));
+        }
+
         return Ok(0);
     }
 
@@ -906,6 +1013,12 @@ async fn incremental(
         tracing::debug!(path, changed, "incremental: flags reconciled");
     }
 
+    // ---- what left ------------------------------------------------------------------------
+    // Before the counts are written, so the badge reflects what is actually here. Without this
+    // nothing ever removed a message that vanished from the server, and an Inbox used alongside
+    // a phone filled up with mail the user had already dealt with elsewhere.
+    let expunged = reconcile_expunged(db, session, mailbox_id, path, selected.exists).await?;
+
     // Counts and state last, and in the same order as the full path: the badge is a cache of
     // rows that have now all been written.
     let uid_validity = selected.uid_validity;
@@ -918,7 +1031,7 @@ async fn incremental(
     })
     .await?;
 
-    if inserted > 0 || changed > 0 {
+    if inserted > 0 || changed > 0 || expunged > 0 {
         app.emit(
             "sync:progress",
             payload(&Progress {
@@ -1015,6 +1128,7 @@ pub async fn fetch_body(
         .map(Path::to_path_buf)
         .unwrap_or_default();
 
+    let total = wanted.len();
     let mut stored = 0usize;
     let mut current_mailbox = String::new();
 
@@ -1022,10 +1136,11 @@ pub async fn fetch_body(
         // SELECT only when the mailbox changes. A thread whose messages are all in the Inbox
         // is the common case, and re-selecting per message would triple the round trips.
         if path != current_mailbox {
-            if fetch::select(&mut session, &path, None, caps)
-                .await
-                .is_err()
-            {
+            // Logged rather than skipped in silence. A failed SELECT skips every message in
+            // that mailbox, and without a line here the symptom is a message that renders
+            // blank for ever with nothing anywhere to say why — which is exactly what it did.
+            if let Err(error) = fetch::select(&mut session, &path, None, caps).await {
+                tracing::warn!(message_id, path, %error, "body fetch: cannot select the mailbox");
                 continue;
             }
             current_mailbox = path.clone();
@@ -1033,7 +1148,17 @@ pub async fn fetch_body(
 
         let raw = match bodies::fetch(&mut session, uid).await {
             Ok(raw) if !raw.is_empty() => raw,
-            Ok(_) => continue,
+            Ok(_) => {
+                // The server had nothing for this UID. Silent before, and it is one of the two
+                // ways a message can stay blank with no explanation.
+                tracing::warn!(
+                    message_id,
+                    uid,
+                    path,
+                    "body fetch: the server returned nothing"
+                );
+                continue;
+            }
             Err(error) => {
                 // One unreadable message must not abandon the rest of the batch — a body
                 // over the size cap is the usual reason, and the next row is fine.
@@ -1053,7 +1178,14 @@ pub async fn fetch_body(
 
     let _ = session.logout().await;
 
-    tracing::debug!(account_id, stored, "body fetch: finished");
+    // `asked` against `stored` is the pair that matters: a batch that wanted four bodies and
+    // stored none is a bug, and reporting only the second number hid that.
+    tracing::debug!(
+        account_id,
+        stored,
+        skipped = total - stored,
+        "body fetch: finished"
+    );
 
     if stored > 0 {
         app.emit("messages:updated", payload(&message_ids));

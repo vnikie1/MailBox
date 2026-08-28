@@ -394,6 +394,63 @@ pub fn record_backfill_progress(
     Ok(())
 }
 
+/// Removes local rows whose UID the server no longer lists. docs/03 §5.
+///
+/// `present` is the complete set of UIDs the server reports for this mailbox. Anything held
+/// locally and not in that set has been expunged, moved or archived somewhere else, and keeping
+/// it is what fills an Inbox with mail the user has already dealt with on their phone.
+///
+/// **This deletes the user's mail, so it is deliberately narrow.** It only ever considers rows
+/// in this one mailbox, only rows with a real UID, and it does nothing at all when handed an
+/// empty set — a server that answers a `UID SEARCH` with nothing is far more likely to be
+/// having a bad moment than to have emptied the mailbox, and the cost of being wrong in that
+/// direction is the whole local copy.
+pub fn remove_missing(
+    tx: &Transaction<'_>,
+    mailbox_id: i64,
+    present: &[u32],
+) -> Result<usize, DbError> {
+    if present.is_empty() {
+        return Ok(0);
+    }
+
+    let present: std::collections::HashSet<i64> =
+        present.iter().map(|uid| i64::from(*uid)).collect();
+
+    let held = {
+        let mut statement =
+            tx.prepare("SELECT id, uid FROM message WHERE mailbox_id = ?1 AND uid > 0")?;
+
+        let rows = statement
+            .query_map(params![mailbox_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        rows
+    };
+
+    let gone: Vec<i64> = held
+        .into_iter()
+        .filter(|(_, uid)| !present.contains(uid))
+        .map(|(id, _)| id)
+        .collect();
+
+    // Row by row rather than one bulk delete, so the FTS5 triggers fire. A bulk delete leaves
+    // the removed messages searchable with nothing behind them — the same trap
+    // `drop_mailbox_contents` records.
+    let mut removed = 0usize;
+    for id in gone {
+        removed += tx.execute("DELETE FROM message WHERE id = ?1", params![id])?;
+    }
+
+    if removed > 0 {
+        recount(tx, mailbox_id)?;
+    }
+
+    Ok(removed)
+}
+
 /// Drops every message in a mailbox. docs/03 §5's `UIDVALIDITY` recovery.
 ///
 /// *Drop and re-sync that mailbox. Do not try to be clever.* Row by row rather than by a
@@ -1035,5 +1092,170 @@ mod tests {
 
         drop_mailbox_contents(&tx, 1).expect("drop");
         assert_eq!(backfill_uid(&tx), None);
+    }
+
+    /* ------------------------------------------------- messages the server no longer has */
+
+    /// Adds a message with a given UID to a mailbox.
+    fn with_uid(conn: &rusqlite::Connection, id: i64, mailbox_id: i64, uid: i64) {
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                 from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+             ) VALUES (?1, 1, ?2, ?3, 'Subject', 0, 0, 100, 'a@b.test', '', '', 0, 0, 0, 0)",
+            params![id, mailbox_id, uid],
+        )
+        .expect("message");
+    }
+
+    fn ids_in(conn: &rusqlite::Connection, mailbox_id: i64) -> Vec<i64> {
+        let mut statement = conn
+            .prepare("SELECT id FROM message WHERE mailbox_id = ?1 ORDER BY id")
+            .expect("prepare");
+
+        statement
+            .query_map(params![mailbox_id], |row| row.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<i64>>>()
+            .expect("rows")
+    }
+
+    #[test]
+    fn a_message_the_server_no_longer_lists_is_removed() {
+        // The whole point: archive something on your phone and it should stop being here.
+        let mut conn = store();
+        with_uid(&conn, 1, 1, 10);
+        with_uid(&conn, 2, 1, 11);
+        with_uid(&conn, 3, 1, 12);
+
+        let tx = conn.transaction().expect("tx");
+        let removed = remove_missing(&tx, 1, &[10, 12]).expect("remove");
+        tx.commit().expect("commit");
+
+        assert_eq!(removed, 1);
+        assert_eq!(ids_in(&conn, 1), vec![1, 3]);
+    }
+
+    #[test]
+    fn nothing_is_removed_when_the_server_still_has_everything() {
+        let mut conn = store();
+        with_uid(&conn, 1, 1, 10);
+        with_uid(&conn, 2, 1, 11);
+
+        let tx = conn.transaction().expect("tx");
+        assert_eq!(remove_missing(&tx, 1, &[10, 11]).expect("remove"), 0);
+        tx.commit().expect("commit");
+
+        assert_eq!(ids_in(&conn, 1), vec![1, 2]);
+    }
+
+    #[test]
+    fn an_empty_answer_removes_nothing_at_all() {
+        // A server that answers `UID SEARCH ALL` with nothing is far more likely to be having a
+        // bad moment than to have emptied the mailbox, and the cost of believing it is the
+        // user's entire local copy. This is the single most destructive thing this function
+        // could do, so it is the one it refuses outright.
+        let mut conn = store();
+        with_uid(&conn, 1, 1, 10);
+        with_uid(&conn, 2, 1, 11);
+
+        let tx = conn.transaction().expect("tx");
+        assert_eq!(remove_missing(&tx, 1, &[]).expect("remove"), 0);
+        tx.commit().expect("commit");
+
+        assert_eq!(ids_in(&conn, 1), vec![1, 2]);
+    }
+
+    #[test]
+    fn another_mailbox_is_never_touched() {
+        // The UID sets of two mailboxes overlap — UID 10 exists in both and means different
+        // messages. Reconciling one mailbox against the other's UID list would delete mail
+        // that is perfectly present.
+        let mut conn = store();
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (2, 1, 'Archive', 'Archive', 'archive')",
+            [],
+        )
+        .expect("mailbox");
+
+        with_uid(&conn, 1, 1, 10);
+        with_uid(&conn, 2, 2, 10);
+        with_uid(&conn, 3, 2, 11);
+
+        let tx = conn.transaction().expect("tx");
+        remove_missing(&tx, 1, &[99]).expect("remove");
+        tx.commit().expect("commit");
+
+        assert!(
+            ids_in(&conn, 1).is_empty(),
+            "the target mailbox was not cleared"
+        );
+        assert_eq!(
+            ids_in(&conn, 2),
+            vec![2, 3],
+            "another mailbox lost messages"
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_uid_is_left_alone() {
+        // UID 0 means a row that has never been on the server — a draft written offline. It
+        // cannot be in the server's list by definition, and deleting it would destroy
+        // something the user typed.
+        let mut conn = store();
+        with_uid(&conn, 1, 1, 0);
+        with_uid(&conn, 2, 1, 10);
+
+        let tx = conn.transaction().expect("tx");
+        remove_missing(&tx, 1, &[10]).expect("remove");
+        tx.commit().expect("commit");
+
+        assert_eq!(ids_in(&conn, 1), vec![1, 2], "a local-only row was deleted");
+    }
+
+    #[test]
+    fn removing_a_message_takes_it_out_of_the_search_index_too() {
+        // Row by row rather than a bulk delete, so the FTS5 triggers fire. A bulk delete leaves
+        // the message searchable with nothing behind it, which is a result that opens nothing.
+        let mut conn = store();
+        with_uid(&conn, 1, 1, 10);
+
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_fts", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(indexed, 1, "the fixture did not index the message");
+
+        let tx = conn.transaction().expect("tx");
+        remove_missing(&tx, 1, &[99]).expect("remove");
+        tx.commit().expect("commit");
+
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM message_fts", [], |row| row.get(0))
+            .expect("count");
+
+        assert_eq!(left, 0, "the message is gone but still searchable");
+    }
+
+    #[test]
+    fn the_mailbox_counts_are_refreshed() {
+        // The badge is a cache of the rows. Leaving it alone would show a count for mail that
+        // is no longer there — which is the bug this whole change is fixing, in miniature.
+        let mut conn = store();
+        with_uid(&conn, 1, 1, 10);
+        with_uid(&conn, 2, 1, 11);
+
+        let tx = conn.transaction().expect("tx");
+        recount(&tx, 1).expect("recount");
+        remove_missing(&tx, 1, &[10]).expect("remove");
+        tx.commit().expect("commit");
+
+        let total: i64 = conn
+            .query_row("SELECT total_count FROM mailbox WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+
+        assert_eq!(total, 1);
     }
 }
