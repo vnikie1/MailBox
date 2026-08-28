@@ -2417,3 +2417,163 @@ A test asserts the value, because it is a budget the soak was measured against a
 should be a decision rather than a drift. Writing that test found that the query fixture opens
 raw connections and never calls `configure`, so it was measuring the default rather than the
 setting — the test now configures a connection explicitly.
+
+---
+
+## 2026-08-28 (Phase 10) — Polish and platform
+
+Phase 10 in full: the keyboard registry, the Windows platform surface, the states that were
+never shown, and the accessibility and motion audits. Committed as `c57bfc7`, `795434a`,
+`b24e4d8`, `908d708`, `aa6d3bd` and `efc856a`.
+
+### Added — the platform surface
+
+- **Taskbar unread badge** (`ITaskbarList3::SetOverlayIcon`). The digits are a hand-built 3×5
+  bitmap font rather than a rasterised typeface: Windows scales an overlay to 16px and a real
+  font at that size is a smear. Above 99 it shows `99+`, because a count that admits it has
+  stopped counting is better than one that is unreadable.
+- **Tray icon** with the unread count, and **run at login**, user-toggleable.
+- **Toast notifications with inline Reply / Archive / Mark as Read**, per-account and VIP-only.
+- **Jump list** — New Message, Inbox, Search.
+- **`mailto:` handling** and a **`.eml` viewer window**, read-only.
+- **Send and receive sounds**, off by default.
+- **Swipe gestures** on list rows, by precision touchpad and by touch.
+
+### Changed — toasts bypass the Tauri plugin
+
+`tauri-plugin-notification` wraps `tauri-winrt-notification` but exposes only `action_type_id`,
+which is the mobile notion of an action. `add_button` — the thing Windows actually draws on a
+toast — is not reachable through it, and docs/06 asks for three buttons. The Windows path now
+talks to the crate directly; the plugin stays for the permission plumbing.
+
+**Those buttons do not appear in a dev build, and that is expected.** A toast is addressed to an
+AppUserModelID, Windows only shows toasts for an AUMID it knows, and it learns one from a Start
+Menu shortcut written by an installer. Until Phase 12 there is no installer, so `show()` fails
+and is logged at debug. The COM activator docs/06 names — which is what lets a toast act when
+the app is _not_ running — has the same dependency and is deferred with it, deliberately.
+`src-tauri/src/platform/toast.rs` documents all three states at the top.
+
+### Changed — where each kind of action is decided
+
+Two shell integrations pull in opposite directions and the reasons are worth recording.
+
+**Toast actions route to the UI.** Archive and Mark as Read already exist as mutations with the
+cache invalidation that makes the message list update. A second implementation behind the toast
+would be the one that archives on the server and leaves the message sitting in the list.
+
+**`mailto:` routes the other way** — `links.rs` parses it and opens the compose window from Rust
+with the sanitised fields as query parameters. Handing the raw link to the frontend would mean
+parsing it twice, and the second parser is the one that forgets to drop `Bcc`. The parser is an
+allow-list (to, cc, subject, body only) because RFC 6068 permits arbitrary headers, and a page
+that could set `Reply-To` can make a reply go somewhere the sender never intended.
+
+### Added — the sync status strip
+
+The sync engine has tracked per-account errors since Phase 5 and **nothing has ever displayed
+them**. An account whose password expired failed every few minutes and the entire user-visible
+consequence was that new mail stopped arriving: the app looked like it was working and was not.
+
+That is the exact shape of the "my mail is stale" report from this project's own testing on
+2026-08-27. That report turned out to have a different cause — three seeded `.example` accounts
+sitting above the real one — but only by luck. Had sync genuinely been failing, the app would
+have been just as silent.
+
+The strip is **absent when things are fine**. A permanent "Connected" line is a banner that
+teaches you to stop looking at the space it occupies, so that when something does appear there
+you no longer see it.
+
+Offline is tracked separately from account errors, and outranks them. With no network every
+account fails, and four rows saying so describe one fact four times; it is also the one failure
+where the honest thing to say is that the mail is still here and merely not current. Coming back
+online triggers a sync, because IDLE connections died with the network and nothing else will say
+what arrived in the meantime.
+
+`navigator.onLine` is a weak signal — it means "there is a network interface", so a captive
+portal still reports true. It is used anyway because the case it does catch is the common one
+and it catches it instantly, where waiting for an IMAP timeout takes half a minute. Anything
+subtler still arrives as a per-account error.
+
+### Added — one `EmptyState`, and the surfaces that had none
+
+Every "there is nothing here" now says what is true, why, and — where one exists — a way out.
+The `hero` variant preserves docs/02 §6.10's larger, dimmer treatment for the reader at rest,
+because "No Message Selected" is the app waiting rather than an absence to explain.
+
+The `.eml` viewer, the message list, the reader and the sidebar all use it.
+
+### Changed — `MessageFrame` extracted from `MessageBody`
+
+The sandboxed iframe and its CSP are now one component shared by the reader and the `.eml`
+viewer. This is not tidiness: the frame is the security boundary standing rule 11 is about, and
+a second copy is one that eventually drifts — and the drifted copy does not read as wrong.
+`MessageBody` keeps what is genuinely its own: the remote-image setting, the per-message
+override, and the two banners.
+
+### Added — two audits, as tests rather than as an afternoon
+
+- `tests/unit/motion.test.ts` — no linear _stops_, easing tokens only, reduced motion from one
+  place. `infinite` animations are exempt: a spinner rotating at a constant rate has to be
+  linear, and eased it visibly hitches once per revolution.
+- `tests/unit/accessibility.test.ts` — focus rings, fixed pixel font sizes, accessible names.
+
+An audit performed once is a fact about one afternoon. These run on every commit.
+
+### Fixed — dead ends found by auditing
+
+- **A message body that failed to load rendered an empty div.** Indistinguishable from a message
+  that is genuinely blank, so a failed fetch looked like an empty email. Now says so, with a
+  retry.
+- **A failed accounts or mailboxes query left the sidebar empty and silent.** The first-run gate
+  could not cover it — `firstRun` requires `isSuccess`, correctly — so the app looked like a
+  fresh install with no mail. Now says the database did not answer, notes the mail is still on
+  the server, and offers a retry.
+
+### Incidents
+
+**The accessibility audit's first version was worse than nothing.** It matched IconButton tags
+with a regex whose character class stops at the first `>` — which in JSX is usually the arrow of
+an inline `onClick`. It silently checked 30 of 56 IconButtons and passed. Found by probing it
+with a deliberately unnamed button and noticing the probe _did not fire_. Replaced with a
+brace-aware scanner, and the count is now asserted, so finding nothing is itself a failure.
+Every check in both audit files was probed the same way afterwards.
+
+**A test was written to match the code rather than to match what should happen.** The touch
+swipe's `pointercancel` handler shared the release path, so a system-interrupted gesture past
+the threshold _committed_ — archiving a message nobody let go of, which is precisely the failure
+the distance threshold exists to prevent, arriving through the one door that bypassed it. The
+first version of the test asserted this behaviour as correct. Both were corrected.
+
+**`capabilities/default.json` listed only `main` and `compose-*`.** Every core call from a
+`.eml` viewer window would have been denied _silently_ — the failure mode `CLAUDE.md` warns
+about, which produces no error anywhere. Found by reading the file rather than by anything going
+wrong. `eml-*` added, with the reason written into the description.
+
+**A test mutated `WINDIR` process-wide.** `std::env::remove_var` is global and cargo runs tests
+on several threads, so it could have failed a sibling test that reads the variable — a flake
+that would have appeared at random and been blamed on anything but this. The path builder now
+takes the directory as an argument.
+
+**Replacing `= []` destructuring defaults with `?? []` surfaced a pre-existing problem.** Both
+allocate a new array per render, so the memo building the entire sidebar tree was rebuilding on
+every render. eslint cannot see this through a destructuring default. Now one shared constant.
+
+**Two focus rings were removed without replacement**, in the compose editor and the message
+list. Both are correct — a caret indicates focus in a text surface, and the selected row does in
+a list — but neither said so. Rather than an allow-list in the test, both now carry a
+`focus-ring-exempt` marker in the CSS, so the reason sits where the next reader will find it.
+
+### Notes — what the exit gate still needs from a person
+
+The gate is: _complete a full triage session (read, flag, archive, reply, search, send) without
+touching the mouse; Narrator walkthrough recorded; no unstyled or dead-end state reachable._
+
+- **Keyboard coverage** is asserted in `tests/unit/shortcuts.test.ts` — all six verbs, plus the
+  arrow keys that select a message. The _session itself_ has not been performed and cannot be by
+  me.
+- **The Narrator walkthrough** needs a screen reader on the owner's machine and a recording. Not
+  done.
+- **Dead ends**: the two above are fixed and the surfaces are covered. "No unstyled state
+  reachable" is a claim about every screen, and it has been checked by reading rather than by
+  walking every one.
+
+Phase 7's exit gate also remains open — it needs Outlook and Apple Mail accounts.
