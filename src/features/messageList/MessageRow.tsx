@@ -56,6 +56,32 @@ export const MessageRow = memo(function MessageRow({
   const subject = message.subject ?? '(no subject)'
   const date = formatRowDate(receivedAt(message), now)
 
+  /**
+   * What a screen reader announces for this row.
+   *
+   * An `aria-label`, not a visually-hidden span. The span was the first attempt and it made
+   * things worse: a name computed from content is the *concatenation* of everything inside,
+   * so Narrator read the visible sender, date and subject and then read the hidden sentence
+   * saying the same things again. Every row was announced twice. `aria-label` replaces the
+   * computed name outright, which is the only way to say this once.
+   *
+   * Verified against the real UI Automation tree, which is where the doubling was found —
+   * reading the JSX cannot show it, because both halves look correct on their own.
+   *
+   * The preview is deliberately left out. It is the longest part of a row and the least useful
+   * when every row is being read aloud in sequence.
+   */
+  const announcement = [
+    unread ? 'Unread.' : null,
+    `${sender}.`,
+    `${subject}.`,
+    message.hasAttachment ? 'Has attachment.' : null,
+    message.flagged ? 'Flagged.' : null,
+    date,
+  ]
+    .filter(Boolean)
+    .join(' ')
+
   // Both directions are chosen to be recoverable. A swipe is the easiest gesture in the app to
   // perform by accident — a two-finger scroll that drifted — so neither direction may do
   // anything the user cannot immediately undo. Delete is deliberately not offered.
@@ -95,6 +121,7 @@ export const MessageRow = memo(function MessageRow({
         <div
           role="option"
           aria-selected={selected}
+          aria-label={announcement}
           tabIndex={-1}
           className={cx(
             styles.row,
@@ -158,15 +185,6 @@ export const MessageRow = memo(function MessageRow({
               </p>
             )}
           </div>
-
-          {/* One coherent sentence for the screen reader, rather than five fragments read in
-          layout order — which is what the visual arrangement above would otherwise produce. */}
-          <span className="srOnly">
-            {unread ? 'Unread. ' : ''}
-            {sender}. {subject}. {message.hasAttachment ? 'Has attachment. ' : ''}
-            {message.flagged ? 'Flagged. ' : ''}
-            {date}
-          </span>
         </div>
       </div>
     </div>

@@ -233,32 +233,69 @@ pub async fn msg_toggle_flag(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -
 /// there is no single Archive to move it to. Picking one would file somebody's mail into a
 /// different account, which is both wrong and tedious to undo.
 ///
+/// Where a message should go when it is archived.
+///
+/// 'archive' first, 'all' second.
+///
+/// Gmail has no Archive mailbox: it has All Mail, and archiving *is* removing the INBOX label,
+/// which over IMAP is a move from INBOX to [Gmail]/All Mail. Looking only for role = 'archive'
+/// therefore found nothing on the commonest provider there is, and the caller skipped the
+/// message in silence — so the toolbar button, Ctrl+Shift+A and the toast's Archive action were
+/// all dead against a real Gmail account. They worked only against seeded fixtures, which are
+/// the only place a mailbox with role 'archive' has ever existed in this project.
+///
+/// Found by running the Phase 10 exit gate's triage session against live mail.
+///
+/// The preference order matters: a server with a genuine Archive folder must use it. All Mail
+/// is the fallback, not the default — see `sync::mailboxes` on why `Role::All` is deliberately
+/// not `Role::Archive`.
+fn archive_mailbox_for(conn: &rusqlite::Connection, message_id: i64) -> Option<i64> {
+    conn.query_row(
+        "SELECT archive.id
+           FROM message
+           JOIN mailbox archive ON archive.account_id = message.account_id
+          WHERE message.id = ?1 AND archive.role IN ('archive', 'all')
+          ORDER BY CASE archive.role WHEN 'archive' THEN 0 ELSE 1 END
+          LIMIT 1",
+        rusqlite::params![message_id],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 /// Returns how many were moved. A message whose account has no Archive mailbox is skipped
 /// rather than failing the whole command, because the alternative is one misconfigured account
 /// stopping the user archiving anything at all.
+///
+/// Recorded on the undo stack. It was not, until the Phase 10 exit gate archived a real message
+/// and Ctrl+Z did nothing: every command in `ipc::organise` captured an undo step and none of
+/// the ones in this file did, so archive, the most-used destructive-feeling action in the app,
+/// was the one that could not be taken back. The toast's Archive button was documented as "easy
+/// to undo", which was simply untrue.
 #[tauri::command]
-pub async fn msg_archive(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Response<usize> {
+pub async fn msg_archive(
+    app: AppHandle,
+    db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
+    ids: Vec<i64>,
+) -> Response<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
 
     let affected = ids.clone();
 
-    let (moved, mailboxes) = db
+    let (moved, mailboxes, step) = db
         .write(move |tx| {
+            // Captured before anything moves, and over Mailbox alone: archiving changes where a
+            // message is and nothing else about it.
+            let step =
+                crate::undo::capture(tx, "Archive", &affected, &[crate::undo::Field::Mailbox])?;
+
             let mut moved = 0usize;
 
             for id in &affected {
-                let archive: Option<i64> = tx
-                    .query_row(
-                        "SELECT archive.id
-                           FROM message
-                           JOIN mailbox archive ON archive.account_id = message.account_id
-                          WHERE message.id = ?1 AND archive.role = 'archive'",
-                        rusqlite::params![id],
-                        |row| row.get(0),
-                    )
-                    .ok();
+                let archive = archive_mailbox_for(tx, *id);
 
                 let Some(archive) = archive else {
                     continue;
@@ -302,9 +339,13 @@ pub async fn msg_archive(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Re
             }
 
             let mailboxes = write::mailboxes_of(tx, &affected)?;
-            Ok((moved, mailboxes))
+            Ok((moved, mailboxes, step))
         })
         .await?;
+
+    // Recorded even when nothing moved. An empty step undoes to the same state, and the
+    // alternative — deciding here whether it was worth keeping — puts the rule in two places.
+    stack.record(step);
 
     announce(&app, &db, mailboxes, &ids);
     Ok(moved)
@@ -400,17 +441,22 @@ pub async fn msg_set_flags(
     Ok(changed)
 }
 
+/// Recorded on the undo stack, for the same reason archive is — see `msg_archive`. Moving mail
+/// to the wrong folder is the mistake undo exists for.
 #[tauri::command]
 pub async fn msg_move(
     app: AppHandle,
     db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
     ids: Vec<i64>,
     mailbox_id: i64,
 ) -> Response<usize> {
     let affected = ids.clone();
 
-    let (changed, mut mailboxes) = db
+    let (changed, mut mailboxes, step) = db
         .write(move |tx| {
+            let step = crate::undo::capture(tx, "Move", &affected, &[crate::undo::Field::Mailbox])?;
+
             // Source mailboxes have to be read before the move, or the event only names
             // the destination and the source badge never updates.
             let mut mailboxes = write::mailboxes_of(tx, &affected)?;
@@ -440,9 +486,11 @@ pub async fn msg_move(
             if !mailboxes.contains(&mailbox_id) {
                 mailboxes.push(mailbox_id);
             }
-            Ok((changed, mailboxes))
+            Ok((changed, mailboxes, step))
         })
         .await?;
+
+    stack.record(step);
 
     mailboxes.sort_unstable();
     mailboxes.dedup();
@@ -455,13 +503,29 @@ pub async fn msg_move(
 pub async fn msg_delete(
     app: AppHandle,
     db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
     ids: Vec<i64>,
     permanent: bool,
 ) -> Response<usize> {
     let affected = ids.clone();
 
-    let (changed, mailboxes) = db
+    let (changed, mailboxes, step) = db
         .write(move |tx| {
+            // Only a move to Trash is recorded. A permanent delete has nothing to restore —
+            // the row is gone and the server has been told to expunge it — and an undo entry
+            // that silently fails to bring mail back is worse than no entry at all, because
+            // the user stops checking.
+            let step = if permanent {
+                None
+            } else {
+                Some(crate::undo::capture(
+                    tx,
+                    "Delete",
+                    &affected,
+                    &[crate::undo::Field::Mailbox],
+                )?)
+            };
+
             let mut mailboxes = write::mailboxes_of(tx, &affected)?;
 
             // Which mailbox is Trash depends on the account the messages are in, so it is
@@ -502,9 +566,13 @@ pub async fn msg_delete(
             }
 
             let changed = write::delete(tx, &affected, permanent, trash)?;
-            Ok((changed, mailboxes))
+            Ok((changed, mailboxes, step))
         })
         .await?;
+
+    if let Some(step) = step {
+        stack.record(step);
+    }
 
     announce(&app, &db, mailboxes, &ids);
     Ok(changed)
@@ -586,6 +654,84 @@ mod tests {
             rusqlite::params![id, i64::from(seen)],
         )
         .expect("message");
+    }
+
+    /// Adds a second mailbox with a given role, for the archive-target tests.
+    fn add_mailbox(conn: &Connection, id: i64, path: &str, role: &str) {
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (?1, 1, ?2, ?2, ?3)",
+            rusqlite::params![id, path, role],
+        )
+        .expect("mailbox");
+    }
+
+    #[test]
+    fn a_real_archive_mailbox_is_the_target() {
+        let conn = store();
+        add(&conn, 1, true);
+        add_mailbox(&conn, 2, "Archive", "archive");
+
+        assert_eq!(archive_mailbox_for(&conn, 1), Some(2));
+    }
+
+    #[test]
+    fn gmail_archives_into_all_mail() {
+        // The bug this function exists for. Gmail has no Archive mailbox, so archiving found
+        // no target and the message was skipped without a word — on the commonest provider
+        // there is. Every archive path in the app goes through here.
+        let conn = store();
+        add(&conn, 1, true);
+        add_mailbox(&conn, 2, "[Gmail]/All Mail", "all");
+
+        assert_eq!(archive_mailbox_for(&conn, 1), Some(2));
+    }
+
+    #[test]
+    fn a_real_archive_mailbox_wins_over_all_mail() {
+        // Order, not availability. A server offering both must use the one that means archive;
+        // All Mail holds every message including the ones still in the inbox, so preferring it
+        // would archive into a folder the message is arguably already in.
+        let conn = store();
+        add(&conn, 1, true);
+        add_mailbox(&conn, 2, "[Gmail]/All Mail", "all");
+        add_mailbox(&conn, 3, "Archive", "archive");
+
+        assert_eq!(archive_mailbox_for(&conn, 1), Some(3));
+    }
+
+    #[test]
+    fn an_account_with_neither_has_no_target() {
+        // Still skipped, and that is right: inventing a destination for someone's mail is worse
+        // than doing nothing. What changed is that Gmail is no longer in this case.
+        let conn = store();
+        add(&conn, 1, true);
+
+        assert_eq!(archive_mailbox_for(&conn, 1), None);
+    }
+
+    #[test]
+    fn another_accounts_archive_is_not_a_target() {
+        // The JOIN is on account_id. Without it, a two-account setup could archive one
+        // account's mail into another account's folder, which is not a move the server would
+        // even accept.
+        let conn = store();
+        add(&conn, 1, true);
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (2, 'Other', 'other@t.test', 'other', 'password', 'halcyon:other')",
+            [],
+        )
+        .expect("account");
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (9, 2, 'Archive', 'Archive', 'archive')",
+            [],
+        )
+        .expect("mailbox");
+
+        assert_eq!(archive_mailbox_for(&conn, 1), None);
     }
 
     #[test]
