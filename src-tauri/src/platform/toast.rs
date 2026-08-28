@@ -16,14 +16,14 @@
 //! ## What works now and what waits for the installer
 //!
 //! A toast is addressed to an AppUserModelID. Windows only shows toasts for an AUMID it knows,
-//! and it learns one from a Start Menu shortcut written by an installer — which is Phase 12. So:
+//! and it learns one from a Start Menu shortcut written by an installer — which is Phase 11. So:
 //!
 //! - **Running app, installed:** toast appears, buttons work, actions route through the UI.
 //! - **Running app, not installed** (`npm run app:dev`): Windows refuses the AUMID, `show()`
 //!   returns an error, and `notify::announce` logs it at debug and moves on. Nothing breaks;
 //!   there is simply no toast. This is the state during development and it is expected.
 //! - **App not running:** needs the COM activator docs/06 names, which can only be registered
-//!   against an installed AUMID. Deferred to Phase 12 with the installer, deliberately.
+//!   against an installed AUMID. Deferred to Phase 11 with the installer, deliberately.
 //!
 //! ## Why the actions route through the UI
 //!

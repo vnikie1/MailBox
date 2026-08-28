@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod attachments;
 pub mod body;
 pub mod compose;
+pub mod diagnostics;
 pub mod eml;
 pub mod mail;
 pub mod organise;

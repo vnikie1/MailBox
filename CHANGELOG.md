@@ -2448,7 +2448,7 @@ talks to the crate directly; the plugin stays for the permission plumbing.
 
 **Those buttons do not appear in a dev build, and that is expected.** A toast is addressed to an
 AppUserModelID, Windows only shows toasts for an AUMID it knows, and it learns one from a Start
-Menu shortcut written by an installer. Until Phase 12 there is no installer, so `show()` fails
+Menu shortcut written by an installer. Until Phase 11 there is no installer, so `show()` fails
 and is logged at debug. The COM activator docs/06 names — which is what lets a toast act when
 the app is _not_ running — has the same dependency and is deferred with it, deliberately.
 `src-tauri/src/platform/toast.rs` documents all three states at the top.

@@ -6,6 +6,7 @@
 
 pub mod accounts;
 pub mod db;
+pub mod diagnostics;
 pub mod mail;
 pub mod rules;
 pub mod search;
@@ -26,7 +27,17 @@ pub fn run() {
     // with bundled assets, which is Phase 11's measurement.
     let started = std::time::Instant::now();
 
-    init_tracing();
+    // Diagnostics before anything else, so a panic during startup — opening the store, running
+    // a migration — is recorded rather than lost. Those are the crashes hardest to reproduce and
+    // the ones a user can say least about.
+    let diagnostics = diagnostics::directory(
+        db::default_path()
+            .parent()
+            .unwrap_or(std::path::Path::new(".")),
+    );
+    diagnostics::install_panic_hook(diagnostics.clone());
+
+    init_tracing(&diagnostics);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
@@ -55,6 +66,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
             ipc::eml::eml_read,
+            ipc::diagnostics::crash_reports,
+            ipc::diagnostics::crash_report_read,
+            ipc::diagnostics::crash_reports_clear,
+            ipc::diagnostics::diagnostics_reveal,
             platform::sound::sound_sent,
             ipc::mail::accounts_list,
             ipc::mail::mailboxes_tree,
@@ -281,7 +296,15 @@ pub fn run() {
         .expect("failed to start Halcyon");
 }
 
-fn init_tracing() {
+/// Logging, to the terminal and to a file.
+///
+/// Both, not one or the other. A developer running `npm run app:dev` wants it on the terminal;
+/// a released build has no terminal at all, so until now every log line in the hands of an actual
+/// user went nowhere — and the moment anyone wants a log is after something has gone wrong.
+///
+/// The file layer is dropped if the directory cannot be opened. A full or read-only disk is a
+/// reason to lose the log, not a reason to refuse to start a mail client.
+fn init_tracing(diagnostics: &std::path::Path) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
     let filter = EnvFilter::try_from_env("HALCYON_LOG").unwrap_or_else(|_| {
@@ -292,8 +315,17 @@ fn init_tracing() {
         })
     });
 
+    let file = diagnostics::log_writer(diagnostics).map(|file| {
+        fmt::layer()
+            .with_target(true)
+            // No colour: the escape codes are noise in a file somebody opens in Notepad.
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+    });
+
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true).compact())
+        .with(file)
         .with(filter)
         .init();
 }

@@ -24,7 +24,7 @@
 //!
 //! Like toasts, a jump list is keyed to the app's taskbar identity. An uninstalled dev build has
 //! no registered AUMID, so `CommitList` may succeed and the menu still show nothing. That is the
-//! same Phase 12 dependency `toast.rs` documents, and it is not a failure worth surfacing.
+//! same Phase 11 dependency `toast.rs` documents, and it is not a failure worth surfacing.
 
 use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
