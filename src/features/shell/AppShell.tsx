@@ -23,7 +23,7 @@ import { ShortcutSheet } from '@/features/help/ShortcutSheet'
 import { ScopeBar, useSearch } from '@/features/search'
 import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
 import { junkMark, rulesRun } from '@/lib/organise'
-import { composeBlank, composeOpen, syncAll } from '@/lib/ipc'
+import { composeBlank, composeOpen, onJumpListTask, syncAll } from '@/lib/ipc'
 
 import { PaneDivider } from './PaneDivider'
 import { useBreakpoint } from './useBreakpoint'
@@ -102,6 +102,43 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
     [toast],
   )
 
+  // Shared by Ctrl+F and the taskbar's Search task, which have to do the same thing — two
+  // implementations would be two answers to "what does Search mean".
+  const focusSearch = useCallback(() => {
+    // Focus rather than a mode: the field is always there, and Ctrl+F should put the caret
+    // in it exactly as it would in any other application.
+    document.querySelector<HTMLInputElement>('input[type="text"][placeholder="Search"]')?.focus()
+  }, [])
+
+  // The taskbar Jump List. New Message is handled in Rust — it opens a real window — so only
+  // the two that are places in this UI arrive here.
+  useEffect(() => {
+    let cancelled = false
+    let off: (() => void) | undefined
+
+    void onJumpListTask((task) => {
+      if (task === '--inbox') {
+        // The unified row, matching what the sidebar builds. Selecting one account's inbox
+        // would be a guess about which account the user meant.
+        selectMailbox({
+          nodeId: 'all-inboxes',
+          label: 'All Inboxes',
+          mailboxIds: mailboxes
+            .filter((mailbox) => mailbox.role === 'inbox')
+            .map((mailbox) => mailbox.id),
+        })
+      } else if (task === '--search') focusSearch()
+    }).then((unlisten) => {
+      if (cancelled) unlisten()
+      else off = unlisten
+    })
+
+    return () => {
+      cancelled = true
+      off?.()
+    }
+  }, [focusSearch, selectMailbox, mailboxes])
+
   // One dispatcher for the whole application. See `app/shortcuts.ts` for why they are not
   // registered where they are used.
   useShortcuts(
@@ -175,13 +212,7 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
       undo,
       redo,
 
-      search: useCallback(() => {
-        // Focus rather than a mode: the field is always there, and Ctrl+F should put the caret
-        // in it exactly as it would in any other application.
-        document
-          .querySelector<HTMLInputElement>('input[type="text"][placeholder="Search"]')
-          ?.focus()
-      }, []),
+      search: focusSearch,
 
       getMail: useCallback(() => {
         void syncAll().catch(failed('Could not check for new mail'))

@@ -136,6 +136,36 @@ pub fn is_eml(argument: &str) -> bool {
 /// above would get lost.
 pub fn handle_arguments(app: &AppHandle, argv: &[String]) {
     for argument in argv.iter().skip(1) {
+        // A jump list task. The shell launches a second process with the argument, the
+        // single-instance plugin hands it here, and the running window acts on it.
+        if let Some(task) = super::jumplist::task_for(argument) {
+            super::tray::show(app);
+
+            match task {
+                // New Message is done in Rust because the compose window is a real OS window
+                // that Rust creates; the other two are places in the UI, so the UI moves.
+                "--new-message" => {
+                    let handle = app.clone();
+
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) =
+                            crate::ipc::compose::compose_open(handle, None, None, None).await
+                        {
+                            tracing::warn!(
+                                ?error,
+                                "could not open a compose window from the jump list"
+                            );
+                        }
+                    });
+                }
+                other => {
+                    let _ = app.emit("jumplist:task", other.to_string());
+                }
+            }
+
+            continue;
+        }
+
         if let Some(request) = parse_mailto(argument) {
             let handle = app.clone();
 

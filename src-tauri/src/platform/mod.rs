@@ -36,8 +36,10 @@ pub mod appearance;
 pub mod backdrop;
 pub mod badge;
 pub mod files;
+pub mod jumplist;
 pub mod links;
 pub mod notify;
+pub mod sound;
 pub mod toast;
 pub mod tray;
 

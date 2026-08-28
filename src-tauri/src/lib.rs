@@ -54,6 +54,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
+            platform::sound::sound_sent,
             ipc::mail::accounts_list,
             ipc::mail::mailboxes_tree,
             ipc::mail::messages_page,
@@ -193,6 +194,10 @@ pub fn run() {
             }
 
             platform::install(app.handle(), &main)?;
+
+            // The taskbar right-click menu. Installed once; the shell remembers it until the
+            // next CommitList, so there is nothing to refresh and nothing to tear down.
+            platform::jumplist::install();
 
             // The tray and the taskbar badge. Both driven by one unread count, so they cannot
             // show the user two different answers on the same screen.

@@ -5,6 +5,7 @@ import type { OutboxRow } from '@/lib/generated/OutboxRow'
 import {
   composeUndo,
   onOutboxProgress,
+  soundSent,
   outboxList,
   outboxRetry,
   outboxSchedule,
@@ -79,10 +80,15 @@ export function OutboxBanner() {
     let cancelled = false
     let off: (() => void) | undefined
 
-    void onOutboxProgress(() => {
+    void onOutboxProgress((progress) => {
       // The event says *something* changed; the list says what. Re-reading is one query and
       // keeps this component from having to model the state machine a second time.
       refresh()
+
+      // Except for the sound, which is about the transition rather than the state. Re-reading
+      // the list would say a message is sent for as long as it sits there, and playing on that
+      // would make a noise on every unrelated outbox change.
+      if (progress.state === 'sent') void soundSent(progress.accountId)
     }).then((unlisten) => {
       if (cancelled) unlisten()
       else off = unlisten

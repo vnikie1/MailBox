@@ -188,10 +188,19 @@ pub async fn announce(app: &AppHandle, db: &Db, account_id: i64, ids: Vec<i64>) 
         return;
     }
 
+    // Read separately from `worth_showing`, which decides *whether* to notify. The sound is a
+    // property of the notification rather than of the decision, and folding it into the gate
+    // would mean a silent preference could stop a toast appearing at all.
+    let sound = db
+        .read(move |conn| prefs_for(conn, account_id))
+        .await
+        .map(|prefs| prefs.sound)
+        .unwrap_or(false);
+
     let shown = if arrivals.len() > SUMMARISE_ABOVE {
         // One summary. Forty toasts is not information; it is a denial of service against the
         // user's own desktop.
-        super::toast::show_summary(app, arrivals.len())
+        super::toast::show_summary(app, arrivals.len(), sound)
     } else {
         let mut last = Ok(());
 
@@ -205,6 +214,7 @@ pub async fn announce(app: &AppHandle, db: &Db, account_id: i64, ids: Vec<i64>) 
                 } else {
                     &arrival.subject
                 },
+                sound,
             );
         }
 

@@ -90,13 +90,23 @@ export function NotificationSettings() {
                 type="checkbox"
                 className={styles.checkbox}
                 checked={value?.sound === true}
-                disabled={!value?.enabled}
+                // Not tied to the toggle above, unlike VIP-only. This covers sending as well as
+                // receiving, and a send sound has nothing to do with whether new mail is
+                // announced — disabling it here would make a setting that Rust still honours,
+                // which is the kind of disagreement nobody finds until it is confusing.
+                disabled={value === undefined}
                 onChange={(event) => {
                   update(account.id, { sound: event.target.checked })
                 }}
               />
-              Play a sound
+              Play sounds when mail is sent and received
             </label>
+
+            <p className={styles.hint}>
+              Windows&rsquo; own sounds, so they follow whatever you have chosen under Sound
+              settings. The new-mail sound comes with the notification, so it needs the first option
+              above.
+            </p>
           </div>
         )
       })}

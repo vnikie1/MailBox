@@ -35,7 +35,7 @@
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tauri_winrt_notification::Toast;
+use tauri_winrt_notification::{Sound, Toast};
 
 /// The AUMID an installed Halcyon is registered under.
 ///
@@ -78,12 +78,17 @@ pub fn show_message(
     message_id: i64,
     from: &str,
     subject: &str,
+    sound: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.clone();
 
     Toast::new(APP_ID)
         .title(from)
         .text1(subject)
+        // The system's own mail sound rather than one shipped with the app, so it matches
+        // whatever the user has chosen in Windows' sound settings — including silence, and
+        // including a custom one. `None` is a silent toast, not the default sound.
+        .sound(if sound { Some(Sound::Mail) } else { None })
         // Order matters: the leftmost is the one people press without reading, and between the
         // three, Reply is the only one that is not silently destructive to do by accident.
         .add_button("Reply", &format!("reply:{message_id}"))
@@ -118,12 +123,17 @@ pub fn show_message(
 }
 
 /// One toast for a batch. No buttons: there is no single message for them to act on.
-pub fn show_summary(app: &AppHandle, count: usize) -> Result<(), Box<dyn std::error::Error>> {
+pub fn show_summary(
+    app: &AppHandle,
+    count: usize,
+    sound: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.clone();
 
     Toast::new(APP_ID)
         .title(&format!("{count} new messages"))
         .text1("Halcyon")
+        .sound(if sound { Some(Sound::Mail) } else { None })
         .on_activated(move |_| {
             // No message to open, so this brings the app forward and lets the user look.
             super::tray::show(&handle);

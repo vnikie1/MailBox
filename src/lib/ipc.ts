@@ -881,3 +881,22 @@ export async function onMailto(handler: (request: MailtoRequest) => void): Promi
     handler(event.payload)
   })
 }
+
+/** A taskbar Jump List task was picked. See platform/jumplist.rs. */
+export async function onJumpListTask(handler: (task: string) => void): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<string>('jumplist:task', (event) => {
+    handler(event.payload)
+  })
+}
+
+/**
+ * Plays the sent sound, if this account has sounds turned on.
+ *
+ * The preference is checked in Rust rather than here, so both sounds — this one and the toast's
+ * — answer "should this make a noise" in the same place. docs/06 Phase 10.
+ */
+export async function soundSent(accountId: number): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('sound_sent', { accountId })
+}
