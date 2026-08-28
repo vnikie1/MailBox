@@ -25,7 +25,7 @@ import { composeOpen, storeNow } from '@/lib/ipc'
 
 import { RedirectSheet } from './RedirectSheet'
 import { useMailStore } from '@/store/mail'
-import { Avatar, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
+import { Avatar, EmptyState, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
 import { Toolbar, type ToolbarProps } from '@/features/toolbar/Toolbar'
 
 import styles from './Reader.module.css'
@@ -368,14 +368,20 @@ export function Reader({ toolbar }: ReaderProps) {
         </>
       ) : (
         // docs/02 §6.10 — centred glyph plus title, both tertiary. Never a spinner.
-        <div className={styles.empty}>
-          <Mail className={styles.emptyGlyph} aria-hidden="true" strokeWidth={1.25} />
-          <p className={styles.emptyTitle}>
-            {selectedMessageIds.length > 1
+        //
+        // Through EmptyState rather than hand-rolled, so this pane announces itself to a screen
+        // reader like every other one. Selecting a message and then deselecting it is otherwise
+        // completely silent: the pane empties and nothing says so.
+        <EmptyState
+          className={styles.empty}
+          variant="hero"
+          icon={Mail}
+          title={
+            selectedMessageIds.length > 1
               ? `${String(selectedMessageIds.length)} Messages Selected`
-              : 'No Message Selected'}
-          </p>
-        </div>
+              : 'No Message Selected'
+          }
+        />
       )}
     </div>
   )

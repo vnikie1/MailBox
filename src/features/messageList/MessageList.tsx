@@ -8,7 +8,15 @@ import {
   type ReactNode,
 } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { ArrowDownUp, ListFilter, MoreHorizontal, PanelLeft } from 'lucide-react'
+import {
+  ArrowDownUp,
+  Inbox,
+  ListFilter,
+  MailCheck,
+  MoreHorizontal,
+  PanelLeft,
+  SearchX,
+} from 'lucide-react'
 
 import { useMailboxes, useMessages, useSmartMessages } from '@/app/queries'
 import { useBodyPrefetch } from '@/features/reader/useBodyPrefetch'
@@ -19,7 +27,16 @@ import { lengthToken } from '@/lib/tokens'
 import { useLayoutStore } from '@/store/layout'
 import { useMailStore } from '@/store/mail'
 import { useSettingsStore } from '@/store/settings'
-import { IconButton, Menu, MenuItem, MenuSection, MenuSeparator, Tooltip } from '@/ui'
+import {
+  Button,
+  EmptyState,
+  IconButton,
+  Menu,
+  MenuItem,
+  MenuSection,
+  MenuSeparator,
+  Tooltip,
+} from '@/ui'
 
 // Aliased: `MessageRow` in this file is the row *component*, and the generated type of the
 // same name would shadow it.
@@ -110,11 +127,16 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
   // Two queries, one of which is always disabled. A saved search and a folder ask the core
   // different questions — one carries a predicate, the other a mailbox list — and hooks cannot
   // be called conditionally, so the row is chosen after both have run rather than before.
+  //
+  // Both are disabled while a search is running: the rows come from the search instead, and
+  // leaving them enabled keeps a mailbox query in flight behind results nobody is looking at.
+  const searching = searchRows !== undefined
+
   const folders = useMessages(
-    selection.predicate === undefined ? selection.mailboxIds : [],
+    searching || selection.predicate !== undefined ? [] : selection.mailboxIds,
     unreadOnly,
   )
-  const saved = useSmartMessages(selection.predicate)
+  const saved = useSmartMessages(searching ? undefined : selection.predicate)
 
   const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isPending } =
     selection.predicate === undefined ? folders : saved
@@ -363,6 +385,40 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
           <div className={styles.sticky} aria-hidden="true">
             {stickyLabel}
           </div>
+        )}
+
+        {/* Every reason the list can be empty, each saying which one it is. A blank pane is
+            indistinguishable from a broken one, and the user's next move is to reload. */}
+        {rows.length === 0 && !isPending && (
+          <EmptyState
+            {...(searching
+              ? {
+                  icon: SearchX,
+                  title: 'No messages match that search',
+                  description: 'Try fewer words, or search All Mailboxes instead of just this one.',
+                }
+              : unreadOnly
+                ? {
+                    icon: MailCheck,
+                    title: 'Nothing unread here',
+                    description: 'Everything in this mailbox has been read.',
+                    action: (
+                      <Button
+                        variant="bordered"
+                        onClick={() => {
+                          toggleUnreadOnly()
+                        }}
+                      >
+                        Show all messages
+                      </Button>
+                    ),
+                  }
+                : {
+                    icon: Inbox,
+                    title: 'This mailbox is empty',
+                    description: 'New mail will appear here as it arrives.',
+                  })}
+          />
         )}
 
         <div

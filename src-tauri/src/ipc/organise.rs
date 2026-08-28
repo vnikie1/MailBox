@@ -593,6 +593,57 @@ pub async fn follow_ups_detect(app: AppHandle, db: State<'_, Db>) -> Response<us
     Ok(marked)
 }
 
+/* ------------------------------------------------------------------- notifications */
+
+#[tauri::command]
+pub async fn notify_prefs(
+    db: State<'_, Db>,
+    account_id: i64,
+) -> Response<crate::platform::notify::NotifyPrefs> {
+    Ok(db
+        .read(move |conn| crate::platform::notify::prefs_for(conn, account_id))
+        .await?)
+}
+
+#[tauri::command]
+pub async fn notify_set_prefs(
+    db: State<'_, Db>,
+    account_id: i64,
+    prefs: crate::platform::notify::NotifyPrefs,
+) -> Response<()> {
+    db.write(move |tx| crate::platform::notify::set_prefs(tx, account_id, prefs))
+        .await?;
+    Ok(())
+}
+
+/// Whether Halcyon starts with Windows.
+///
+/// Read from the OS rather than from a setting of our own, so the answer stays right when the
+/// user removes it from Startup themselves — which they can, and a stored flag would then be a
+/// lie the settings panel repeats back at them.
+#[tauri::command]
+pub async fn run_at_login(app: tauri::AppHandle) -> Response<bool> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    Ok(app.autolaunch().is_enabled().unwrap_or(false))
+}
+
+#[tauri::command]
+pub async fn set_run_at_login(app: tauri::AppHandle, enabled: bool) -> Response<()> {
+    use tauri_plugin_autostart::ManagerExt;
+
+    let result = if enabled {
+        app.autolaunch().enable()
+    } else {
+        app.autolaunch().disable()
+    };
+
+    result.map_err(|error| AppError {
+        code: "autostart".into(),
+        message: format!("Windows would not change the startup setting: {error}"),
+    })
+}
+
 /* --------------------------------------------------------------------------------- undo */
 
 #[tauri::command]

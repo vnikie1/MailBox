@@ -487,6 +487,26 @@ pub struct OutboxRow {
 
 /// Opens a compose window. docs/01 §6 — *a separate floating window, not a pane.*
 ///
+/// Percent-encodes a value for the compose window's query string.
+///
+/// Hand-rolled rather than pulled from a crate because the set that has to be escaped here is
+/// small and fixed, and because getting it wrong is loud: an unescaped `&` in a subject would
+/// silently truncate it and turn the rest into a parameter of its own.
+fn encode_param(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+
+    out
+}
+
 /// A real OS window rather than a modal inside the main one, because that is what the design
 /// calls for and because it is what people actually do with mail: start a reply, go and look
 /// something up in another message, come back. A modal makes that impossible, and a pane makes
@@ -500,6 +520,7 @@ pub async fn compose_open(
     app: tauri::AppHandle,
     message_id: Option<i64>,
     kind: Option<String>,
+    mailto: Option<crate::platform::links::MailtoRequest>,
 ) -> Result<String, AppError> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
@@ -517,6 +538,25 @@ pub async fn compose_open(
     }
     if let Some(kind) = kind.as_deref() {
         url.push_str(&format!("&kind={kind}"));
+    }
+
+    // A `mailto:` arrives as already-sanitised fields, not as the original URL. Handing the raw
+    // link to the window would mean parsing it a second time in TypeScript, and the second
+    // parser is the one that forgets to drop Bcc — see links.rs. These are the four fields that
+    // survived that filter and nothing else can be expressed here.
+    if let Some(request) = mailto {
+        for address in &request.to {
+            url.push_str(&format!("&to={}", encode_param(address)));
+        }
+        for address in &request.cc {
+            url.push_str(&format!("&cc={}", encode_param(address)));
+        }
+        if !request.subject.is_empty() {
+            url.push_str(&format!("&subject={}", encode_param(&request.subject)));
+        }
+        if !request.body.is_empty() {
+            url.push_str(&format!("&body={}", encode_param(&request.body)));
+        }
     }
 
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))

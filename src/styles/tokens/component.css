@@ -259,7 +259,19 @@
   --skeleton-width-2: 85%;
   --skeleton-width-3: 95%;
   --empty-glyph: 22px;
+
+  /* The measure an explanation is read at. Wider and the eye loses the line; this is one
+   * short sentence, centred, and it should not become a paragraph. */
+  --empty-measure: 34ch;
   --empty-gap: var(--sp-5);
+
+  /* ---------- sync status strip — docs/06 Phase 10 ----------
+   * Sits under the mailbox tree and is absent when nothing is wrong. Sized to two short lines
+   * so it never pushes the tree far enough to move a row somebody was about to click. */
+  --sync-strip-pad: var(--sp-3);
+  --sync-strip-gap: var(--sp-2);
+  --sync-glyph: 15px;
+  --sync-spin-duration: 1200ms;
 
   /* ---------- account assistant — docs/04 Phase 4 ----------
    * Modelled on Mail's account assistant: a wide sheet, because a diagnostic report and a

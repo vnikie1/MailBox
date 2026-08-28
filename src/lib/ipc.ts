@@ -93,6 +93,8 @@ import type { ComposeAddress } from './generated/ComposeAddress'
 import type { FlagPatch } from './generated/FlagPatch'
 import type { ListQuery } from './generated/ListQuery'
 import type { MailboxRow } from './generated/MailboxRow'
+export type { MailtoRequest } from './generated/MailtoRequest'
+import type { MailtoRequest } from './generated/MailtoRequest'
 import type { MessageFull } from './generated/MessageFull'
 import type { MessageRow } from './generated/MessageRow'
 import type { Page } from './generated/Page'
@@ -846,5 +848,36 @@ export async function onCloseRequested(handler: () => boolean): Promise<Unlisten
     // The handler returns true when the window may go. Anything else holds it open while a
     // question is put to the user.
     if (!handler()) event.preventDefault()
+  })
+}
+
+/** A button pressed on a new-mail toast, or the toast body itself. See platform/toast.rs. */
+export interface ToastAction {
+  action: 'reply' | 'archive' | 'read' | 'open'
+  messageId: number
+}
+
+export async function onNotificationAction(
+  handler: (action: ToastAction) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<ToastAction>('notification:action', (event) => {
+    handler(event.payload)
+  })
+}
+
+/** The summary toast was clicked. There is no message to open — just come to the front. */
+export async function onNotificationShow(handler: () => void): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen('notification:show', () => {
+    handler()
+  })
+}
+
+/** A `mailto:` link was opened, here or in another app. See platform/links.rs. */
+export async function onMailto(handler: (request: MailtoRequest) => void): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<MailtoRequest>('mailto:open', (event) => {
+    handler(event.payload)
   })
 }

@@ -21,6 +21,13 @@
   font-size: var(--t-body-size);
   line-height: var(--t-body-leading);
   letter-spacing: var(--t-body-tracking);
+
+  /* focus-ring-exempt: the caret is the indicator.
+   *
+   * A text-editing surface shows focus by blinking a caret in it, and that is a better
+   * indicator than a ring because it says *where* in the text you are, not merely that you are
+   * somewhere in it. A ring around the whole body would also draw the box this component
+   * exists to avoid — see the note above. */
   outline: none;
 }
 

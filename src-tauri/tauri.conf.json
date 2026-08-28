@@ -72,6 +72,21 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["eml"],
+        "name": "Email Message",
+        "description": "An email message",
+        "role": "Viewer"
+      }
+    ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["mailto"]
+      }
     }
   }
 }

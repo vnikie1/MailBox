@@ -1,0 +1,89 @@
+/* The sync status strip. docs/06 Phase 10. See SyncStatus.tsx for why it is usually absent. */
+
+.strip {
+  display: flex;
+  gap: var(--sync-strip-gap);
+  align-items: flex-start;
+  padding: var(--sync-strip-pad);
+
+  /* Divided from the tree above rather than tinted. A coloured panel at the foot of the
+   * sidebar competes with the mail; a hairline says "different thing" for far less. */
+  border-top: var(--hairline) solid var(--separator);
+}
+
+.glyph {
+  flex: 0 0 auto;
+  width: var(--sync-glyph);
+  height: var(--sync-glyph);
+
+  /* Nudged to sit on the title's baseline rather than the top of its line box. */
+  margin-top: var(--sp-1);
+  color: var(--label-2);
+}
+
+.strip[data-tone='warn'] .glyph {
+  color: var(--flag-orange);
+}
+
+.strip[data-tone='error'] .glyph {
+  color: var(--flag-red);
+}
+
+.text {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail {
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+
+  /* Wraps rather than truncates: a server's error text is the only clue to what went wrong,
+   * and an ellipsis in the middle of it helps nobody. Two lines is the practical ceiling. */
+  overflow-wrap: anywhere;
+}
+
+.retry {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--accent);
+  font-size: var(--t-caption-size);
+  background: none;
+  border: 0;
+  border-radius: var(--r-sm);
+}
+
+.retry:hover {
+  background: var(--fill-hover);
+}
+
+.retry:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The one indeterminate spinner in the app, and it turns linearly on purpose — eased, the
+ * rotation visibly hitches once per revolution. tests/unit/motion.test.ts exempts `infinite`
+ * animations for exactly this. */
+.spin {
+  animation: sync-spin var(--sync-spin-duration) var(--ease-linear) infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

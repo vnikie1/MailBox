@@ -308,30 +308,11 @@
 }
 
 /* docs/02 §6.10 — centred glyph plus a title1, both tertiary. Never a spinner. */
+
+/* Only what the pane owns. Layout and type come from EmptyState's hero variant. */
 .empty {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--empty-gap);
-  align-items: center;
-  justify-content: center;
   height: 100%;
   background: var(--bg-content);
-}
-
-.emptyGlyph {
-  width: var(--sp-10);
-  height: var(--sp-10);
-  color: var(--label-3);
-}
-
-.emptyTitle {
-  margin: 0;
-  color: var(--label-3);
-  font-size: var(--t-title1-size);
-  font-weight: var(--t-title1-weight);
-  line-height: var(--t-title1-leading);
-  letter-spacing: var(--t-title1-tracking);
 }
 
 .collapsed .messageHeader {

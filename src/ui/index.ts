@@ -12,6 +12,7 @@ export { Button, type ButtonProps } from './Button'
 export { Chip, type ChipProps } from './Chip'
 export { ContextMenu, type ContextMenuProps } from './ContextMenu'
 export { Divider, type DividerProps } from './Divider'
+export { EmptyState, type EmptyStateProps } from './EmptyState'
 export { IconButton, type IconButtonProps } from './IconButton'
 export {
   Menu,

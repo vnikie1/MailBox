@@ -15,6 +15,12 @@
   padding: var(--menu-pad);
   overflow-y: auto;
   border-radius: var(--menu-radius);
+
+  /* focus-ring-exempt: the highlighted item is the indicator.
+   *
+   * Floating UI moves DOM focus to the menu itself before it reaches a row. A ring around the
+   * panel would outline the popover; the accent bar on the active item says which row Enter
+   * will choose. */
   outline: none;
   opacity: 0;
   transition: opacity var(--dur-micro) var(--ease-out);
@@ -122,6 +128,9 @@
 .item:hover:not(:disabled),
 .item:focus:not(:disabled) {
   color: var(--accent-fg);
+
+  /* focus-ring-exempt: this block *is* the focus appearance — the accent fill below replaces
+   * the ring, and drawing both would double it. */
   background: var(--accent);
   outline: none;
 }

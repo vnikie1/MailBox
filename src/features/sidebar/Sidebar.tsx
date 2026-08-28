@@ -14,6 +14,9 @@ import {
 import { useMailStore } from '@/store/mail'
 import { Badge, IconButton, ScrollArea, Tooltip } from '@/ui'
 
+import { useSyncState } from '@/app/useSync'
+
+import { SyncStatus } from './SyncStatus'
 import { buildSidebar, visibleRows, type SidebarNode } from './model'
 
 import styles from './Sidebar.module.css'
@@ -162,6 +165,12 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
 
+  const sync = useSyncState()
+  const accountNames = useMemo(
+    () => new Map(accounts.map((account) => [account.id, account.displayName])),
+    [accounts],
+  )
+
   const { data: smart = [] } = useSmartMailboxes()
   const { data: flagNames = [] } = useFlagNames()
   const { data: vips = [] } = useVips()
@@ -239,6 +248,15 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           ))}
         </div>
       </ScrollArea>
+
+      {/* Outside the ScrollArea on purpose: a problem that scrolls out of sight is one the
+          user stops seeing, and this is the one part of the sidebar that has to stay put. */}
+      <SyncStatus
+        errors={sync.errors}
+        busy={sync.busy}
+        online={sync.online}
+        accountNames={accountNames}
+      />
     </div>
   )
 }

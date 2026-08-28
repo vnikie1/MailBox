@@ -100,6 +100,13 @@
   padding: 0 var(--list-row-inset);
   overflow-x: hidden;
   overflow-y: auto;
+
+  /* focus-ring-exempt: the selected row is the indicator.
+   *
+   * The scroll box is what takes focus, but a ring around the whole list would say only that
+   * focus is somewhere in a thousand rows. Instead .messageListFocused turns the selected row
+   * from grey to the accent — see MessageRow.module.css — which says which row will move when
+   * you press an arrow. That is the thing a keyboard user needs to know. */
   outline: none;
   overscroll-behavior: contain;
 }

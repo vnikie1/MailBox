@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
 import {
@@ -31,12 +31,57 @@ export interface SyncState {
   errors: Map<number, SyncAccountError>
   /** True while any account is mid-sync. */
   busy: boolean
+  /**
+   * False when the machine has no network at all.
+   *
+   * Worth separating from a per-account error because the cause and the remedy are different:
+   * one account failing to authenticate is that account's problem, but a closed laptop lid is
+   * every account's, and showing four identical failures for it would be noise. It is also the
+   * one failure where the honest thing to say is "your mail is still here, it just is not
+   * current" rather than anything that sounds like the app broke.
+   */
+  online: boolean
 }
 
 export function useSync(): SyncState {
   const client = useQueryClient()
   const [errors, setErrors] = useState<Map<number, SyncAccountError>>(new Map())
   const [busy, setBusy] = useState(false)
+
+  // navigator.onLine is a weak signal — it means "there is a network interface", not "the mail
+  // server is reachable", so a captive portal still reports true. It is kept anyway because the
+  // case it *does* catch is the common one (no wifi, lid closed, flight mode) and it catches it
+  // instantly, where waiting for an IMAP timeout takes half a minute. A server that is
+  // unreachable for any subtler reason still arrives as a per-account error.
+  const [online, setOnline] = useState(() =>
+    typeof navigator === 'undefined' ? true : navigator.onLine,
+  )
+
+  useEffect(() => {
+    const goOnline = () => {
+      setOnline(true)
+
+      // Coming back is the one moment a sync is obviously wanted and cannot be prompted by the
+      // server: IDLE connections died with the network, so nothing is going to tell us what
+      // arrived while we were away unless we ask.
+      if (runningInTauri) {
+        void syncAll()
+        void syncWatch()
+      }
+    }
+
+    const goOffline = () => {
+      setOnline(false)
+    }
+
+    window.addEventListener('online', goOnline)
+    window.addEventListener('offline', goOffline)
+
+    return () => {
+      window.removeEventListener('online', goOnline)
+      window.removeEventListener('offline', goOffline)
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -117,5 +162,24 @@ export function useSync(): SyncState {
     }
   }, [client])
 
-  return { errors, busy }
+  return useMemo(() => ({ errors, busy, online }), [errors, busy, online])
+}
+
+/**
+ * The sync state, for anything that needs to report on it.
+ *
+ * A context rather than props because the one consumer — the strip at the foot of the sidebar
+ * — sits three levels below the hook, and threading four fields through Shell and AppShell
+ * would make both of them carry state they have no use for. The default is the healthy case,
+ * so a component rendered outside the provider (the gallery does this) shows nothing rather
+ * than claiming the app is offline.
+ */
+export const SyncContext = createContext<SyncState>({
+  errors: new Map(),
+  busy: false,
+  online: true,
+})
+
+export function useSyncState(): SyncState {
+  return useContext(SyncContext)
 }

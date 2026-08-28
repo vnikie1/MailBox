@@ -1,0 +1,70 @@
+/* Notifications and startup. docs/06 Phase 10. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.heading {
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-headline-size);
+  line-height: var(--t-headline-leading);
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.legend {
+  padding: 0;
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+}
+
+.choice {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  color: var(--label-1);
+}
+
+.checkbox {
+  accent-color: var(--accent);
+}
+
+.hint {
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  line-height: var(--t-footnote-leading);
+}
+
+/* A row of buttons that open their own sheets. */
+.row {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+}
+
+/* One block per account, indented so the per-account choices read as belonging to the address
+ * above them rather than as a flat list of nine checkboxes. */
+.account {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-left: var(--sp-4);
+  border-left: var(--hairline) solid var(--separator);
+}
+
+.name {
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+}

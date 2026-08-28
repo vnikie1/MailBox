@@ -59,6 +59,22 @@ function toAddress(token: Token): ComposeAddress {
   return { name: null, email: token.value.trim() }
 }
 
+/**
+ * Text from a `mailto:` body, as HTML.
+ *
+ * The body of a mailto is plain text by definition, and it comes from whatever page the user
+ * clicked. Inserting it into the editor unescaped would let any link put markup — a script tag,
+ * a tracking image, an anchor pointing somewhere else — into a message the user is about to
+ * send under their own name.
+ */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
 function toToken(address: ComposeAddress): Token {
   return {
     id: `${address.email}-${Math.random().toString(36).slice(2)}`,
@@ -160,9 +176,39 @@ export function ComposeWindow() {
 
       setAccountId(first)
 
-      // A new message still gets the signature, which is the only thing in it.
+      // A new message still gets the signature, which is usually the only thing in it.
       const blank = await composeBlank(first)
-      if (alive.current) setQuoted(bodyWithSignature(blank))
+      if (!alive.current) return
+
+      // A mailto link. These four are already sanitised — links.rs dropped Bcc and every other
+      // header a web page could have asked for, and compose_open percent-encoded what survived.
+      // Nothing is re-filtered here, deliberately: a second filter on this side would look like
+      // the boundary and is not one.
+      //
+      // Read here rather than in the component body so the effect's dependency list can name
+      // `parameters` — which never changes, because it is this window's own URL — instead of
+      // four derived values that would have to be suppressed.
+      const mailtoTo = parameters.getAll('to')
+      const mailtoCc = parameters.getAll('cc')
+      const mailtoSubject = parameters.get('subject')
+      const mailtoBody = parameters.get('body')
+
+      if (mailtoTo.length > 0) setTo(mailtoTo.map((email) => toToken({ name: null, email })))
+      if (mailtoCc.length > 0) {
+        setCc(mailtoCc.map((email) => toToken({ name: null, email })))
+        setShowCopies(true)
+      }
+      if (mailtoSubject !== null) setSubject(mailtoSubject)
+
+      // The body arrives as plain text — that is all a mailto can carry — so it goes in above
+      // the signature as text, not as markup. Treating it as HTML would let a link supply
+      // markup into the editor, which is the one thing this whole path exists to prevent.
+      const withSignature = bodyWithSignature(blank)
+      setQuoted(
+        mailtoBody === null || mailtoBody === ''
+          ? withSignature
+          : `<p>${escapeHtml(mailtoBody)}</p>${withSignature}`,
+      )
     }
 
     load().catch((cause: unknown) => {
@@ -172,7 +218,7 @@ export function ComposeWindow() {
     return () => {
       alive.current = false
     }
-  }, [replyTo, replyKind])
+  }, [replyTo, replyKind, parameters])
 
   /** The message as it stands. Used by both autosave and Send, so they cannot drift. */
   const buildMessage = useCallback((): OutgoingMessage | null => {

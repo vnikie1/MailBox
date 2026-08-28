@@ -30,6 +30,28 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_deep_link::init())
+        // Off unless the user asks. An app that added itself to startup without being told is
+        // one people uninstall.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        // A second launch — from a mailto: link, or the Start menu — hands its arguments to the
+        // running instance and exits. Without this, opening a mailto: link would start a whole
+        // second copy of the app against the same database.
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            use tauri::Manager;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+
+            platform::links::handle_arguments(app, &argv);
+        }))
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
             ipc::mail::accounts_list,
@@ -103,6 +125,10 @@ pub fn run() {
             ipc::organise::unsnooze,
             ipc::organise::mute_thread,
             ipc::organise::follow_ups_detect,
+            ipc::organise::notify_prefs,
+            ipc::organise::notify_set_prefs,
+            ipc::organise::run_at_login,
+            ipc::organise::set_run_at_login,
             ipc::organise::undo_available,
             ipc::organise::undo_perform,
             ipc::organise::redo_perform,
@@ -167,6 +193,62 @@ pub fn run() {
             }
 
             platform::install(app.handle(), &main)?;
+
+            // The tray and the taskbar badge. Both driven by one unread count, so they cannot
+            // show the user two different answers on the same screen.
+            match platform::tray::install(app.handle()) {
+                Ok(_) => {
+                    let handle = app.handle().clone();
+
+                    // Refreshed on the same event the list invalidates on. The count is cheap
+                    // and the update is skipped when the number has not moved, which matters:
+                    // a sync raises this event once per mailbox.
+                    tauri::Listener::listen(app.handle(), "mailbox:changed", move |_| {
+                        let handle = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            platform::tray::refresh(&handle).await;
+                        });
+                    });
+
+                    // Once at startup, or the badge stays blank until the first sync finishes —
+                    // which on a cold start is exactly when someone wants to know.
+                    let handle = app.handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        platform::tray::refresh(&handle).await;
+                    });
+
+                    // New mail. Raised by the sync *after* rules and the junk filter have run,
+                    // so nothing a rule filed away or the classifier caught raises a toast.
+                    let handle = app.handle().clone();
+                    tauri::Listener::listen(app.handle(), "mail:arrived", move |event| {
+                        #[derive(serde::Deserialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct Arrived {
+                            account_id: i64,
+                            message_ids: Vec<i64>,
+                        }
+
+                        let Ok(arrived) = serde_json::from_str::<Arrived>(event.payload()) else {
+                            return;
+                        };
+
+                        let handle = handle.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let db = tauri::Manager::state::<db::Db>(&handle);
+                            platform::notify::announce(
+                                &handle,
+                                db.inner(),
+                                arrived.account_id,
+                                arrived.message_ids,
+                            )
+                            .await;
+                        });
+                    });
+                }
+                // Logged, not fatal. A tray icon is a convenience, and a mail client that
+                // refused to start because the shell would not give it one would be absurd.
+                Err(error) => tracing::warn!(%error, "could not create the tray icon"),
+            }
 
             // The window is created hidden so the DWM backdrop and the theme attribute
             // are both in place before the first frame. Showing it here is what stops

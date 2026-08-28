@@ -55,7 +55,11 @@ body {
   overscroll-behavior: none;
 }
 
-/* No focus ring for pointer users, always one for keyboard users. */
+/* No focus ring for pointer users, always one for keyboard users.
+ *
+ * focus-ring-exempt: this is one half of a pair. :focus-visible immediately below puts the ring
+ * back for anyone arriving by keyboard, which is the whole point of the split — a mouse user
+ * clicking a button does not need to be told where they just clicked. */
 :focus {
   outline: none;
 }

@@ -911,6 +911,14 @@ async fn reconcile_expunged(
     Ok(removed)
 }
 
+/// What arrived, for whoever wants to tell the user about it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Arrived {
+    account_id: i64,
+    message_ids: Vec<i64>,
+}
+
 /// The CONDSTORE path: fetch what arrived, reconcile what changed, and nothing else.
 ///
 /// Split out rather than nested in `sync_mailbox` because the two paths share almost nothing:
@@ -1000,6 +1008,17 @@ async fn incremental(
                 Ok(_) => {}
                 Err(error) => tracing::warn!(%error, path, "junk scoring failed on arrival"),
             }
+
+            // After the rules and the filter, never before. A message a rule filed away or the
+            // classifier caught should not have raised a toast on its way past — and it would
+            // have, if this ran first.
+            app.emit(
+                "mail:arrived",
+                payload(&Arrived {
+                    account_id,
+                    message_ids: written.inserted_ids.clone(),
+                }),
+            );
         }
     }
 

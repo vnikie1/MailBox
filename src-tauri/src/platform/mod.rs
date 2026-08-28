@@ -34,7 +34,12 @@
 
 pub mod appearance;
 pub mod backdrop;
+pub mod badge;
 pub mod files;
+pub mod links;
+pub mod notify;
+pub mod toast;
+pub mod tray;
 
 use std::ffi::c_void;
 

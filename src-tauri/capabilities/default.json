@@ -1,18 +1,20 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the WebView is allowed to ask the core for. Windows owns the caption strip, so the main window needs no window-command permissions at all beyond dragging by the toolbar. Phase 7 adds the ability to open a compose window, granted narrowly: create, close, set title, and nothing else about a window. The list is deliberately granular rather than core:default - this app will hold someone's entire private correspondence, and this file is the place that stays honest about the surface the WebView can reach. The window pattern covers compose-N as well as main, because a compose window that could not close itself would be a window with no Send button that works.",
+  "description": "What the WebView is allowed to ask the core for. Windows owns the caption strip, so the main window needs no window-command permissions at all beyond dragging by the toolbar. Phase 7 adds the ability to open a compose window, granted narrowly: create, close, set title, and nothing else about a window. The list is deliberately granular rather than core:default - this app will hold someone's entire private correspondence, and this file is the place that stays honest about the surface the WebView can reach. Phase 10 adds notifications, deep links and autostart, each granted only what it needs: show a notification and ask whether we may, read and set the startup flag, and be told when a mailto: link arrives. The window pattern covers compose-N as well as main, because a compose window that could not close itself would be a window with no Send button that works.",
   "windows": ["main", "compose-*"],
   "permissions": [
     "core:event:default",
-
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
-
     "core:webview:allow-create-webview-window",
     "core:window:allow-close",
     "core:window:allow-set-title",
-
-    "window-state:default"
+    "window-state:default",
+    "notification:default",
+    "deep-link:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled"
   ]
 }

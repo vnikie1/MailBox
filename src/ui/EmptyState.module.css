@@ -1,0 +1,72 @@
+/* Every "there is nothing here". docs/06 Phase 10. */
+
+.wrap {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-8);
+  text-align: center;
+}
+
+.glyph {
+  width: var(--empty-glyph);
+  height: var(--empty-glyph);
+
+  /* The dimmest label, not the accent. An empty state is information, not an alarm, and a
+   * coloured glyph in the middle of a pane reads as something having gone wrong. */
+  color: var(--label-3);
+}
+
+.title {
+  max-width: var(--empty-measure);
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+}
+
+.description {
+  max-width: var(--empty-measure);
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  text-wrap: balance;
+}
+
+.action {
+  margin-top: var(--sp-2);
+}
+
+/* The one place an empty state takes a colour: something is actually wrong, and the glyph is
+ * the fastest way to say so before the sentence is read. */
+.wrap[data-tone='error'] .glyph {
+  color: var(--flag-orange);
+}
+
+/**
+ * The reader at rest. docs/02 §6.10.
+ *
+ * Larger, dimmer, and with more air than the default. The difference is deliberate: an empty
+ * mailbox is a fact that needs explaining, whereas "No Message Selected" is the app waiting,
+ * and treating the second like the first turns an idle pane into a problem report.
+ */
+.wrap[data-variant='hero'] {
+  gap: var(--empty-gap);
+}
+
+.wrap[data-variant='hero'] .glyph {
+  width: var(--sp-10);
+  height: var(--sp-10);
+}
+
+.wrap[data-variant='hero'] .title {
+  color: var(--label-3);
+  font-size: var(--t-title1-size);
+  font-weight: var(--t-title1-weight);
+  line-height: var(--t-title1-leading);
+  letter-spacing: var(--t-title1-tracking);
+}

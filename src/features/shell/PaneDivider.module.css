@@ -32,6 +32,11 @@
 }
 
 .divider:focus-visible {
+  /* focus-ring-exempt: the rule below lights up instead.
+   *
+   * The divider's hit area deliberately spills either side of the visible rule, so an outline
+   * would draw a box wider than anything the user can see. The rule itself takes the highlight
+   * in the very next block. */
   outline: none;
 }
 

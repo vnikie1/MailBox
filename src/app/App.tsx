@@ -8,7 +8,8 @@ import { ToastProvider } from '@/ui'
 
 import { useAppearanceSync } from './useAppearanceSync'
 import { useMailEvents } from './queries'
-import { useSync } from './useSync'
+import { SyncContext, useSync } from './useSync'
+import { useSystemEvents } from './useSystemEvents'
 
 /**
  * The application.
@@ -37,13 +38,16 @@ function createClient(): QueryClient {
 function Shell() {
   useAppearanceSync()
   useMailEvents()
-  useSync()
+  const sync = useSync()
+  useSystemEvents()
 
   const { firstRun, settingsOpen, openSettings, closeSettings } = useAccountsGate()
 
   return (
     <ToastProvider>
-      <AppShell onOpenSettings={openSettings} />
+      <SyncContext.Provider value={sync}>
+        <AppShell onOpenSettings={openSettings} />
+      </SyncContext.Provider>
 
       {/* Bottom-centre, floating over the panes. Undo Send only means anything while the
           message is still held, so the banner has to be visible from wherever the user is. */}
