@@ -206,3 +206,62 @@
 :global(.messageListFocused) .selected .count {
   background: color-mix(in srgb, var(--accent-fg) var(--tint-token), transparent);
 }
+
+/**
+ * Swipe. docs/06 Phase 10 — see useSwipe.ts for the gesture itself.
+ *
+ * Three layers: a clipping frame, the coloured fill, and the row sliding over it. The fill has
+ * to be a sibling rather than the frame's background, because its opacity animates with the
+ * gesture and a background on the frame would tint the row sliding above it too.
+ */
+.swipe {
+  position: relative;
+  width: 100%;
+  height: 100%;
+
+  /* The row is displaced past its own edges; without this it draws over its neighbours. */
+  overflow: hidden;
+  border-radius: var(--list-row-radius);
+}
+
+.behind {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--swipe-inset);
+  border-radius: var(--list-row-radius);
+}
+
+/* The icon sits on the side the row is uncovering, so it appears from under the moving edge
+ * rather than sliding in from the far side of a row nobody is looking at. */
+.behind[data-side='right'] {
+  justify-content: flex-start;
+  background: var(--swipe-archive);
+}
+
+.behind[data-side='left'] {
+  justify-content: flex-end;
+  background: var(--swipe-read);
+}
+
+.behindIcon {
+  width: var(--swipe-icon);
+  height: var(--swipe-icon);
+  color: var(--accent-fg);
+}
+
+.sliding {
+  position: relative;
+  width: 100%;
+  height: 100%;
+
+  /* Eased only on the way back. During the gesture the transform has to track the fingers
+   * exactly — a transition there would add lag to a direct-manipulation gesture, which reads as
+   * the app being slow rather than as smoothing. data-swiping is present only while moving. */
+  transition: transform var(--swipe-return) var(--ease-out);
+}
+
+.sliding[data-swiping] {
+  transition: none;
+}

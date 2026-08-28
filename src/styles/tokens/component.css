@@ -273,6 +273,16 @@
   --sync-glyph: 15px;
   --sync-spin-duration: 1200ms;
 
+  /* ---------- row swipe — docs/06 Phase 10 ----------
+   * The fill revealed behind a row as it slides. Colours are the flag palette rather than new
+   * ones: green already means "done with this" everywhere else in the app, and blue means
+   * "state changed" — reusing them costs nothing and teaches nothing new. */
+  --swipe-archive: var(--flag-green);
+  --swipe-read: var(--flag-blue);
+  --swipe-icon: 18px;
+  --swipe-inset: var(--sp-5);
+  --swipe-return: var(--dur-fast);
+
   /* ---------- account assistant — docs/04 Phase 4 ----------
    * Modelled on Mail's account assistant: a wide sheet, because a diagnostic report and a
    * pair of server forms do not fit the 420 a confirmation sheet uses, and the alternative

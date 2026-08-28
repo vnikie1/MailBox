@@ -18,7 +18,13 @@ import {
   SearchX,
 } from 'lucide-react'
 
-import { useMailboxes, useMessages, useSmartMessages } from '@/app/queries'
+import {
+  useArchiveMessages,
+  useMailboxes,
+  useMessages,
+  useSmartMessages,
+  useToggleRead,
+} from '@/app/queries'
 import { useBodyPrefetch } from '@/features/reader/useBodyPrefetch'
 import type { Density } from '@/lib/appearance'
 import { cx } from '@/lib/cx'
@@ -231,6 +237,27 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
       else selectMessage(id)
     },
     [extendSelection, toggleMessage, selectMessage, order],
+  )
+
+  const archive = useArchiveMessages()
+  const toggleRead = useToggleRead()
+
+  // Both act on the swiped row alone, never on the selection. A gesture aimed at one row that
+  // silently archived nine others because they happened to be selected is the kind of thing
+  // people stop trusting an app over — and unlike a keyboard shortcut, a swipe carries no
+  // suggestion that it applies to anything but the thing under the fingers.
+  const onSwipeArchive = useCallback(
+    (id: number) => {
+      archive.mutate([id])
+    },
+    [archive],
+  )
+
+  const onSwipeToggleRead = useCallback(
+    (id: number) => {
+      toggleRead.mutate([id])
+    },
+    [toggleRead],
   )
 
   const onDragStart = useCallback(
@@ -467,6 +494,8 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
                       showPhoto={showPhotos}
                       onSelect={onRowSelect}
                       onDragStart={onDragStart}
+                      onSwipeArchive={onSwipeArchive}
+                      onSwipeToggleRead={onSwipeToggleRead}
                     />
                   )}
                 </div>
