@@ -139,6 +139,10 @@ export function SearchField({ value, onChange, onCommit }: SearchFieldProps) {
         hideLabel
         variant="search"
         placeholder="Search"
+        // How Ctrl+F finds this field. A data attribute rather than the placeholder, which is
+        // display text: it changes with wording, it would change with translation, and the
+        // selector that used it matched nothing at all — see the note in AppShell.
+        data-shortcut="search"
         leadingIcon={Search}
         className={styles.field}
         value={value}

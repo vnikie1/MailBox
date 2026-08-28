@@ -107,7 +107,13 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
   const focusSearch = useCallback(() => {
     // Focus rather than a mode: the field is always there, and Ctrl+F should put the caret
     // in it exactly as it would in any other application.
-    document.querySelector<HTMLInputElement>('input[type="text"][placeholder="Search"]')?.focus()
+    //
+    // Selected by a data attribute the field sets for this purpose. The previous selector was
+    // `input[type="text"][placeholder="Search"]`, which matched nothing: TextField renders a
+    // bare <input> and nothing passes `type`, so the attribute is absent and an attribute
+    // selector does not see the reflected default. Ctrl+F had therefore never worked — the
+    // shortcut was registered, the handler ran, and it focused nothing. Found by pressing it.
+    document.querySelector<HTMLInputElement>('input[data-shortcut="search"]')?.focus()
   }, [])
 
   // The taskbar Jump List. New Message is handled in Rust — it opens a real window — so only
