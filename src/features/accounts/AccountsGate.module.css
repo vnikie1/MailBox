@@ -1,6 +1,0 @@
-/* The settings sheet is wider than a confirmation: it holds a table of accounts. */
-
-.settingsSheet {
-  width: var(--settings-width);
-  max-width: var(--settings-width);
-}

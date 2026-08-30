@@ -68,6 +68,18 @@ async function rootElement(): Promise<ReactNode> {
     return <EmlWindow />
   }
 
+  /**
+   * Settings, in its own window. Same reasoning as compose: a query parameter rather than a
+   * path, so neither the dev server nor the packaged app has to route anything.
+   *
+   * Imported dynamically because the mailbox never opens it — and it pulls in the Lexical
+   * editor for the signature pane, which is the largest chunk in the bundle.
+   */
+  if (new URLSearchParams(window.location.search).has('settings')) {
+    const { SettingsWindow } = await import('./features/settings')
+    return <SettingsWindow />
+  }
+
   return <App />
 }
 

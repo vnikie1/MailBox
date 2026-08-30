@@ -2577,3 +2577,120 @@ touching the mouse; Narrator walkthrough recorded; no unstyled or dead-end state
   walking every one.
 
 Phase 7's exit gate also remains open — it needs Outlook and Apple Mail accounts.
+
+---
+
+## 2026-08-30 — Phase 11: ship, part one
+
+Two chunks: the diagnostics built on the 29th and never written up (see Incidents), and the
+Settings window.
+
+### Added
+
+- **A log that survives.** Every log line went to stdout, and a release build has no console —
+  so in the hands of an actual user the whole log stream went nowhere, and the one moment
+  anybody wants a log is after something has gone wrong. Logging now goes to the terminal _and_
+  to a rotating file beside the database: 4MB a file, five kept.
+- **Crash reports.** A panic hook writes the message and a backtrace to
+  `%LOCALAPPDATA%\com.uniki.halcyon\diagnostics`, ten kept, newest first. It chains the previous
+  hook rather than replacing it, so a developer running from a terminal still sees the panic
+  printed.
+- **`crashgate`**, a binary that proves the hook fires under the release profile.
+  `[profile.release]` sets `panic = "abort"`, and the obvious reading of that — the process dies
+  with no chance for a hook — would make the whole of `diagnostics.rs` dead code in exactly the
+  build where it matters. The obvious reading is wrong, but _believing_ it is not knowing it, so
+  the gate asks the real question of the real profile: panic in a child, look for a file. It
+  writes one, 1850 bytes, and the child aborts with `0xC0000409`.
+- **The Settings window — seven panes**, in a window of its own, which is what docs/06 Phase 11
+  asks for and what Mail does. General, Accounts, Composing, Signatures, Rules, Privacy,
+  Advanced.
+- **Appearance controls that have never existed.** Theme, density and translucency have been in
+  the store since Phase 1, resolved against what Windows reports, applied before first paint,
+  driving three token remaps — with no control anywhere. The only way to change the message
+  list's density was to edit localStorage by hand. docs/02 §5 asks for a Reduce Transparency
+  escape hatch specifically for users whose GPU makes the Mica backdrop painful; for ten phases
+  they could not reach it.
+- **A Signatures pane.** `signature_get` and `signature_set` have existed since Phase 7 — with
+  tests, with sanitising, with the placement rule for quoted replies — and **nothing called
+  either of them.** Every message this app has ever sent went out unsigned, not because
+  signatures were unimplemented but because there was no way to type one. That is a failure
+  invisible from the Rust side: the tests pass, the column exists, the feature is absent.
+- **An Advanced pane**, which is where the crash reports surface. A report that is written and
+  never shown is a file in a folder nobody knows the name of.
+- **A Privacy pane** stating plainly what the app sends, including the one uncomfortable line:
+  mail is stored unencrypted on the disk, and BitLocker is what protects it at rest.
+- `Ctrl+,` opens Settings, and the sidebar button now opens the window instead of a sheet.
+- `tests/e2e/settings.spec.ts` (9 tests) and `tests/unit/settings.test.ts` (7).
+
+### Changed
+
+- **Settings was six sections stacked in one modal sheet, mounted inside `AccountsGate`.** The
+  settings a user could open were therefore coupled to the first-run account assistant, and the
+  root threaded an open flag and two callbacks through three components to reach the one button
+  that set it. Stacking also meant every section loaded at once: opening Settings to change the
+  undo delay ran the junk filter's status query and every account's notification preferences.
+  Panes mount only while shown.
+- **A settings _window_ rather than a sheet, for a reason beyond fidelity.** Settings is where
+  someone goes to fix something they are looking at, and a modal sheet hides the very thing they
+  are trying to fix.
+- **Four byte-identical CSS modules became one.** Composing, Reading, Junk and Notifications each
+  had their own copy of the same forty lines. That is how a settings window ends up with sections
+  that do not line up — a spacing change made in one copy is invisible until the sections are
+  finally shown side by side, which is exactly what a paned window does.
+- **`npm run verify` now runs the e2e suite** (`test:e2e:gate`, serialised). See Incidents for
+  why it had to.
+- Display preferences are announced to every window over a Tauri event. They are the only
+  settings the UI owns outright; everything else is read back from the core, so a second window
+  sees a change the moment it asks. Without this, Settings would be the one place in the app
+  where changing the theme appeared to do nothing.
+
+### Fixed
+
+- **Typing in the signature editor scrambled the text.** "Vishal Singh" came out "ishal SinghV".
+  The editor takes its initial HTML once, but the guard that records "applied" skips an empty
+  string — so with no signature stored yet, the first keystroke came straight back in as
+  _initial_ content and landed where the loader puts it. The editor's output is no longer allowed
+  back into a prop the editor reads. Found by an e2e test that typed a name and read it back;
+  every other assertion about that pane passed with the bug present.
+
+### Incidents
+
+- **The 29th's work shipped without a changelog entry.** `7cd8396` (logs and crash reports)
+  touched ten files and `CHANGELOG.md` was not one of them, against a standing instruction that
+  says every session, without being asked. Recorded here a day late, which is the whole cost of
+  the miss: the reasoning was still recoverable. It would not have been in six weeks.
+- **Four visual baselines had been failing since Phase 8 and nobody knew**, because
+  `npm run verify` did not run the e2e suite. The browser path deliberately stopped rendering
+  message bodies — the sanitiser lives only in the core, and rendering stored HTML in the browser
+  would be the one place it is skipped — and the baselines still showed the old rendered bodies.
+  Two phases of drift. Baselines refreshed, and e2e added to the gate so the next one cannot rot
+  the same way.
+- **Adding e2e to the gate immediately failed the scrolling budget.** Nine parallel workers on
+  one machine measure the machine, not the app: the same test passed at a p95 of 18.5ms alone and
+  failed minutes later under the full suite. The gate runs `--workers=1`, matching what the config
+  already did on CI. Interactive `npm run test:e2e` stays parallel.
+- **`docs/06` asks for "opt-in upload" of crash reports and there is deliberately none.** There is
+  nowhere to upload to. A crash-collection endpoint is a service with its own retention and
+  privacy questions, and shipping a client that posts to a server nobody has chosen would be worse
+  than shipping none. What the UI offers instead is the report and the folder it is in. Standing
+  rule 16 holds. When a destination exists, opt-in sending is a small addition on top; the hard
+  part — capturing something worth sending — is done.
+- **"Phase 12" appeared in four places** (`jumplist.rs`, `toast.rs` twice, `CHANGELOG.md`).
+  docs/06 has eleven phases and the installer is Phase 11. Corrected.
+
+### Notes — what Phase 11 still needs
+
+- **Code signing has not started and nothing here can substitute for it.** docs/07 §4 says the
+  certificate process should have begun at Phase 9; it has weeks of lead time. The exit gate is
+  "clean install on a fresh Windows 11 VM with **no SmartScreen warning**", and without a
+  certificate every download shows "Windows protected your PC" and Smart App Control blocks the
+  installer outright with no override. Only the owner can start this.
+- **The Settings window has not been seen in the real Tauri window.** RivaTuner Statistics Server
+  is running on this machine and WebView2 refuses to start under it — `0x80070057`, then a panic
+  in Tauri's setup hook. RTSS runs elevated and cannot be stopped from an ordinary shell. The
+  browser path is fully covered by the e2e suite; what is _not_ covered from there is whether
+  Tauri creates the window, and whether adding `settings` to `capabilities/default.json` is
+  correct — a missing capability entry denies every IPC call **silently**. That check is
+  outstanding.
+- Still to build: import and export, the first-run welcome, installer artwork, NSIS/MSIX and
+  signing, the auto-updater, README, licence and privacy policy.

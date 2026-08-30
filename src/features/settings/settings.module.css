@@ -1,4 +1,10 @@
-/* Notifications and startup. docs/06 Phase 10. */
+/* The shape every settings section shares. docs/06 Phase 11.
+ *
+ * There were four copies of this file — Composing, Reading, Junk and Notifications each had
+ * their own, byte-identical apart from one class. That is how a settings window ends up with
+ * sections that do not line up: a spacing change made in one copy and not the others is
+ * invisible until the two sections are finally shown side by side, which is exactly what the
+ * paned window does. One file, imported by all of them. */
 
 .section {
   display: flex;
@@ -36,6 +42,7 @@
   color: var(--label-1);
 }
 
+.radio,
 .checkbox {
   accent-color: var(--accent);
 }
@@ -47,7 +54,7 @@
   line-height: var(--t-footnote-leading);
 }
 
-/* A row of buttons that open their own sheets. */
+/* A row of buttons, or of a control and its label. */
 .row {
   display: flex;
   gap: var(--sp-3);
@@ -67,4 +74,17 @@
 .name {
   color: var(--label-2);
   font-size: var(--t-footnote-size);
+}
+
+/* A short list of plain statements — the Privacy pane. Bulleted rather than a paragraph
+   because each line is a separate claim that has to be checkable on its own. */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-left: var(--sp-5);
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
 }

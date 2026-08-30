@@ -5,7 +5,7 @@ import { Button } from '@/ui'
 
 import { RulesEditor } from './RulesEditor'
 import { SmartMailboxEditor } from './SmartMailboxEditor'
-import styles from './JunkSettings.module.css'
+import styles from '@/features/settings/settings.module.css'
 
 /**
  * The Rules and Smart Mailboxes entries in Settings. docs/01 §8.

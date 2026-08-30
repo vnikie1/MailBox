@@ -1,35 +1,26 @@
 import { useEffect, useState } from 'react'
 
-import { Sheet } from '@/ui'
-
 import { AccountAssistant } from './AccountAssistant'
-import { ComposingSettings } from '@/features/compose/ComposingSettings'
-import { ReadingSettings } from '@/features/reader/ReadingSettings'
-
-import { NotificationSettings } from './NotificationSettings'
-import { JunkSettings } from '@/features/organise/JunkSettings'
-import { OrganiseSettings } from '@/features/organise/OrganiseSettings'
-
-import { AccountsSettings } from './AccountsSettings'
-import styles from './AccountsGate.module.css'
 
 /**
- * The first-run path, and the way into account settings.
+ * The first-run path.
  *
- * Mail opens its account assistant on a first launch rather than showing an empty window
- * with no explanation of what to do, and so does this. The distinction that matters is that
- * the first-run sheet has **no Cancel** — dismissing it would leave the user in an app with
- * nothing in it and no visible way forward.
+ * Mail opens its account assistant on a first launch rather than showing an empty window with
+ * no explanation of what to do, and so does this. The distinction that matters is that the
+ * first-run sheet has **no Cancel** — dismissing it would leave the user in an app with nothing
+ * in it and no visible way forward.
+ *
+ * Until Phase 11 this also mounted the settings sheet, and the two had nothing to do with each
+ * other beyond both involving accounts. Settings is a window of its own now (see
+ * `features/settings`), which leaves this component doing the one job its name describes.
  *
  * State comes from `useAccountsGate`, which the root calls once.
  */
 export interface AccountsGateProps {
   firstRun: boolean
-  settingsOpen: boolean
-  onCloseSettings: () => void
 }
 
-export function AccountsGate({ firstRun, settingsOpen, onCloseSettings }: AccountsGateProps) {
+export function AccountsGate({ firstRun }: AccountsGateProps) {
   const [assistantOpen, setAssistantOpen] = useState(false)
 
   useEffect(() => {
@@ -37,24 +28,6 @@ export function AccountsGate({ firstRun, settingsOpen, onCloseSettings }: Accoun
   }, [firstRun])
 
   return (
-    <>
-      <AccountAssistant open={assistantOpen && firstRun} firstRun onOpenChange={setAssistantOpen} />
-
-      <Sheet
-        open={settingsOpen}
-        onOpenChange={(open) => {
-          if (!open) onCloseSettings()
-        }}
-        title="Settings"
-        className={styles.settingsSheet}
-      >
-        <AccountsSettings />
-        <ComposingSettings />
-        <NotificationSettings />
-        <ReadingSettings />
-        <JunkSettings />
-        <OrganiseSettings />
-      </Sheet>
-    </>
+    <AccountAssistant open={assistantOpen && firstRun} firstRun onOpenChange={setAssistantOpen} />
   )
 }

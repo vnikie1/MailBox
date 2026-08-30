@@ -2,7 +2,12 @@ import { useEffect } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 import { applyAppearance, applyWindowActive } from '@/lib/appearance'
-import { getAppearance, onAppearanceChanged, onWindowFocusChanged } from '@/lib/ipc'
+import {
+  getAppearance,
+  onAppearanceChanged,
+  onDisplayPreferencesChanged,
+  onWindowFocusChanged,
+} from '@/lib/ipc'
 import { useAppearanceStore } from '@/store/appearance'
 import { useSettingsStore } from '@/store/settings'
 
@@ -14,9 +19,15 @@ import { useSettingsStore } from '@/store/settings'
  * (standing rule 14). The second resolves that against the user's preferences and writes
  * the result to <html>, so a settings change repaints the app by exactly the same path an
  * OS change does — there is only ever one way for the appearance to reach the document.
+ *
+ * Since Phase 11 the preferences live in a window of their own, so there is a third
+ * subscription: the other window announcing a change. It lands in the same store the local
+ * controls write to, which means a theme changed in Settings reaches the mailbox by the
+ * identical path — the second effect neither knows nor cares which window it came from.
  */
 export function useAppearanceSync(): void {
   const setAppearance = useAppearanceStore((state) => state.setAppearance)
+  const applyRemote = useSettingsStore((state) => state.applyRemote)
   const setWindowActive = useAppearanceStore((state) => state.setWindowActive)
   const appearance = useAppearanceStore((state) => state.appearance)
 
@@ -42,6 +53,8 @@ export function useAppearanceSync(): void {
 
     void onAppearanceChanged(setAppearance).then(keep)
 
+    void onDisplayPreferencesChanged(applyRemote).then(keep)
+
     void onWindowFocusChanged((focused) => {
       setWindowActive(focused)
       applyWindowActive(focused, document.documentElement)
@@ -53,7 +66,7 @@ export function useAppearanceSync(): void {
         unlisten()
       })
     }
-  }, [setAppearance, setWindowActive])
+  }, [setAppearance, setWindowActive, applyRemote])
 
   useEffect(() => {
     applyAppearance(appearance, { theme, density, transparency }, document.documentElement)

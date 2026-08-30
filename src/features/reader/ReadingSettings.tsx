@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { remoteImagesEnabled, setRemoteImagesEnabled } from '@/lib/ipc'
 
-import styles from './ReadingSettings.module.css'
+import styles from '@/features/settings/settings.module.css'
 
 /**
  * The Reading section of Settings. docs/01 §5.

@@ -312,6 +312,19 @@
 
   --settings-width: 640px;
 
+  /* The Settings window. docs/06 Phase 11 — a window of its own, with a pane list down the
+     side. The nav is wide enough for the longest label (Signatures) at comfortable density
+     without wrapping, which is what stops the list reflowing when the density changes. */
+  --settings-nav-width: 176px;
+  --settings-nav-row-height: 30px;
+  --settings-nav-row-radius: var(--r-md);
+  --settings-nav-icon: 16px;
+  --settings-nav-pad: var(--sp-3);
+  --settings-pane-pad: var(--sp-6);
+  --settings-pane-gap: var(--sp-7);
+  --settings-report-max-height: 260px;
+  --settings-signature-min-height: 200px;
+
   --account-row-height: 44px;
   --account-row-gap: var(--sp-5);
   --account-row-radius: var(--r-md);

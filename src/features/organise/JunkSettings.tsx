@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import type { JunkStatus } from '@/lib/generated/JunkStatus'
 import { junkStatus, junkTrainingMode, setJunkTrainingMode } from '@/lib/organise'
 
-import styles from './JunkSettings.module.css'
+import styles from '@/features/settings/settings.module.css'
 
 /**
  * The Junk section of Settings. docs/01 §8, docs/06 Phase 8.

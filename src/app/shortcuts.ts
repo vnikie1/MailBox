@@ -79,6 +79,7 @@ export type ShortcutId =
   | 'previewAttachment'
   | 'jumpToMailbox'
   | 'showShortcuts'
+  | 'settings'
 
 /**
  * The table. Order is the order Help shows them within each group.
@@ -177,6 +178,7 @@ export const SHORTCUTS: Shortcut[] = [
 
   { id: 'toggleSidebar', keys: 'Ctrl+Shift+S', label: 'Show or hide the sidebar', group: 'View' },
   { id: 'showShortcuts', keys: 'F1', label: 'Keyboard shortcuts', group: 'View' },
+  { id: 'settings', keys: 'Ctrl+,', label: 'Settings', group: 'View' },
   { id: 'expandThread', keys: '→', label: 'Expand thread', group: 'View', local: true },
   { id: 'collapseThread', keys: '←', label: 'Collapse thread', group: 'View', local: true },
   {

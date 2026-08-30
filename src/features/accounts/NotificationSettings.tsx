@@ -4,7 +4,7 @@ import { useAccounts } from '@/app/queries'
 import type { NotifyPrefs } from '@/lib/generated/NotifyPrefs'
 import { notifyPrefs, runAtLogin, setNotifyPrefs, setRunAtLogin } from '@/lib/platform'
 
-import styles from './NotificationSettings.module.css'
+import styles from '@/features/settings/settings.module.css'
 
 /**
  * Notifications and startup. docs/06 Phase 10.

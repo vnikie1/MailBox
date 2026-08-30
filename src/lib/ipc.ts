@@ -13,10 +13,15 @@
  */
 
 import { invoke, isTauri } from '@tauri-apps/api/core'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
-import { DEFAULT_APPEARANCE, type Appearance, type ThemeName } from './appearance'
+import {
+  DEFAULT_APPEARANCE,
+  type Appearance,
+  type DisplayPreferences,
+  type ThemeName,
+} from './appearance'
 
 export const runningInTauri: boolean = isTauri()
 
@@ -90,6 +95,7 @@ export async function onWindowFocusChanged(
 
 import type { AccountRow } from './generated/AccountRow'
 import type { ComposeAddress } from './generated/ComposeAddress'
+import type { CrashReport } from './generated/CrashReport'
 import type { FlagPatch } from './generated/FlagPatch'
 import type { ListQuery } from './generated/ListQuery'
 import type { EmlMessage } from './generated/EmlMessage'
@@ -910,4 +916,103 @@ export async function soundSent(accountId: number): Promise<void> {
  */
 export async function emlRead(path: string): Promise<EmlMessage> {
   return invoke<EmlMessage>('eml_read', { path })
+}
+
+/* -------------------------------------------------------------------- settings */
+
+/** The Settings panes, as both windows name them. */
+export type SettingsPane =
+  'general' | 'accounts' | 'composing' | 'signatures' | 'rules' | 'privacy' | 'advanced'
+
+/**
+ * Opens Settings, or brings it forward and moves it to `pane` if it is already open.
+ *
+ * There is one Settings window, not one per caller — see `ipc/window.rs`. In the browser there
+ * are no OS windows at all, so this opens a tab instead, which is what the Playwright run and
+ * the component gallery need it to do.
+ */
+export async function settingsOpen(pane: SettingsPane = 'general'): Promise<void> {
+  if (!runningInTauri) {
+    window.open(`${window.location.pathname}?settings=1&pane=${pane}`, '_blank')
+    return
+  }
+  await invoke('settings_open', { pane })
+}
+
+/** The already-open Settings window being told to show a different pane. */
+export async function onSettingsPane(handler: (pane: SettingsPane) => void): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<SettingsPane>('settings:pane', (event) => {
+    handler(event.payload)
+  })
+}
+
+/* --------------------------------------------------------- display preferences */
+
+/**
+ * Theme, density and transparency, told to every window.
+ *
+ * These three are the only settings the UI owns outright — everything else is read back from
+ * the core, so a second window sees a change the moment it asks. These live in the WebView's
+ * own storage, and `localStorage` does not notify another window in any way this project is
+ * willing to depend on, so the change is announced explicitly.
+ *
+ * Without this the Settings window would be the one place in the app where changing the theme
+ * appears to do nothing: it would repaint itself and leave the mailbox behind it in the old one.
+ */
+const DISPLAY_CHANNEL = 'halcyon.settings.display'
+
+export async function broadcastDisplayPreferences(preferences: DisplayPreferences): Promise<void> {
+  if (!runningInTauri) {
+    // Same-origin tabs, which is what the browser path's second window is.
+    new BroadcastChannel(DISPLAY_CHANNEL).postMessage(preferences)
+    return
+  }
+  await emit('settings:display', preferences)
+}
+
+export async function onDisplayPreferencesChanged(
+  handler: (preferences: DisplayPreferences) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) {
+    const channel = new BroadcastChannel(DISPLAY_CHANNEL)
+    channel.onmessage = (event: MessageEvent<DisplayPreferences>) => {
+      handler(event.data)
+    }
+    return () => {
+      channel.close()
+    }
+  }
+
+  return listen<DisplayPreferences>('settings:display', (event) => {
+    handler(event.payload)
+  })
+}
+
+/* ----------------------------------------------------------------- diagnostics */
+
+/**
+ * Crash reports written by the panic hook. See `diagnostics.rs`.
+ *
+ * Nothing here uploads. The Advanced pane shows the report and opens the folder; who sees it
+ * after that is the user's decision, which is what standing rule 16 requires.
+ */
+export async function crashReports(): Promise<CrashReport[]> {
+  if (!runningInTauri) return []
+  return invoke<CrashReport[]>('crash_reports')
+}
+
+export async function crashReportRead(name: string): Promise<string> {
+  return invoke<string>('crash_report_read', { name })
+}
+
+export async function crashReportsClear(): Promise<number> {
+  if (!runningInTauri) return 0
+  return invoke<number>('crash_reports_clear')
+}
+
+/** Opens the folder holding the logs and reports in Explorer. */
+export async function diagnosticsReveal(): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('diagnostics_reveal')
 }

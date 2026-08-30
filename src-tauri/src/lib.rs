@@ -65,6 +65,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
+            ipc::window::settings_open,
             ipc::eml::eml_read,
             ipc::diagnostics::crash_reports,
             ipc::diagnostics::crash_report_read,

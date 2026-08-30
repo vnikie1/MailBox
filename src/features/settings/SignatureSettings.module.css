@@ -1,0 +1,28 @@
+/* Settings → Signatures. docs/06 Phase 11. */
+
+.picker {
+  height: var(--field-height);
+  padding: 0 var(--field-pad-x);
+  color: var(--label-1);
+  font: inherit;
+  background: var(--bg-content);
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--field-radius);
+}
+
+.picker:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--hairline);
+}
+
+/* The compose editor, boxed. It has no border of its own — in a compose window it fills the
+   body area and the window is the frame. Here it sits among other controls and needs one. */
+.editor {
+  display: flex;
+  flex-direction: column;
+  min-height: var(--settings-signature-min-height);
+  overflow: hidden;
+  background: var(--bg-content);
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--field-radius);
+}

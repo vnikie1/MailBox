@@ -1,0 +1,78 @@
+/* The Settings window. docs/06 Phase 11. */
+
+.window {
+  display: grid;
+  grid-template-columns: var(--settings-nav-width) 1fr;
+  height: 100vh;
+  overflow: hidden;
+  color: var(--label-1);
+  background: var(--bg-content);
+}
+
+/* The pane list. Sidebar-coloured, like the mailbox list next door, so the two windows read as
+   parts of the same application rather than two apps that happen to share a theme. */
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--settings-nav-pad);
+  overflow-y: auto;
+  background: var(--bg-sidebar);
+  border-right: var(--hairline) solid var(--separator);
+}
+
+.navItem {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: center;
+  height: var(--settings-nav-row-height);
+  padding: 0 var(--sp-3);
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--settings-nav-row-radius);
+  cursor: default;
+}
+
+.navItem:hover {
+  background: var(--fill-hover);
+}
+
+.navItem:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(var(--hairline) * -1);
+}
+
+.navItem[aria-current='true'] {
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+
+/* The selection goes quiet when the window is not the active one, as everything else in the
+   app does. docs/01 §9.11. */
+:global([data-window-inactive]) .navItem[aria-current='true'] {
+  color: var(--label-1);
+  background: var(--fill-selected-inactive);
+}
+
+.navIcon {
+  flex: none;
+  width: var(--settings-nav-icon);
+  height: var(--settings-nav-icon);
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--settings-pane-gap);
+  padding: var(--settings-pane-pad);
+  overflow-y: auto;
+}
+
+/* Prose in a settings pane has the same reason to be measured as prose anywhere else: a hint
+   running the full width of a wide window is hard to track back to the start of the next line. */
+.pane > * {
+  max-width: var(--measure-prose);
+}

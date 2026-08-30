@@ -14,7 +14,15 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  // Serialised on CI so the perf-sensitive assertions are not fighting for cores.
+  /**
+   * Serialised on CI so the perf-sensitive assertions are not fighting for cores.
+   *
+   *  serialises too, via , for the same reason: the scrolling
+   * budget in shell.spec.ts measures frame gaps, and nine workers on one machine measure the
+   * machine. It passed at a p95 of 18.5ms alone and failed in the same minute under the full
+   * parallel suite. A gate that fails on machine load is a gate people learn to ignore.
+   * Interactive  stays parallel and fast.
+   */
   ...(process.env.CI ? { workers: 1 } : {}),
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',
   use: {

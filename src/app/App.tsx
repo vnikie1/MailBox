@@ -41,12 +41,12 @@ function Shell() {
   const sync = useSync()
   useSystemEvents()
 
-  const { firstRun, settingsOpen, openSettings, closeSettings } = useAccountsGate()
+  const { firstRun } = useAccountsGate()
 
   return (
     <ToastProvider>
       <SyncContext.Provider value={sync}>
-        <AppShell onOpenSettings={openSettings} />
+        <AppShell />
       </SyncContext.Provider>
 
       {/* Bottom-centre, floating over the panes. Undo Send only means anything while the
@@ -54,11 +54,7 @@ function Shell() {
       <OutboxBanner />
 
       {/* Inside the provider, because the assistant reports what it did with a toast. */}
-      <AccountsGate
-        firstRun={firstRun}
-        settingsOpen={settingsOpen}
-        onCloseSettings={closeSettings}
-      />
+      <AccountsGate firstRun={firstRun} />
     </ToastProvider>
   )
 }

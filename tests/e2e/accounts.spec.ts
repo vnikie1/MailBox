@@ -13,10 +13,16 @@ import { expect, test, type Page } from '@playwright/test'
  * cannot serve — writing to Credential Manager and opening a TLS socket to port 993.
  */
 
+/**
+ * Opens Settings on the Accounts pane.
+ *
+ * Since Phase 11 the sidebar button opens a **window**, not a sheet — in the browser that is a
+ * second tab, so the button's job is now tested once, in settings.spec.ts, and everything else
+ * navigates straight to the pane. Going through the button in every test here would mean
+ * juggling two pages for no extra coverage.
+ */
 async function openSettings(page: Page) {
-  await page.goto('/')
-  await page.waitForSelector('[role="tree"]')
-  await page.getByRole('button', { name: 'Settings' }).click()
+  await page.goto('/?settings=1&pane=accounts')
   await expect(page.getByRole('heading', { name: 'Accounts' })).toBeVisible()
 }
 

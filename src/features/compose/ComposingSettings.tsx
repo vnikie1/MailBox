@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { getUndoSeconds, setUndoSeconds } from '@/lib/ipc'
 
-import styles from './ComposingSettings.module.css'
+import styles from '@/features/settings/settings.module.css'
 
 /**
  * The Composing section of Settings. docs/01 §6, docs/06 Phase 7.

@@ -23,7 +23,7 @@ import { ShortcutSheet } from '@/features/help/ShortcutSheet'
 import { ScopeBar, useSearch } from '@/features/search'
 import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
 import { junkMark, rulesRun } from '@/lib/organise'
-import { composeBlank, composeOpen, onJumpListTask, syncAll } from '@/lib/ipc'
+import { composeBlank, composeOpen, onJumpListTask, settingsOpen, syncAll } from '@/lib/ipc'
 
 import { PaneDivider } from './PaneDivider'
 import { useBreakpoint } from './useBreakpoint'
@@ -47,12 +47,18 @@ type Level = 'mailboxes' | 'list' | 'reader'
  * actions and search over the reader. Stacking a window-wide toolbar on top of those, as
  * the first version of this did, cost 104pt of chrome against Mail's 52.
  */
-export interface AppShellProps {
-  onOpenSettings?: (() => void) | undefined
-}
-
-export function AppShell({ onOpenSettings }: AppShellProps) {
+export function AppShell() {
   const breakpoint = useBreakpoint()
+
+  /**
+   * Settings is a window of its own since Phase 11, so opening it is an IPC call rather than
+   * a piece of state the root has to hold. It used to be a sheet mounted by the accounts
+   * gate, which meant the root threaded an open flag and two callbacks through three
+   * components to reach the one button that set it.
+   */
+  const openSettings = useCallback(() => {
+    void settingsOpen()
+  }, [])
 
   const sidebarWidth = useLayoutStore((state) => state.sidebarWidth)
   const listWidth = useLayoutStore((state) => state.listWidth)
@@ -231,6 +237,8 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
       showShortcuts: useCallback(() => {
         setShowingShortcuts(true)
       }, []),
+
+      settings: openSettings,
     },
     { hasSelection: selectedMessageIds.length > 0 },
   )
@@ -309,7 +317,7 @@ export function AppShell({ onOpenSettings }: AppShellProps) {
               className={styles.sidebarPane}
               style={breakpoint === 'one' ? undefined : { width: `${String(sidebarWidth)}px` }}
             >
-              <Sidebar onOpenSettings={onOpenSettings} />
+              <Sidebar onOpenSettings={openSettings} />
             </div>
             {breakpoint === 'three' && (
               <PaneDivider

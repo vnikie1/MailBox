@@ -1,0 +1,64 @@
+/* Settings → Advanced. docs/06 Phase 11. */
+
+.reports {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.rowButton {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: baseline;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--label-1);
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: var(--r-md);
+  cursor: default;
+}
+
+.rowButton:hover {
+  background: var(--fill-hover);
+}
+
+.rowButton:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(var(--hairline) * -1);
+}
+
+/* The panic message. One line — the whole report is in the block below when it is opened. */
+.summary {
+  overflow: hidden;
+  font-size: var(--t-subhead-size);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* A backtrace. Monospaced and scrollable in both directions, because wrapping a stack frame
+   makes it unreadable and truncating one loses the part that identifies the crash. */
+.detail {
+  max-height: var(--settings-report-max-height);
+  padding: var(--diagnostic-raw-pad);
+  margin: 0;
+  overflow: auto;
+  color: var(--label-2);
+  font-family: var(--font-mono);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+  background: var(--bg-window);
+  border-radius: var(--diagnostic-raw-radius);
+}
