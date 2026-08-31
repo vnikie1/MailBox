@@ -3008,3 +3008,55 @@ Everything Phase 11 still needed except code signing, which nobody here can do.
 - The two rejections that sink email clients, from docs/07 §2.7: **test account credentials in
   Notes for Certification**, without which the reviewer cannot get past the welcome screen and
   fails the submission as incomplete; and a specific written justification for `runFullTrust`.
+
+---
+
+## 2026-08-31 (night) — Phase 11: the Store package, installed
+
+### Added
+
+- **`tools/run-wack.ps1`** — runs the App Certification Kit against the installed package and
+  reduces its thousand-line XML to the one word that matters plus every failure by name. Separate
+  from `make-msix.ps1` because WACK is the only step that needs elevation, and making the whole
+  packaging script require an administrator to run would be a poor trade for one command.
+
+### Verified — by installing it, not by reading about it
+
+The package was registered and run. What that establishes:
+
+- **It installs.** `Unikie1.HalcyonMail_1.0.0.0_x64__anw48tyhk74bp`, status Ok.
+- **The identity strings in the manifest are right.** The package family name Windows computed —
+  `Unikie1.HalcyonMail_anw48tyhk74bp` — matches what Partner Center issued and docs/07 §2.2
+  recorded, character for character. Getting one of those wrong is rejected at upload.
+- **It runs with package identity.** `GetPackageFamilyName` on the live process returns the family
+  name, which is what makes the AUMID real. The AUMID resolves to
+  `Unikie1.HalcyonMail_anw48tyhk74bp!Halcyon`, exactly as docs/07 §2.2 predicted, so toasts will
+  address the packaged app rather than a phantom.
+- **It works.** Not merely starts: it synced 46 mailboxes on a real account, removed a message
+  expunged on the server, and rendered a 68KB HTML body through the sanitiser — all from the
+  packaged, updater-free build.
+- **The Start menu entry is registered** as "Halcyon" against that AUMID.
+
+No certificate was needed. Developer mode is on, so the staged layout registers directly from its
+manifest — which is also the fastest loop for changing the manifest and seeing the result.
+
+### Fixed
+
+- **docs/07 §2.6 said the database lands in "the redirected path". It does not**, and the section
+  now says so with the measurement. A `runFullTrust` package writes straight through to the real
+  `%LOCALAPPDATA%\com.uniki.halcyon`; redirection into `%LOCALAPPDATA%\Packages\<PFN>` is for
+  sandboxed UWP apps. The Store build opened the same database the NSIS build uses.
+
+  This is the better outcome and is now deliberate rather than accidental: installing the Store
+  version over the downloaded one keeps the mail, the accounts and the settings, with no migration
+  step and nothing for the user to do.
+
+### Notes
+
+- **WACK has not been run.** `appcert.exe` refuses to start unelevated — "The requested operation
+  requires elevation", and nothing else — and this session has no elevated shell. It is one
+  command from an administrator prompt and takes 10–20 minutes. A WACK failure is a guaranteed
+  Store rejection, so it is the last thing standing between the package and a submission.
+- The package is left installed, registered against the staging folder. `Remove-AppxPackage
+(Get-AppxPackage *Halcyon*).PackageFullName` removes it; the unpackaged dev build is unaffected
+  either way, since both use the same database.

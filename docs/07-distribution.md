@@ -382,9 +382,22 @@ Export it, trust it in `LocalMachine\TrustedPeople`, then sign:
 Add-AppxPackage .\Halcyon.msix
 ```
 
-Verify specifically: the DB lands in the redirected path and survives a restart; OAuth tokens
+Verify specifically: the DB lands where you expect and survives a restart; OAuth tokens
 persist in Credential Manager; toasts fire with the package AUMID; `mailto:` opens the app;
 the startup task appears in Settings → Apps → Startup.
+
+> **Corrected 2026-08-31, by installing it.** This section previously said the database lands in
+> "the redirected path". It does not. A `runFullTrust` package writes **straight through** to the
+> real `%LOCALAPPDATA%\com.uniki.halcyon` — filesystem redirection into
+> `%LOCALAPPDATA%\Packages\<PFN>` applies to sandboxed UWP apps, not to full-trust desktop ones.
+>
+> Measured on a registered package: the Store build opened the same `halcyon.db` the NSIS build
+> uses, synced 46 mailboxes into it, and rendered a message from it.
+>
+> This is the better outcome and worth keeping deliberately: somebody who installs the Store
+> version over the downloaded one keeps their mail, their accounts and their settings, with no
+> migration step. The cost is that the two builds cannot run at once against the same database —
+> which they could not anyway, because of the single-instance plugin.
 
 **3. Run the Windows App Certification Kit** (ships with the Windows SDK). It runs the same
 checks certification will. Fix everything it flags — a WACK failure is a guaranteed rejection.
