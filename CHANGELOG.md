@@ -2835,3 +2835,106 @@ driving it from PowerShell and reading the UI Automation tree — the same tree 
   stable identity to match an mbox message against — `Message-ID` is missing from a lot of old
   mail and forged in some of the rest — so deduplicating on it would silently drop messages that
   are not duplicates.
+
+---
+
+## 2026-08-31 (later) — Phase 11: ship, the rest of it
+
+Everything Phase 11 still needed except code signing, which nobody here can do.
+
+### Added
+
+- **First run: welcome, add an account, done.** A wrapper around the account assistant rather
+  than two more steps inside it — the assistant is a reducer with a guard on every transition,
+  and two screens that carry no data and ask no questions do not belong in it. The welcome
+  screen exists because the risk to the three-minute gate is not the number of screens, it is
+  opening an unexplained credential form as the first thing a stranger sees.
+- **The three-minute gate, measured.** `tests/e2e/firstRun.spec.ts` drives the screens and
+  reports the time: **733–902 ms** across three runs, against a budget of 180 seconds. That is a
+  floor, not the real figure — a person reads and types, and mail then arrives over a network no
+  test can simulate — but it says the screens themselves cost nothing.
+- **An auto-updater**, off by default in the sense that nothing checks on a timer. Standing rule
+  16 makes an update check the only outbound request in the app that is not mail, so it happens
+  when the user presses a button and the version on offer is shown before anything downloads.
+  Updates are signed with minisign-style keys and verified against a public key compiled into
+  the binary: TLS proves a file came from GitHub, the signature proves it came from us.
+- **A `self-update` Cargo feature**, per docs/07 §2.3. Store builds compile the updater out
+  entirely — the Store installs its own updates, and two mechanisms fighting produces duplicate
+  installs and fails certification.
+- **Installer artwork**, generated rather than committed as binaries: `tools/make-installer-art.cjs`
+  reads the real app icon and composites the two BMPs NSIS wants. A BMP checked into the
+  repository is a thing nobody can change, and the first time the icon moved the artwork would
+  have silently stopped matching it. Includes a PNG decoder, because the icon is a PNG and Node
+  ships the hard half (zlib).
+- **README, LICENSE, PRIVACY.md, SECURITY.md.** The README had been the original planning
+  document, opening with "Planning workspace" and saying Phase 0 was scaffolded.
+- **Outlook `.pst` import.** See below.
+
+### Changed
+
+- **Version 0.1.0 → 1.0.0** across `package.json`, `Cargo.toml` and `tauri.conf.json`, and the
+  empty `copyright` filled in. docs/07 §2.3: the Store will not accept `0.0.0`, and every
+  submission must increment.
+- `import::write_message` takes an explicit read-state override. Thunderbird records read state
+  in the message; a PST records it in a MAPI property the synthesised message does not carry.
+
+### Fixed
+
+- **The first-run timing test measured Vite's cold compile** and failed about one run in five.
+  It warms the page first now and measures the second load. Exactly the lesson the scrolling
+  budget taught two days ago, learned again — a gate that fails on machine load is one people
+  learn to ignore.
+
+### Incidents
+
+- **`cat >>` put new functions after the test module. Twice.** Clippy's `items_after_test_module`
+  caught it in `platform/files.rs` and again in `ipc/transfer.rs`. Appending to a Rust file is
+  only ever correct when the file has no `mod tests`, which most of them do.
+- **The updater's key-leak test did not work, and passed.** It searched every file for a private
+  key header and found none — because it had two things wrong at once. Tauri signs with `rsign`,
+  not minisign, so the header text was wrong; and the key file is base64 **as a whole**, so the
+  plaintext header never appears in it. Both were only found by planting a real key in the tree
+  and watching the test pass. It now checks both forms, derives the encoded one so they cannot
+  drift, and was re-probed the same way. An earlier version had also matched its own source,
+  reporting itself as the leak.
+- **The NSIS `license` key does not exist.** The build failed schema validation; the licence is
+  `bundle.licenseFile`, not `bundle.windows.nsis.license`. Found by reading the CLI's own
+  `config.schema.json` rather than by guessing again.
+- **The first sidebar artwork was invisible.** A blue wash with the app icon — a blue rounded
+  square — composited onto it. Correct dimensions, correct format, unreadable image. Found by
+  converting the BMP back to a PNG and _looking_ at it, which is not something the file format
+  or the build would ever have complained about.
+
+### Notes
+
+- **`.pst` import is done, and is the least tested thing in the project.** A `.pst` is a MAPI
+  object store, not a mail file; Microsoft's own `outlook-pst` crate reads the store and
+  `transfer/pst.rs` turns MAPI properties back into RFC 5322. Where Outlook kept the original
+  headers — `PR_TRANSPORT_MESSAGE_HEADERS`, which it does for most received mail — the message
+  is reconstructed nearly exactly, so an imported reply threads with a synced original. Where it
+  did not, which is normal for sent mail, the headers are synthesised and the `Message-ID` is
+  invented, and an invented id threads with nothing.
+
+  The gap that matters: **the only PST this project has that it did not write itself contains no
+  mail.** `tests/pst_gate.rs` proves the store opens, the folder tree is walked, a non-PST is
+  refused and a missing file is an error — all against real Outlook output. It proves nothing
+  about extracting a message. A fixture written by this project would only prove the reader can
+  read the writer, so none was made. This is said in the module note, in the gate's own header,
+  and on the import screen, because an archive that imports looking complete and is not is the
+  worst thing this code could do.
+
+  Attachments are not extracted and RTF-only bodies cannot be read. Both are counted and
+  reported rather than dropped quietly.
+
+- **The installer builds: `Halcyon_1.0.0_x64-setup.exe`, 4.7 MB**, with the artwork and the
+  licence page. It is **unsigned**, so SmartScreen will warn on every machine that downloads it.
+- **The update signing key is not in this repository and must never be.** It was generated to
+  `%TEMP%\…\scratchpad\keys\halcyon-update.key`, has **no passphrase**, and needs moving
+  somewhere safe before the first release — a password manager, and a `TAURI_SIGNING_PRIVATE_KEY`
+  secret for CI. Losing it means no installed copy can ever be updated again; leaking it means
+  anyone can sign an update for every installed copy. A test now fails the build if a key ever
+  lands in the tree.
+- **Still outstanding:** code signing (2–4 weeks of identity validation, and the exit gate's "no
+  SmartScreen warning" cannot be met without it), MSIX packaging for the Store, a release
+  workflow, and the exit-gate checks that need a fresh Windows 11 VM. Phase 7's gate still wants
+  Outlook and Apple Mail accounts, and Phase 10's still wants a recorded Narrator walkthrough.

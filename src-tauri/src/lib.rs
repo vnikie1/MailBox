@@ -54,7 +54,7 @@ pub fn run() {
         );
     }
 
-    tauri::Builder::default()
+    with_updater(tauri::Builder::default())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -86,6 +86,8 @@ pub fn run() {
             ipc::transfer::import_run,
             ipc::transfer::export_pick_folder,
             ipc::transfer::export_run,
+            ipc::update::update_check,
+            ipc::update::update_install,
             ipc::eml::eml_read,
             ipc::diagnostics::crash_reports,
             ipc::diagnostics::crash_report_read,
@@ -349,4 +351,20 @@ fn init_tracing(diagnostics: &std::path::Path) {
         .with(file)
         .with(filter)
         .init();
+}
+
+/// Adds the updater plugin, in builds that update themselves.
+///
+/// A function rather than a `cfg` inside the chain because `Builder` is consumed and returned
+/// by each call, so a conditional in the middle of it does not typecheck. Store builds get the
+/// identity function: the Store installs its own updates, and two mechanisms fighting produces
+/// duplicate installs and fails certification. docs/07 §2.3.
+#[cfg(feature = "self-update")]
+fn with_updater<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder.plugin(tauri_plugin_updater::Builder::new().build())
+}
+
+#[cfg(not(feature = "self-update"))]
+fn with_updater<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    builder
 }

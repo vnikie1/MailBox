@@ -166,6 +166,7 @@ pub fn write_message(
     mailbox_id: i64,
     uid: u32,
     raw: &[u8],
+    seen: Option<bool>,
 ) -> Result<Option<i64>, DbError> {
     let Ok(parsed) = mailparse::parse_mail(raw) else {
         // Not a message. Standing rule 13 says degrade visibly, and the visible part is the
@@ -176,7 +177,11 @@ pub fn write_message(
     };
 
     let envelope = envelope::from_headers(&parsed);
+
+    // Thunderbird records read state in the message itself; a PST records it in a MAPI property
+    // the message does not carry. The caller supplies it when it knows better than the headers do.
     let flags = MozillaFlags::from_headers(raw);
+    let seen = seen.unwrap_or(flags.seen);
 
     let references = parsed
         .headers
@@ -193,7 +198,7 @@ pub fn write_message(
         uid,
         envelope,
         flags: Flags {
-            seen: flags.seen,
+            seen,
             answered: flags.answered,
             flagged: flags.flagged,
             draft: false,
@@ -378,7 +383,7 @@ mod tests {
                     Content-Type: text/plain\r\n\r\n\
                     It computes.\r\n";
 
-        let id = write_message(&tx, &cache, account, mailbox, 1, raw)
+        let id = write_message(&tx, &cache, account, mailbox, 1, raw, None)
             .expect("write")
             .expect("inserted");
 
@@ -429,6 +434,7 @@ mod tests {
             mailbox,
             1,
             b"From: ada@example.test\r\nSubject: analytical engine\r\n\r\nbody\r\n",
+            None,
         )
         .expect("write");
 
@@ -454,7 +460,7 @@ mod tests {
         let account = local_account(&tx, "On My PC").expect("account");
         let mailbox = mailbox_for(&tx, account, "Inbox").expect("mailbox");
 
-        let written = write_message(&tx, &cache, account, mailbox, 1, &[0xff, 0xfe, 0x00]);
+        let written = write_message(&tx, &cache, account, mailbox, 1, &[0xff, 0xfe, 0x00], None);
 
         assert!(written.is_ok(), "a bad item ended the import");
 
@@ -475,7 +481,7 @@ mod tests {
         for (offset, subject) in ["one", "two", "three"].iter().enumerate() {
             let raw = format!("From: a@x\r\nSubject: {subject}\r\n\r\nbody\r\n");
             let uid = first + offset as u32;
-            write_message(&tx, &cache, account, mailbox, uid, raw.as_bytes()).expect("write");
+            write_message(&tx, &cache, account, mailbox, uid, raw.as_bytes(), None).expect("write");
         }
 
         let count: i64 = tx

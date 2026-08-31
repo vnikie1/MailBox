@@ -25,3 +25,9 @@ Thumbs.db
 .env
 .env.local
 *.log
+
+# Update signing keys. The public half lives in tauri.conf.json; the private half must never
+# be committed — anyone holding it can sign an update for every installed copy. There is a test
+# in ipc/update.rs that fails the build if one appears in the tree anyway.
+*.key
+*.key.pub

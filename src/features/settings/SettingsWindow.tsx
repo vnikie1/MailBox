@@ -15,6 +15,7 @@ import { AdvancedSettings } from './AdvancedSettings'
 import { AppearanceSettings } from './AppearanceSettings'
 import { PrivacyStatement } from './PrivacyStatement'
 import { SignatureSettings } from './SignatureSettings'
+import { UpdateSettings } from './UpdateSettings'
 import { PANES, paneFrom } from './panes'
 import styles from './SettingsWindow.module.css'
 
@@ -109,6 +110,7 @@ function Panes() {
           <>
             <AppearanceSettings />
             <NotificationSettings />
+            <UpdateSettings />
           </>
         )}
         {pane === 'accounts' && <AccountsSettings />}

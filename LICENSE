@@ -1,0 +1,58 @@
+Copyright © 2026 Vishal Singh. All rights reserved.
+
+This software and its source code are made available for reference and for personal use of
+official builds. They are not placed in the public domain and are not released under an open
+source licence.
+
+WHAT YOU MAY DO
+
+  1. Install and use official builds of Halcyon, obtained from the project's releases page or
+     from the Microsoft Store, on any number of computers you own or control, for any purpose
+     including commercial use.
+
+  2. Read, study and quote the source code — including for the specific purpose of verifying
+     what this application does with your mail, your passwords and your network connection.
+     Publishing an analysis, a review, or a security finding based on reading this code is
+     expressly permitted.
+
+  3. Build the source for your own personal use, and modify it for that purpose.
+
+  4. Submit contributions back to the project, on the understanding that doing so grants the
+     copyright holder a perpetual, irrevocable licence to use them.
+
+WHAT YOU MAY NOT DO WITHOUT WRITTEN PERMISSION
+
+  5. Redistribute this software or this source code, modified or unmodified, whether or not for
+     payment.
+
+  6. Publish a derivative work, or offer this software as part of a service.
+
+  7. Use the name "Halcyon", the application's icons, or its branding for anything you did not
+     get from the copyright holder.
+
+NO WARRANTY
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+  INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+  PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+  This is a mail client. It stores copies of your mail on your computer and sends mail on your
+  behalf. Keep your own backups; do not rely on this program as the only copy of anything you
+  cannot afford to lose.
+
+THIRD-PARTY COMPONENTS
+
+  This application is built on open source components, each under its own licence — among them
+  Tauri, React, SQLite, and the Rust and npm dependencies listed in `src-tauri/Cargo.toml` and
+  `package.json`. Those licences govern those components and are not affected by this one.
+
+  No Apple font, icon or artwork is included or distributed. Halcyon reproduces an interaction
+  model and a visual style; it does not ship Apple's assets.
+
+CONTACT
+
+  For permission to do anything not listed above, or for any other question about this licence,
+  write to vnikie1@gmail.com.

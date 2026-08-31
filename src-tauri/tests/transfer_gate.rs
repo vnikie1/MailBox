@@ -62,7 +62,7 @@ fn import_sample(name: &str) -> Fixture {
 
     let mut uid = import::next_uid(&tx, mailbox).expect("uid");
     mbox::read(SAMPLE.as_bytes(), |raw| {
-        if import::write_message(&tx, &cache, account, mailbox, uid, raw)
+        if import::write_message(&tx, &cache, account, mailbox, uid, raw, None)
             .expect("write")
             .is_some()
         {
@@ -254,7 +254,7 @@ fn gate_7_export_to_mbox_round_trips_back_through_import() {
 
     let file = std::fs::File::open(&path).expect("open");
     mbox::read(std::io::BufReader::new(file), |raw| {
-        if import::write_message(&tx, &cache2, f.account, second, uid, raw)
+        if import::write_message(&tx, &cache2, f.account, second, uid, raw, None)
             .expect("write")
             .is_some()
         {

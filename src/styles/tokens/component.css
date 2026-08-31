@@ -325,6 +325,7 @@
   --settings-report-max-height: 260px;
   --settings-signature-min-height: 200px;
   --transfer-list-max-height: 220px;
+  --first-run-icon: 18px;
 
   --account-row-height: 44px;
   --account-row-gap: var(--sp-5);

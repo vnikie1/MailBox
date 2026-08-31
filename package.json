@@ -1,7 +1,7 @@
 {
   "name": "halcyon",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "description": "A macOS-Mail-quality email client for Windows 11",
   "scripts": {

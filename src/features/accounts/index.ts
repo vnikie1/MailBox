@@ -7,7 +7,7 @@
  */
 
 export { AccountAssistant, type AccountAssistantProps } from './AccountAssistant'
-export { AccountsGate, type AccountsGateProps } from './AccountsGate'
+export { FirstRun, type FirstRunProps } from './FirstRun'
 export { useAccountsChanged } from './useAccountsChanged'
 export { useAccountsGate, type AccountsGateState } from './useAccountsGate'
 export { AccountsSettings } from './AccountsSettings'

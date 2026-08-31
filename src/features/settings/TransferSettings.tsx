@@ -106,12 +106,13 @@ export function TransferSettings() {
       if (files.length === 0) return
 
       const requests = files.map((file) => ({
-        // The file's own name is the mailbox name. A loose mbox carries no folder structure.
+        // The file's own name is the mailbox name. A loose mbox carries no folder structure —
+        // a .pst does, and the core ignores this for one and uses the tree inside the file.
         path:
           file
             .split(/[\\/]/)
             .pop()
-            ?.replace(/\.mbox$/i, '') ?? 'Imported',
+            ?.replace(/\.(mbox|pst)$/i, '') ?? 'Imported',
         file,
       }))
 
@@ -144,7 +145,8 @@ export function TransferSettings() {
         <p className={styles.hint}>Looking for mail from other programs…</p>
       ) : folders.length === 0 ? (
         <p className={styles.hint}>
-          No Thunderbird mail was found on this machine. You can still choose mbox files yourself.
+          No Thunderbird mail was found on this machine. You can still choose files yourself — an
+          mbox file, or an Outlook .pst.
         </p>
       ) : (
         <>
@@ -185,7 +187,7 @@ export function TransferSettings() {
 
         <Button variant="bordered" disabled={running} onClick={startFileImport}>
           <FolderOpen size={16} aria-hidden />
-          Choose mbox files…
+          Choose files…
         </Button>
       </div>
 
@@ -195,10 +197,11 @@ export function TransferSettings() {
       </p>
 
       <p className={styles.hint}>
-        <strong>Outlook .pst files cannot be imported yet.</strong> A .pst is not a mail file but a
-        database of Outlook&rsquo;s own, and reading one is its own piece of work that has not been
-        done. In the meantime Outlook can save messages as .eml, and an Outlook account can be added
-        here directly under Accounts.
+        <strong>Outlook .pst files can be imported</strong> — choose one with the button above.
+        Folders, dates, senders and which messages you had read all come across. Two things do not:
+        <strong> attachments are not extracted</strong>, and a few older messages store their text
+        in a format that cannot be read here, so those arrive with their subject and sender but no
+        body. Both are counted and reported when the import finishes.
       </p>
 
       <h4 className={styles.legend}>Export</h4>

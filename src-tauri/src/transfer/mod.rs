@@ -1,26 +1,23 @@
 //! Moving mail in and out. docs/06 Phase 11.
 //!
 //! docs/06 asks for import from a Thunderbird profile, an Outlook PST and mbox, and export to
-//! mbox and an `.eml` tree. Four of those five are here.
+//! mbox and an `.eml` tree. All five are here.
 //!
-//! **PST is not**, and the reason is worth writing down rather than leaving as an absence.
-//! A `.pst` is not a mail file; it is a MAPI object store — a pair of B-trees over a paged
-//! heap, holding folders, message objects, recipient tables and attachment tables as numbered
-//! properties. There is no RFC 5322 message anywhere in it to extract. Importing one means
-//! reading the store *and* reconstructing a message from `PR_SUBJECT`, `PR_TRANSPORT_MESSAGE_
-//! HEADERS` where it exists, a recipients table where it does not, and a body that may be
-//! plain, HTML, or RTF compressed with a Microsoft-specific dictionary.
+//! Thunderbird and mbox are one problem: Thunderbird stores mail as mbox files with no
+//! extension, so importing it is finding the files and reading them.
 //!
-//! Microsoft publish `outlook-pst`, a clean-room MS-PST implementation in Rust, which handles
-//! the first half properly. The second half — MAPI properties to a message — is the work, and
-//! it is its own piece rather than a corner of this one. It is not started, and claiming
-//! otherwise in a UI that then imported nothing would be worse than the gap.
+//! **PST is a different problem.** A `.pst` is not a mail file; it is a MAPI object store,
+//! holding messages as numbered properties with no RFC 5322 anywhere inside it. `outlook-pst` —
+//! Microsoft's own clean-room implementation of MS-PST — reads the store; `pst.rs` turns its
+//! properties back into messages. Attachments and RTF-only bodies are not extracted, and both
+//! are counted and shown rather than dropped quietly: an archive that imports looking complete
+//! and is not is the worst thing this code could do.
 //!
-//! What a PST user can do today: Outlook itself exports to `.eml` and can be read over IMAP,
-//! and both of those arrive here through paths that exist. That is a workaround, not a
-//! substitute, and it is written on the import screen rather than left for them to discover.
-
+//! The PST path is also the least tested, and deliberately says so — see `tests/pst_gate.rs`.
+//! The only PST this project has that it did not write itself has no mail in it, so the folder
+//! walk is proven against real Outlook output and the message extraction is not.
 pub mod export;
 pub mod import;
 pub mod mbox;
+pub mod pst;
 pub mod thunderbird;

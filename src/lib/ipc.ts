@@ -99,6 +99,7 @@ import type { CrashReport } from './generated/CrashReport'
 import type { ImportRequest } from './generated/ImportRequest'
 import type { ImportSource } from './generated/ImportSource'
 import type { TransferProgress } from './generated/TransferProgress'
+import type { UpdateStatus } from './generated/UpdateStatus'
 import type { FlagPatch } from './generated/FlagPatch'
 import type { ListQuery } from './generated/ListQuery'
 import type { EmlMessage } from './generated/EmlMessage'
@@ -108,6 +109,7 @@ export type { ImportRequest } from './generated/ImportRequest'
 export type { ImportSource } from './generated/ImportSource'
 export type { TransferProgress } from './generated/TransferProgress'
 export type { TransferResult } from './generated/TransferResult'
+export type { UpdateStatus } from './generated/UpdateStatus'
 export type { MailtoRequest } from './generated/MailtoRequest'
 import type { MailtoRequest } from './generated/MailtoRequest'
 import type { MessageFull } from './generated/MessageFull'
@@ -1092,4 +1094,25 @@ export async function onTransferProgress(
   return listen<TransferProgress>('transfer:progress', (event) => {
     handler(event.payload)
   })
+}
+
+/* --------------------------------------------------------------------- updates */
+
+/**
+ * Whether a newer version exists. Never installs anything.
+ *
+ * The one outbound request this app makes that is not mail: a GET for a static JSON file. The
+ * only thing the server learns is that some address asked — no account, no counts, no
+ * identifier. It is still a request, so it happens when the user asks rather than on a timer.
+ */
+export async function updateCheck(): Promise<UpdateStatus> {
+  if (!runningInTauri) {
+    return { supported: false, available: false, version: null, notes: null, error: null }
+  }
+  return invoke<UpdateStatus>('update_check')
+}
+
+/** Downloads, verifies the signature, installs and relaunches. */
+export async function updateInstall(): Promise<void> {
+  await invoke('update_install')
 }

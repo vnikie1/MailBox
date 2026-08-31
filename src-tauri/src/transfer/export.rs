@@ -228,6 +228,7 @@ mod tests {
                     mailbox,
                     index as u32 + 1,
                     raw.as_bytes(),
+                    None,
                 )
                 .expect("write");
             } else {

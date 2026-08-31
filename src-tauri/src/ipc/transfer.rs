@@ -186,6 +186,25 @@ pub async fn import_run(
             let request = request.clone();
             let cache_root = cache_root.clone();
 
+            // A `.pst` is a different shape of work: it holds a whole folder tree rather than
+            // one mailbox, and its reader is not `Send`, so it cannot run inside the writer's
+            // closure. It gets its own path.
+            if is_pst(&request.file) {
+                match import_pst(&db, &cache_root, &request.file).await {
+                    Ok((written, unreadable)) => {
+                        messages += written;
+                        skipped += unreadable;
+                        folders += 1;
+                    }
+                    Err(error) => {
+                        tracing::warn!(file = %request.file, %error, "a .pst could not be imported");
+                        skipped += 1;
+                        failure.get_or_insert_with(|| error.to_string());
+                    }
+                }
+                continue;
+            }
+
             // One transaction per folder. See the module note.
             let outcome = db
                 .write(move |tx| {
@@ -200,7 +219,15 @@ pub async fn import_run(
                     let mut written = 0usize;
 
                     let counts = mbox::read(reader, |raw| {
-                        match import::write_message(tx, &cache_root, account, mailbox, uid, raw) {
+                        match import::write_message(
+                            tx,
+                            &cache_root,
+                            account,
+                            mailbox,
+                            uid,
+                            raw,
+                            None,
+                        ) {
                             Ok(Some(_)) => {
                                 written += 1;
                                 uid += 1;
@@ -342,6 +369,120 @@ pub async fn export_run(
     Ok(())
 }
 
+/// True for a file that should be read as an Outlook store rather than as mbox.
+fn is_pst(file: &str) -> bool {
+    std::path::Path::new(file)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pst"))
+}
+
+/// How many messages are held before being written.
+///
+/// The reader produces them faster than SQLite takes them, and one transaction per message
+/// would turn an archive of fifty thousand into fifty thousand commits. Two hundred is small
+/// enough that a failure loses little and large enough that the commit cost disappears.
+const PST_BATCH: usize = 200;
+
+/// Imports one `.pst`.
+///
+/// ## Why a channel
+///
+/// `outlook-pst` hands back `Rc`-shaped objects, which are deliberately not `Send`: the store,
+/// its folders and its messages all share one file handle and one cache. The database writer is
+/// on its own thread and takes a `Send` closure, so the two cannot be in the same scope.
+///
+/// So the reader runs on a blocking thread and pushes finished messages — plain owned bytes,
+/// which *are* `Send` — down a bounded channel. The bound matters: an unbounded one would let a
+/// ten-gigabyte archive be read into memory faster than it could be written, which is the same
+/// out-of-memory failure the mbox reader streams to avoid.
+async fn import_pst(
+    db: &Db,
+    cache_root: &std::path::Path,
+    file: &str,
+) -> Result<(usize, usize), String> {
+    use crate::transfer::pst;
+
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<pst::Extracted>(PST_BATCH * 2);
+
+    let path = std::path::PathBuf::from(file);
+    let reader = tauri::async_runtime::spawn_blocking(move || {
+        pst::read(&path, |message| {
+            // The receiver going away means the import was abandoned; stopping is correct.
+            sender
+                .blocking_send(message)
+                .map_err(|_| std::io::Error::other("the import was stopped"))
+        })
+    });
+
+    let mut written = 0usize;
+    let mut batch: Vec<pst::Extracted> = Vec::with_capacity(PST_BATCH);
+
+    loop {
+        let got = receiver.recv().await;
+        let finished = got.is_none();
+
+        if let Some(message) = got {
+            batch.push(message);
+        }
+
+        if batch.len() >= PST_BATCH || (finished && !batch.is_empty()) {
+            let work = std::mem::take(&mut batch);
+            let cache_root = cache_root.to_path_buf();
+
+            written += db
+                .write(move |tx| {
+                    let account = import::local_account(tx, "On My PC")?;
+                    let mut touched: Vec<i64> = Vec::new();
+                    let mut count = 0usize;
+
+                    for message in work {
+                        let mailbox = import::mailbox_for(tx, account, &message.path)?;
+                        let uid = import::next_uid(tx, mailbox)?;
+
+                        // Read state comes from a MAPI property rather than from the headers,
+                        // so it is handed over explicitly — the synthesised message has no
+                        // header that carries it.
+                        if import::write_message(
+                            tx,
+                            &cache_root,
+                            account,
+                            mailbox,
+                            uid,
+                            &message.raw,
+                            Some(message.seen),
+                        )?
+                        .is_some()
+                        {
+                            count += 1;
+                        }
+
+                        if !touched.contains(&mailbox) {
+                            touched.push(mailbox);
+                        }
+                    }
+
+                    import::finish(tx, account, &touched)?;
+                    Ok(count)
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+
+        if finished {
+            break;
+        }
+    }
+
+    let counts = reader
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+
+    // Everything the reader could not do, reported as skipped rather than quietly dropped. An
+    // archive that imports looking complete and is not is the one failure this must never have.
+    Ok((written, counts.failed + counts.rtf_only))
+}
 #[cfg(test)]
 mod tests {
     use super::*;

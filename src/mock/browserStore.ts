@@ -704,6 +704,12 @@ function overlayFor(id: number, fallbackName: string, index: number): AccountOve
 }
 
 export function accountsDetail(): AccountDetail[] {
+  // `?first-run=1` empties the account list, which is the one state the seeded browser store
+  // cannot otherwise reach: it starts with three accounts, and first run is defined by having
+  // none. Only the browser path has this — the packaged app has a real database, where the
+  // state arrives by being a fresh install.
+  if (new URLSearchParams(window.location.search).has('first-run')) return []
+
   const store = current()
 
   return store.accounts

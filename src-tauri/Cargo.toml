@@ -1,6 +1,6 @@
 [package]
 name = "halcyon"
-version = "0.1.0"
+version = "1.0.0"
 description = "A macOS-Mail-quality email client for Windows 11"
 edition = "2021"
 rust-version = "1.82"
@@ -124,6 +124,13 @@ tauri-winrt-notification = "0.7.3"
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-single-instance = "2.4.3"
+tauri-plugin-updater = { version = "2", optional = true }
+# Outlook .pst import. A clean-room MS-PST implementation published by Microsoft: it reads the
+# object store — the B-trees, the heap, the property and table contexts — and hands back MAPI
+# properties. Turning those into a message is ours; see transfer::pst for why that is the
+# harder half.
+outlook-pst = "1.2"
+
 
 [profile.dev]
 incremental = true
@@ -146,6 +153,13 @@ name = "seed"
 path = "src/bin/seed.rs"
 
 [features]
+# Store builds turn the updater off. The Microsoft Store installs updates itself, and two
+# update mechanisms fighting produces duplicate installs and fails certification — docs/07
+# §2.3. Build the Store package with `--no-default-features --features store`.
+default = ["self-update"]
+self-update = ["dep:tauri-plugin-updater"]
+store = []
+
 # The twelve-hour soak. Behind a feature so an ordinary `cargo test` does not try to *link* it
 # — while a soak is running, its own binary is locked and the linker fails with LNK1104, which
 # stops `npm run verify` for a reason that has nothing to do with the change being verified.

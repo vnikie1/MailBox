@@ -1,69 +1,127 @@
-# macOS-Mail-quality email client for Windows 11
+# Halcyon
 
-Planning workspace for a Windows 11 desktop email client that reproduces the look, feel and
-interaction model of **macOS Mail** — because nothing on Windows is pleasant to use for hours
-a day, and Mail is.
+A desktop email client for Windows 11, built to feel like macOS Mail.
 
-Phase 0 (the window shell) is scaffolded. See [docs/PHASE-0-VERIFICATION.md](docs/PHASE-0-VERIFICATION.md)
-for what is verified, what is blocked, and why.
+Nothing on Windows is pleasant to use for hours a day. Mail is. Halcyon reproduces its layout,
+its typography and — the part everything else rests on — its restraint: three panes, no
+inspector, no ribbon, no adverts, nothing asking to be noticed.
 
----
-
-## Read in this order
-
-| #   | File                                                             | What it is                                                                                                                                                      |
-| --- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| —   | **[PROMPT.md](PROMPT.md)**                                       | **The master build prompt.** Paste into a fresh coding session to start the project. Contains the role, standing rules, definition of done, and start sequence. |
-| 1   | [docs/01-macos-mail-analysis.md](docs/01-macos-mail-analysis.md) | Full teardown of macOS Mail — layout, measurements, every surface, states, motion, typography, colour, keyboard model, and what makes it feel good.             |
-| 2   | [docs/02-design-system.md](docs/02-design-system.md)             | Paste-ready design tokens (colour, type, space, motion, materials) and per-component specs. The visual source of truth.                                         |
-| 3   | [docs/03-architecture.md](docs/03-architecture.md)               | Stack decision, process model, SQLite schema, IPC contract, IMAP sync engine, security model, Windows integration, testing, packaging.                          |
-| 4   | [docs/04-roadmap.md](docs/04-roadmap.md)                         | 12 phases with objective exit gates. ~12 weeks to v1.                                                                                                           |
-| 5   | [docs/05-risks-and-legal.md](docs/05-risks-and-legal.md)         | Long-lead blockers: Gmail OAuth verification, code signing, font licensing, IMAP reality checks. **Read before Phase 4.**                                       |
-| 6   | [docs/06-prompt-library.md](docs/06-prompt-library.md)           | One ready-to-paste prompt per phase, plus utility prompts for fidelity, performance and security audits.                                                        |
-| 7   | [docs/07-distribution.md](docs/07-distribution.md)               | Installers, code signing, and the full Microsoft Store / MSIX submission process. **Start §2 at Phase 9.**                                                      |
+Your mail lives on your computer. There is no Halcyon account, no server of ours between you
+and your provider, and no analytics of any kind.
 
 ---
 
-## The short version
+## What it does
 
-- **Stack:** Tauri 2 + Rust core + React 19 + TypeScript + Vite. No CSS framework, no component
-  library — hand-written CSS over a strict three-tier token system.
-- **Rust core** owns all protocol work: `async-imap`, `mail-parser`, `lettre`, SQLite + FTS5,
-  Windows Credential Manager, OAuth 2.0 PKCE.
-- **Local-first.** The UI only ever reads and writes SQLite. Every mutation is optimistic with
-  a durable pending-operation queue. Deleting a message is instant.
-- **Safe by default.** Bodies render in a script-free sandboxed iframe, remote content blocked,
-  credentials in Credential Manager, no telemetry.
-- **~12 weeks to v1.** Critical path is Phase 2 (does it look right?) and Phase 5 (does sync
-  actually work?).
+- **Any IMAP account.** Gmail, Outlook, iCloud and Yahoo are recognised and set up for you;
+  anything else takes a hostname. OAuth accounts sign in through your real browser, never
+  through a window this app drew.
+- **Reads offline.** Mail is downloaded and indexed locally, so search and reading work with no
+  connection.
+- **Search that means something.** Full text across every account, with `from:`, `subject:`,
+  `has:attachment` and date ranges, over a hundred thousand messages without waiting.
+- **Rules, smart mailboxes, VIPs, junk filtering** — the organising machinery Mail has, running
+  locally.
+- **Undo.** Archive, move, delete, flag, mark read, run rules: <kbd>Ctrl</kbd>+<kbd>Z</kbd> puts
+  it back. Send has a hold you can cancel.
+- **Import** from Thunderbird and mbox, **export** to mbox or a folder of `.eml` files. Your
+  mail is yours and you can leave with it.
+- **Keyboard throughout**, and a screen reader can drive it.
+
+## What it deliberately does not do
+
+- No telemetry, no analytics, no crash uploads, no "anonymous usage data".
+- No account to create, no subscription, no cloud service.
+- No AI features reading your mail.
+- No Outlook `.pst` import yet — see [Known gaps](#known-gaps).
 
 ---
 
-## Before you start Phase 2
+## Installing
 
-Put real macOS Mail screenshots in `assets/reference/`. Without them, "pixel-perfect" is
-unverifiable. Capture at minimum:
+Download the installer from [Releases](https://github.com/vnikie1/MailBox/releases), or install
+from the Microsoft Store.
 
+> **Windows may warn you the first time.** Until the certificate has been seen by enough
+> machines, SmartScreen shows "Windows protected your PC" for a downloaded installer. Choose
+> **More info → Run anyway**. The Store version never shows this.
+
+Windows 11, 64-bit. The WebView2 runtime is required and is already present on Windows 11.
+
+---
+
+## Where your data is
+
+| | |
+|---|---|
+| Mail, search index, settings | `%LOCALAPPDATA%\com.uniki.halcyon` |
+| Passwords and tokens | Windows Credential Manager — never in the database, never in a file |
+| Logs and crash reports | `%LOCALAPPDATA%\com.uniki.halcyon\diagnostics` |
+| Window size and position | `%APPDATA%\com.uniki.halcyon` |
+
+The database is **not encrypted**. Anything that can read your user profile can read your mail,
+which is also true of every other desktop mail client. Full-disk encryption — BitLocker — is
+what protects it at rest, and it is worth checking that it is on.
+
+Uninstalling offers to remove all of it. Declining leaves the folders above untouched.
+
+---
+
+## Building it
+
+```bash
+npm install
+npm run app:dev      # the app, with hot reload
+npm run verify       # the full gate: format, lint, types, unit, e2e, rust, clippy
 ```
-light-3pane.png          dark-3pane.png
-light-2pane.png          dark-sidebar-collapsed.png
-thread-expanded.png      compose-window.png
-search-with-tokens.png   message-with-attachments.png
-list-unread-and-flagged.png    contact-popover.png
-```
 
-Capture on a Retina display, note the window width in the filename, and don't scale them.
+`npm run verify` must be clean before anything is committed. It will fail while `npm run
+app:dev` is running, because the running app holds the binary that `cargo test` needs to
+relink.
+
+**Stack:** Tauri 2, a Rust core, React 19 and TypeScript. No CSS framework and no component
+library — the interface is hand-written CSS Modules over a three-tier token layer. The UI only
+ever reads and writes the local database; the Rust core owns every byte that touches a network.
+
+`CLAUDE.md` has the working rules and the traps. `docs/` has the specifications:
+
+| | |
+|---|---|
+| `docs/01` | What macOS Mail actually does, measured |
+| `docs/02` | The design system — every token and component |
+| `docs/03` | Architecture, the IPC contract, performance budgets |
+| `docs/04` | The roadmap and its phase gates |
+| `docs/05` | Risks, and what the law says about copying an interface |
+| `docs/06` | The prompt library each phase was built from |
+| `docs/07` | Packaging, signing and Store submission |
+
+`CHANGELOG.md` records what was built and, more usefully, what broke and why.
 
 ---
 
-## Open decisions
+## Known gaps
 
-Answer these before Phase 0 — they change the plan (see `docs/05` §9):
+- **Outlook `.pst` import.** A `.pst` is not a mail file; it is a database of Outlook's own,
+  holding messages as numbered properties with no standard message anywhere inside it. Reading
+  the store is a solved problem; turning its contents back into messages is a separate piece of
+  work that has not been done. Outlook can save messages as `.eml`, and an Outlook account can
+  be added here over IMAP.
+- **Exchange without IMAP.** Some corporate tenants disable IMAP. There is no MAPI or
+  Exchange Web Services support, and there are no plans for one.
+- **Pixel fidelity is unverified.** `assets/reference/` is empty, so no claim here that Halcyon
+  matches Mail exactly has been checked against a screenshot.
 
-1. App name and icon.
-2. Personal use only, or public distribution? (Changes the legal, OAuth and signing story
-   substantially.)
-3. Which providers must work at v1? Default assumption: Gmail + generic IMAP first, then
-   Outlook and iCloud.
-4. Open source or not? An OSS build cannot embed an OAuth client secret, so it must ship
-   bring-your-own-credentials.
+---
+
+## Security and privacy
+
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability.
+- [PRIVACY.md](PRIVACY.md) — what leaves this machine, which is very nearly nothing.
+
+## Licence
+
+Copyright © 2026 Vishal Singh. All rights reserved. See [LICENSE](LICENSE).
+
+The source is published so that anyone can check the claims above — particularly the ones about
+where passwords go and what is sent over the network. That is not the same as permission to
+redistribute it; see the licence for what you may do.

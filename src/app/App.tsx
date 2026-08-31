@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-import { AccountsGate, useAccountsGate } from '@/features/accounts'
+import { FirstRun, useAccountsGate } from '@/features/accounts'
 import { OutboxBanner } from '@/features/outbox/OutboxBanner'
 import { AppShell } from '@/features/shell/AppShell'
 import { ToastProvider } from '@/ui'
@@ -54,7 +54,7 @@ function Shell() {
       <OutboxBanner />
 
       {/* Inside the provider, because the assistant reports what it did with a toast. */}
-      <AccountsGate firstRun={firstRun} />
+      <FirstRun firstRun={firstRun} />
     </ToastProvider>
   )
 }

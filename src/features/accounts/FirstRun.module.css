@@ -1,0 +1,74 @@
+/* Welcome and done. docs/06 Phase 11. */
+
+.sheet {
+  width: var(--assistant-width);
+  max-width: var(--assistant-width);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+/* The one paragraph somebody actually reads. Measured, because a line that runs the full width
+   of the sheet is hard to track back to the start of the next one. */
+.lead {
+  max-width: var(--measure-prose);
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+}
+
+.points {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.points li {
+  display: grid;
+  grid-template-columns: var(--first-run-icon) 1fr;
+  gap: var(--sp-4);
+  align-items: start;
+  max-width: var(--measure-prose);
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+}
+
+.icon {
+  width: var(--first-run-icon);
+  height: var(--first-run-icon);
+  color: var(--accent);
+}
+
+/* A keyboard shortcut, drawn as a key. Same shape the Help sheet uses. */
+.key {
+  display: inline-block;
+  min-width: var(--key-cap-min);
+  padding: 0 var(--sp-2);
+  color: var(--label-1);
+  font-family: inherit;
+  font-size: var(--t-caption-size);
+  text-align: center;
+  background: var(--fill-hover);
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--r-sm);
+}
+
+.timing {
+  margin: 0;
+  color: var(--label-3);
+  font-size: var(--t-footnote-size);
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-3);
+  justify-content: flex-end;
+}
