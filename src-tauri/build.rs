@@ -31,7 +31,14 @@ fn main() {
         Path::new("capabilities/updater.json"),
     );
 
-    tauri_build::build()
+    // The embedded Win32 manifest. Supplied rather than left to the default, because the
+    // default carries no DPI awareness and no execution level — see halcyon.exe.manifest for
+    // what each element is doing and which App Certification Kit findings prompted it.
+    let attributes = tauri_build::Attributes::new().windows_attributes(
+        tauri_build::WindowsAttributes::new().app_manifest(include_str!("halcyon.exe.manifest")),
+    );
+
+    tauri_build::try_build(attributes).expect("failed to run tauri-build")
 }
 
 /// Copies an optional capability into place when its feature is on, and removes it when it is not.

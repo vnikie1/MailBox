@@ -138,19 +138,69 @@ $overall = $xml.REPORT.OVERALL_RESULT
 "=============================================="
 ""
 
-$failures = $xml.SelectNodes('//*[@RESULT="FAIL"]')
+# The verdict, read through InnerText.
+#
+# It is a child ELEMENT wrapped in CDATA — <RESULT><![CDATA[FAIL]]></RESULT> — not an
+# attribute. Two things went wrong here in turn: looking for @RESULT matched nothing and
+# printed "No failures" under a banner reading OVERALL: FAIL, and then $test.RESULT read the
+# element rather than its text and matched nothing either. A summary that contradicts itself
+# is worse than no summary, because one of the two lines gets believed.
+function Verdict($test) {
+  $node = $test.SelectSingleNode('RESULT')
+  if ($node) { $node.InnerText.Trim() } else { '' }
+}
+
+$tests = $xml.SelectNodes('//TEST')
+$failures = @($tests | Where-Object { (Verdict $_) -eq 'FAIL' })
+$warnings = @($tests | Where-Object { (Verdict $_) -eq 'WARNING' })
+$passed = @($tests | Where-Object { (Verdict $_) -eq 'PASS' })
+
+"$($tests.Count) tests: $($passed.Count) passed, $($failures.Count) failed, $($warnings.Count) warned"
+""
+
 if ($failures.Count -eq 0) {
   "No failures. Every failure here is a guaranteed Store rejection, so none is what you want."
 } else {
-  "$($failures.Count) failure(s) — each one is a guaranteed rejection:"
+  # Grouped by message. When WACK cannot read a package at all it fails almost everything with
+  # one underlying cause, and a flat list of twenty-two names reads like twenty-two problems.
+  "Failures, grouped by what they actually say:"
   ""
-  foreach ($failure in $failures) {
-    $name = $failure.GetAttribute('NAME')
-    if (-not $name) { $name = $failure.LocalName }
-    "  - $name"
-    $message = $failure.SelectSingleNode('.//MESSAGE')
-    if ($message) { "      $($message.InnerText.Trim())" }
+
+  $groups = $failures | Group-Object {
+    $first = $_.SelectSingleNode('.//MESSAGE')
+    if ($first) { $first.GetAttribute('TEXT') -replace '\s+', ' ' } else { '(no message)' }
   }
+
+  foreach ($group in $groups | Sort-Object Count -Descending) {
+    $message = $group.Name
+    if ($message.Length -gt 160) { $message = $message.Substring(0, 160) + '...' }
+    "  [$($group.Count)] $message"
+    foreach ($test in $group.Group) {
+      $required = if ($test.GetAttribute('OPTIONAL') -eq 'TRUE') { 'optional' } else { 'REQUIRED' }
+      "        - $($test.GetAttribute('NAME'))  ($required)"
+    }
+    ""
+  }
+
+  if ($groups.Count -eq 1 -or ($groups | Sort-Object Count -Descending)[0].Count -gt 5) {
+    "Most or all of these share one cause. Before treating them as separate problems, check"
+    "that the package is genuinely INSTALLED rather than registered from a loose folder —"
+    "`Get-AppxPackage Unikie1.HalcyonMail` should show an InstallLocation under WindowsApps."
+    "A loose registration makes WACK report that it cannot find the manifest, and then fail"
+    "everything downstream of that."
+    ""
+  }
+}
+
+if ($warnings.Count -gt 0) {
+  "Warnings (not rejections, but worth reading):"
+  foreach ($warning in $warnings) {
+    "  - $($warning.GetAttribute('NAME'))"
+    foreach ($message in $warning.SelectNodes('.//MESSAGE')) {
+      "      $($message.GetAttribute('TEXT'))"
+    }
+  }
+  ""
 }
 
 ""

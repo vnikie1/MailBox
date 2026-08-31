@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  The Win32 application manifest, embedded into Halcyon.exe.
+
+  ## Why this file exists
+
+  The App Certification Kit flagged two things, and both were real:
+
+    "The app is not DPI Aware."
+    "Windows applications must have a manifest defining its execution level."
+
+  The first is the interesting one, because the app *is* DPI-aware — wry calls
+  `SetProcessDpiAwarenessContext` while it starts, which is why the window measures in real
+  physical pixels on a 200% display. But that is a call made *after* the process begins. Until it
+  runs, Windows believes the process is DPI-unaware, and anything it does in that window — the
+  size it thinks the screen is, the first frame it paints — is computed against a virtualised
+  desktop and then bitmap-stretched.
+
+  Declaring it here makes it true from process creation instead of shortly afterwards. For a
+  text-heavy application on a high-DPI laptop, the difference is whether the first thing anybody
+  sees is sharp.
+
+  ## What each element is for
+
+  * `dpiAwareness = PerMonitorV2` — the modern one: the app is told when it moves between
+    monitors of different scale and re-lays-out, rather than being stretched. `dpiAware = true/PM`
+    is the legacy fallback for Windows 8.1 and is read only when the first is not understood.
+  * `requestedExecutionLevel asInvoker` — run as whoever started it, and never ask for
+    administrator. A mail client has no business being elevated, and `uiAccess="false"` says it
+    does not need to drive other applications' windows either.
+  * `longPathAware` — paths longer than 260 characters. A mail client writes files named after
+    attachments, in a folder the user chose; both halves of that can be long, and the failure
+    without this is a save that silently does nothing.
+  * `activeCodePage = UTF-8` — the process code page. Mail is full of non-ASCII, and any Win32
+    API called with an `A` suffix anywhere in a dependency would otherwise interpret bytes in the
+    machine's legacy code page.
+  * The `compatibility` GUIDs say which Windows versions this was tested against. Without them
+    Windows applies shims for behaviour that changed in Vista, which is not what anyone wants.
+-->
+
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="com.uniki.halcyon" version="1.0.0.0" />
+
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and 11 share this GUID. -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+      <!-- 8.1, 8, 7 and Vista, in that order. Halcyon requires Windows 11 and will not start on
+           these, but declaring them is what stops the compatibility shims being applied. -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}" />
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}" />
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}" />
+      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}" />
+    </application>
+  </compatibility>
+
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>

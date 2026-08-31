@@ -3060,3 +3060,54 @@ manifest — which is also the fastest loop for changing the manifest and seeing
 - The package is left installed, registered against the staging folder. `Remove-AppxPackage
 (Get-AppxPackage *Halcyon*).PackageFullName` removes it; the unpackaged dev build is unaffected
   either way, since both use the same database.
+
+---
+
+## 2026-08-31 (late) — Phase 11: what the App Certification Kit said
+
+### Added
+
+- **`src-tauri/halcyon.exe.manifest`**, embedded through `build.rs`. Declares `PerMonitorV2` DPI
+  awareness, `asInvoker` execution level, `longPathAware`, and UTF-8 as the process code page.
+
+### Fixed
+
+- **The app was DPI-aware slightly too late.** WACK reported "The app is not DPI Aware", and it
+  was half right: wry calls `SetProcessDpiAwarenessContext` while starting, which is why a window
+  measures in real physical pixels on a 200% display — but that call happens _after_ the process
+  begins. Until it runs, Windows believes the process is unaware, and anything computed in that
+  window is done against a virtualised desktop and then bitmap-stretched. The binary had no
+  `dpiAware` element and no `trustInfo` at all. Declaring both in an embedded manifest makes it
+  true from process creation, and clears the DPI warning and the UAC run-level test together.
+
+- **`run-wack.ps1` would have reported "No failures" under a banner reading OVERALL: FAIL.** Each
+  verdict is a child element wrapped in CDATA — `<RESULT><![CDATA[FAIL]]></RESULT>` — not an
+  attribute. The first version matched on `@RESULT`, found nothing, and concluded all was well;
+  the second read the element rather than its text and matched nothing either. A summary that
+  contradicts itself is worse than none, because one of the two lines gets believed. It now reads
+  `InnerText`, and was verified against the real failing report rather than by inspection.
+
+- **The failure summary groups by message.** Twenty-two failures with one underlying cause read
+  as twenty-two problems in a flat list; grouped, they read as the three they are. It also says
+  so explicitly when one cause dominates, and names the likely reason.
+
+### Incidents
+
+- **The first WACK run failed 22 of 24 tests, and none of them was the app's fault.** The package
+  had been sideloaded with `Add-AppxPackage -Register`, which points at a loose folder. That runs
+  perfectly well — it synced real mail — but WACK does not consider it installed: it reported
+  "The manifest file for this app package could not be found", "The platform metadata directory
+  does not exist", and empty metadata (`APP_NAME=""`, `APP_VERSION=""`), then failed everything
+  downstream of that.
+
+  `make-msix.ps1 -Test` now signs the package, trusts the certificate — asking for elevation for
+  that step only, so the build itself never runs as administrator and `target/` keeps its
+  ownership — removes any previous copy, and installs the real `.msix`. It warns if the result is
+  not under `WindowsApps`, which is the one observable difference between the two.
+
+### Notes
+
+- Informational, not a failure: WACK notes that the binary references `CreateProcessW` and
+  `ShellExecuteW`. Both are real and both are wanted — opening the diagnostics folder in Explorer,
+  and opening the system browser for OAuth, which docs/03 requires rather than an embedded
+  WebView. The test is optional and the references are expected for a `runFullTrust` app.

@@ -183,21 +183,53 @@ if ($Test) {
 
   & $signtool sign /fd SHA256 /a /f $pfx /p 'halcyon-test' $package
   if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+  "signed for sideloading"
+
+  # Trusting the certificate writes to LocalMachine, which needs elevation; installing the
+  # package does not. Only the first half is handed to a UAC prompt, so the build stays
+  # unelevated — a release build run as administrator leaves target/ owned by the wrong user.
+  $trusted = Get-ChildItem Cert:\LocalMachine\TrustedPeople -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq $subject }
+
+  if (-not $trusted) {
+    "trusting the test certificate - approve the prompt"
+    $import = "Import-PfxCertificate -FilePath '$pfx' -CertStoreLocation Cert:\LocalMachine\TrustedPeople -Password (ConvertTo-SecureString 'halcyon-test' -AsPlainText -Force) | Out-Null"
+    Start-Process powershell -Verb RunAs -Wait -ArgumentList @('-NoProfile', '-Command', $import)
+  }
+
+  # Remove any earlier copy first. A package registered from a loose folder — `Add-AppxPackage
+  # -Register` — is NOT the same thing as an installed one, and leaving it in place is what
+  # makes the App Certification Kit report "The manifest file for this app package could not be
+  # found" and then fail twenty-two tests that have nothing wrong with them.
+  $existing = Get-AppxPackage Unikie1.HalcyonMail -ErrorAction SilentlyContinue
+  if ($existing) {
+    "removing the previous install ($($existing.PackageFullName))"
+    Remove-AppxPackage $existing.PackageFullName
+  }
+
+  Add-AppxPackage $package
+  $installed = Get-AppxPackage Unikie1.HalcyonMail
 
   ""
-  "Signed for sideloading. To trust and install:"
-  "  Import-PfxCertificate -FilePath '$pfx' -CertStoreLocation Cert:\LocalMachine\TrustedPeople -Password (ConvertTo-SecureString 'halcyon-test' -AsPlainText -Force)   # needs elevation"
-  "  Add-AppxPackage '$package'"
+  "installed  : $($installed.PackageFullName)"
+  "from       : $($installed.InstallLocation)"
+  ""
+
+  if ($installed.InstallLocation -notlike '*WindowsApps*') {
+    "WARNING: this is not installed under WindowsApps, so it is a loose registration rather"
+    "         than a real install. The App Certification Kit cannot read those."
+  } else {
+    "A real install, so the App Certification Kit can read it. Run:"
+    "  powershell -ExecutionPolicy Bypass -File tools\run-wack.ps1"
+  }
+
   ""
   "Then check the things MSIX changes, per docs/07 2.6:"
-  "  - the database lands in the redirected path and survives a restart"
+  "  - the database is where you expect and survives a restart"
   "  - OAuth tokens still resolve from Credential Manager"
   "  - toasts fire with the package AUMID Unikie1.HalcyonMail_anw48tyhk74bp!Halcyon"
   "  - a mailto: link opens the app"
   "  - Settings > Apps > Startup lists Halcyon, off"
-  ""
-  "And run the Windows App Certification Kit before submitting. A WACK failure is a"
-  "guaranteed rejection."
 } else {
   ""
   "Unsigned, which is what the Store wants — Microsoft signs it on ingestion."
