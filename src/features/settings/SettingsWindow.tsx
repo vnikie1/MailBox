@@ -8,7 +8,7 @@ import { ComposingSettings } from '@/features/compose/ComposingSettings'
 import { JunkSettings } from '@/features/organise/JunkSettings'
 import { OrganiseSettings } from '@/features/organise/OrganiseSettings'
 import { ReadingSettings } from '@/features/reader/ReadingSettings'
-import { onSettingsPane, type SettingsPane } from '@/lib/ipc'
+import { onSettingsPane, setWindowTitle, type SettingsPane } from '@/lib/ipc'
 import { ToastProvider } from '@/ui'
 
 import { AdvancedSettings } from './AdvancedSettings'
@@ -68,10 +68,15 @@ function Panes() {
 
   useEffect(() => {
     const label = PANES.find((entry) => entry.id === pane)?.label
-    // The title carries the pane, as a Windows settings window does. It is also what the
-    // taskbar and Alt-Tab show, which is the difference between one of several open windows
-    // being findable and not.
-    document.title = label === undefined ? 'Settings' : `${label} — Settings`
+    const title = label === undefined ? 'Settings' : `${label} — Settings`
+
+    // Both, and they are not the same thing. `document.title` is the WebView's title and is
+    // what the browser path shows; the OS window keeps whatever the builder gave it until it
+    // is told otherwise. Setting only the first looked right in Playwright and left the real
+    // window reading "Settings" for ever — checked by walking the UIA tree, where the window's
+    // Name is the OS title.
+    document.title = title
+    void setWindowTitle(title)
   }, [pane])
 
   return (

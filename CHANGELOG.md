@@ -2685,12 +2685,35 @@ Settings window.
   "clean install on a fresh Windows 11 VM with **no SmartScreen warning**", and without a
   certificate every download shows "Windows protected your PC" and Smart App Control blocks the
   installer outright with no override. Only the owner can start this.
-- **The Settings window has not been seen in the real Tauri window.** RivaTuner Statistics Server
-  is running on this machine and WebView2 refuses to start under it — `0x80070057`, then a panic
-  in Tauri's setup hook. RTSS runs elevated and cannot be stopped from an ordinary shell. The
-  browser path is fully covered by the e2e suite; what is _not_ covered from there is whether
-  Tauri creates the window, and whether adding `settings` to `capabilities/default.json` is
-  correct — a missing capability entry denies every IPC call **silently**. That check is
-  outstanding.
 - Still to build: import and export, the first-run welcome, installer artwork, NSIS/MSIX and
   signing, the auto-updater, README, licence and privacy policy.
+
+### Verified in the running window — 2026-08-31
+
+RivaTuner was closed, so the checks the browser cannot make were made against the real app by
+driving it from PowerShell and reading the UI Automation tree — the same tree Narrator reads.
+
+- `Ctrl+,` opens Settings as a real OS window. All seven panes in the tree; **zero interactive
+  elements without an accessible name.**
+- **The capability entry is right.** This was the check that mattered, because a window missing
+  from `capabilities/default.json` has every core call denied with no error, no console message
+  and no log line. The Accounts pane returned the real account over IPC, and the Advanced pane
+  returned the crash reports.
+- **A theme changed in Settings repaints the mailbox behind it.** Measured rather than asserted:
+  average brightness of a strip of the mailbox clear of the Settings window went 243.9 → 31.2
+  between Light and Dark. This is the one mechanism the Playwright run cannot reach, since a
+  second OS window is a second React root sharing nothing but `localStorage`.
+- **Reopening moves the existing window rather than opening a second one**, and brings it to the
+  front.
+- **The crash reporting works on a crash nobody staged.** The two RTSS-induced startup panics
+  from the night before were already on disk as full reports with backtraces, and the Advanced
+  pane listed and opened them. That is the whole feature working end to end on a real failure,
+  which no test could have arranged.
+
+### Fixed — 2026-08-31
+
+- **The Settings window's title never changed.** Setting `document.title` names the WebView; the
+  OS window keeps whatever the builder gave it until told otherwise, so the title bar read
+  "Settings" for ever while the code — and its comment claiming the title carries the pane —
+  said otherwise. It now calls `setTitle` as well. Found by reading the window's Name in the UIA
+  tree; Playwright had passed, because in a browser `document.title` _is_ the title.

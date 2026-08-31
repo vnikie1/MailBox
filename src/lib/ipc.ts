@@ -1016,3 +1016,15 @@ export async function diagnosticsReveal(): Promise<void> {
   if (!runningInTauri) return
   await invoke('diagnostics_reveal')
 }
+
+/**
+ * Renames this OS window.
+ *
+ * Separate from `document.title`, which only names the WebView. Tauri gives a window its title
+ * at build time and does not track the document's, so a window that wants its title to follow
+ * what is on screen has to say so. `core:window:allow-set-title` is already granted.
+ */
+export async function setWindowTitle(title: string): Promise<void> {
+  if (!runningInTauri) return
+  await getCurrentWindow().setTitle(title)
+}
