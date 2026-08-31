@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "Checking for and installing an update. Its own file, not part of the default capability, because a Microsoft Store build does not have the updater plugin compiled in at all — and a capability naming a permission that does not exist is a build error, not a warning. tauri.store.conf.json selects the capability set without this one. The permission is check-and-install only: the endpoint and the public key every update is verified against are fixed in tauri.conf.json and cannot be chosen by the WebView.",
+  "windows": ["main", "settings"],
+  "permissions": ["updater:default"]
+}

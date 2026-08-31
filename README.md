@@ -24,8 +24,8 @@ and your provider, and no analytics of any kind.
   locally.
 - **Undo.** Archive, move, delete, flag, mark read, run rules: <kbd>Ctrl</kbd>+<kbd>Z</kbd> puts
   it back. Send has a hold you can cancel.
-- **Import** from Thunderbird and mbox, **export** to mbox or a folder of `.eml` files. Your
-  mail is yours and you can leave with it.
+- **Import** from Thunderbird, mbox and Outlook `.pst`; **export** to mbox or a folder of
+  `.eml` files. Your mail is yours and you can leave with it.
 - **Keyboard throughout**, and a screen reader can drive it.
 
 ## What it deliberately does not do
@@ -33,7 +33,6 @@ and your provider, and no analytics of any kind.
 - No telemetry, no analytics, no crash uploads, no "anonymous usage data".
 - No account to create, no subscription, no cloud service.
 - No AI features reading your mail.
-- No Outlook `.pst` import yet — see [Known gaps](#known-gaps).
 
 ---
 
@@ -101,11 +100,11 @@ ever reads and writes the local database; the Rust core owns every byte that tou
 
 ## Known gaps
 
-- **Outlook `.pst` import.** A `.pst` is not a mail file; it is a database of Outlook's own,
-  holding messages as numbered properties with no standard message anywhere inside it. Reading
-  the store is a solved problem; turning its contents back into messages is a separate piece of
-  work that has not been done. Outlook can save messages as `.eml`, and an Outlook account can
-  be added here over IMAP.
+- **Outlook `.pst` import is the least tested thing here.** It works — folders, dates, senders
+  and read state all come across — but attachments are not extracted, some older messages store
+  their text in a format that cannot be read, and the tests cover the file format against a real
+  Outlook-produced `.pst` that contains **no mail**. The folder walk is proven against real
+  Outlook output; message extraction is not. Try it on a copy before trusting it.
 - **Exchange without IMAP.** Some corporate tenants disable IMAP. There is no MAPI or
   Exchange Web Services support, and there are no plans for one.
 - **Pixel fidelity is unverified.** `assets/reference/` is empty, so no claim here that Halcyon
@@ -116,7 +115,10 @@ ever reads and writes the local database; the Rust core owns every byte that tou
 ## Security and privacy
 
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability.
+  ([published](https://vnikie1.github.io/halcyon-mail/security.html))
 - [PRIVACY.md](PRIVACY.md) — what leaves this machine, which is very nearly nothing.
+  ([published](https://vnikie1.github.io/halcyon-mail/privacy.html) — this is the URL the
+  Microsoft Store requires, and a dead one is an instant rejection.)
 
 ## Licence
 

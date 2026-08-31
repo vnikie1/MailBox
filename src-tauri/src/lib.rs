@@ -18,6 +18,22 @@ mod ipc;
 
 mod platform;
 
+/// A Store build must not carry the self-updater.
+///
+/// The Microsoft Store installs its own updates. An app that also updates itself produces
+/// duplicate installs and fails certification — docs/07 §2.3 — and that failure arrives days
+/// later as a rejection notice rather than at the moment the mistake was made.
+///
+/// A compile error rather than a runtime check or a test, because this is the class of mistake
+/// that is invisible in every build except the one that matters. `store` and `self-update` are
+/// contradictory by construction, so saying so costs nothing.
+#[cfg(all(feature = "store", feature = "self-update"))]
+compile_error!(
+    "A Store build cannot contain the self-updater: the Store installs updates, and two \
+     mechanisms fighting fails certification (docs/07 §2.3). Build the Store package with \
+     --no-default-features --features store."
+);
+
 use tauri::{Manager, WindowEvent};
 
 pub fn run() {

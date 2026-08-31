@@ -2938,3 +2938,73 @@ Everything Phase 11 still needed except code signing, which nobody here can do.
   SmartScreen warning" cannot be met without it), MSIX packaging for the Store, a release
   workflow, and the exit-gate checks that need a fresh Windows 11 VM. Phase 7's gate still wants
   Outlook and Apple Mail accounts, and Phase 10's still wants a recorded Narrator walkthrough.
+
+---
+
+## 2026-08-31 (evening) — Phase 11: the Store package
+
+### Added
+
+- **`src-tauri/msix/AppxManifest.xml`**, with the real Partner Center identity from docs/07 §2.2.
+  Two capabilities and no more — `runFullTrust`, which a desktop app needs to exist under MSIX,
+  and `internetClient`. Everything else is deliberately absent, because each one is a thing to
+  justify to a reviewer and a thing they can reject.
+- **`tools/make-store-assets.cjs`** — 36 MSIX images generated from the app icon, including the
+  `altform-unplated` variants. Windows draws small icons on a plate everywhere except the taskbar
+  and the jump list; with no unplated variant it uses the plated one, which is the icon
+  _with its own background_ on a background.
+- **`tools/make-msix.ps1`** — builds with the updater compiled out, checks the artefact, stages
+  and packs. Produces `Halcyon_1.0.0.0_x64.msix`, **5.4 MB**, unsigned, which is what the Store
+  wants: Microsoft signs on ingestion. `-Test` signs it with a self-signed certificate for
+  sideloading.
+- **`tools/png.cjs`**, shared by both artwork scripts. PNG decode, box resample, PNG and BMP
+  encode, on Node's zlib and nothing else.
+- **The store-build check, three times over.** A `compile_error!` if `store` and `self-update`
+  are both on; `build.rs` removing the updater's capability file when the feature is off; and
+  `make-msix.ps1` searching the built binary for the plugin's command strings. A mistake here is
+  not caught until certification, days later.
+- **A public site for the required links** — <https://vnikie1.github.io/halcyon-mail/>, with the
+  privacy policy and the security contact. The Store will not accept a submission without a live
+  privacy policy URL and a dead one is an instant rejection, so it is plain HTML with one
+  stylesheet and nothing fetched from anywhere.
+
+### Changed
+
+- **The updater capability moved to `capabilities-optional/`**, copied into place by `build.rs`
+  when `self-update` is on and removed when it is not. Tauri validates **every** file in
+  `capabilities/` against the compiled-in plugins — not only the ones `app.security.capabilities`
+  selects — so a capability naming `updater:default` is a hard failure in a Store build however
+  carefully the config deselects it. Both were tried. The reviewable copy stays in version
+  control; only the generated one is ignored.
+- **The scrolling budget now asserts the median, not the p95.** It had sat outside the gate for
+  ten phases and began failing about one run in four the moment `npm run verify` started running
+  it — p95 is one frame in twenty, which on a machine also compiling a release build is whichever
+  frame the scheduler interrupted. The median is stable at 16.5–17.2 ms across every run measured,
+  loaded or idle, and the regression this exists to catch moves it by an order of magnitude
+  rather than by 40%.
+- README no longer says `.pst` import is missing, and the Known gaps entry now says the honest
+  thing: it works, and its message extraction is the least tested code in the project.
+- PRIVACY.md gained a paragraph on the Store's own aggregate analytics. Microsoft measuring their
+  platform is not this app reporting on you, but nobody should have to discover it.
+
+### Incidents
+
+- **The store-build check failed a perfectly good Store package**, and would have sent somebody
+  hunting a build-flag problem that did not exist. It searched the binary for the update endpoint
+  URL — but Tauri embeds the whole of `tauri.conf.json` into every binary, so the endpoint is
+  present whether the plugin is or not. It is configuration, not code. Verified by building both
+  ways and diffing the strings: the endpoint is in both, and `plugin:updater|check` is in neither
+  the Store build nor anything else. The check now looks for the plugin's command routing strings
+  and was probed in both directions.
+- **Windows PowerShell 5.1 would not parse `make-msix.ps1`**, because it reads an unmarked `.ps1`
+  as the system ANSI code page and an em-dash in a string became mojibake. Saved with a UTF-8 BOM,
+  with a note at the top saying why. `pwsh` does not exist on this machine; 5.1 is what ships.
+
+### Notes
+
+- The MSIX has **not** been sideloaded or run through WACK. Both need doing before submission —
+  docs/07 §2.6 lists what to check under MSIX specifically, and a WACK failure is a guaranteed
+  rejection.
+- The two rejections that sink email clients, from docs/07 §2.7: **test account credentials in
+  Notes for Certification**, without which the reviewer cannot get past the welcome screen and
+  fails the submission as incomplete; and a specific written justification for `runFullTrust`.

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  The MSIX manifest, for Microsoft Store distribution. docs/07 §2.3–2.5.
+
+  ## The three identity strings
+
+  Name, Publisher and PublisherDisplayName below are not invented. They come from Partner
+  Center (Product → Product identity) and were recorded in docs/07 §2.2 on 2026-08-25. Getting
+  any of them wrong is rejected at upload with an identity-mismatch error, which is the good
+  case; getting one subtly wrong is worse.
+
+  They are identifiers, not secrets. Every one is public in the shipped package, so keeping them
+  in version control is correct.
+
+  ## The naming split, which is deliberate
+
+    Properties/DisplayName      Halcyon Mail   must match the reserved name or upload fails
+    VisualElements/DisplayName  Halcyon        Start menu and app list; short reads better
+    productName in tauri.conf   Halcyon        the binary is Halcyon.exe
+
+  "Halcyon" alone was already taken in the Store. "Mail" is a search affordance, not part of
+  the product's name.
+
+  ## Version
+
+  Four parts, revision forced to zero — MSIX requires it and the Store will not accept a `0`
+  major. Must increment on every submission. Kept in step with tauri.conf.json by
+  `tools/make-msix.ps1`, which reads the version from there rather than from here.
+-->
+
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap3 uap5 desktop rescap">
+
+  <Identity
+    Name="Unikie1.HalcyonMail"
+    Publisher="CN=AFB09E9D-38C1-4779-9510-AF7E1F2C78F4"
+    Version="1.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <!-- Must match the reserved Store name exactly. -->
+    <DisplayName>Halcyon Mail</DisplayName>
+    <PublisherDisplayName>Unikie1</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>A desktop email client for Windows 11 that keeps your mail on your computer. No account, no adverts, no telemetry.</Description>
+  </Properties>
+
+  <Dependencies>
+    <!--
+      Windows 11 only. 10.0.22000.0 is 21H2, the first Windows 11 build. The app's whole premise
+      is the Windows 11 visual language — Mica, the rounded window, Snap Layouts — and running it
+      on Windows 10 would look wrong in ways no amount of CSS fixes.
+    -->
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.22000.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-gb" />
+  </Resources>
+
+  <Applications>
+    <Application Id="Halcyon" Executable="Halcyon.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Halcyon"
+        Description="A desktop email client for Windows 11 that keeps your mail on your computer."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png">
+          <uap:ShowNameOnTiles>
+            <uap:ShowOn Tile="square150x150Logo" />
+          </uap:ShowNameOnTiles>
+        </uap:DefaultTile>
+        <uap:SplashScreen Image="Assets\Square150x150Logo.png" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!--
+          `.eml` files open in the read-only viewer window. The same association the NSIS build
+          registers, declared the packaged way — under MSIX an app cannot write file associations
+          into the registry itself, so this is the only route.
+        -->
+        <uap3:Extension Category="windows.fileTypeAssociation">
+          <uap3:FileTypeAssociation Name="eml">
+            <uap:SupportedFileTypes>
+              <uap:FileType>.eml</uap:FileType>
+            </uap:SupportedFileTypes>
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:DisplayName>Email Message</uap:DisplayName>
+          </uap3:FileTypeAssociation>
+        </uap3:Extension>
+
+        <!--
+          `mailto:` links. Declaring this is what puts Halcyon in Settings → Default apps, so a
+          link in a browser can open it. Windows still asks the user to choose; declaring it does
+          not take the association.
+        -->
+        <uap3:Extension Category="windows.protocol">
+          <uap3:Protocol Name="mailto" Parameters="&quot;%1&quot;">
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:DisplayName>Email</uap:DisplayName>
+          </uap3:Protocol>
+        </uap3:Extension>
+
+        <!--
+          Start at sign-in, off until the user asks. `Enabled="false"` is what makes it off: the
+          entry exists so Settings → Apps → Startup can list it, and the app enables it through
+          the autostart plugin when the setting is turned on.
+
+          An app that added itself to startup without being told is one people uninstall.
+        -->
+        <desktop:Extension Category="windows.startupTask" Executable="Halcyon.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="HalcyonStartup" Enabled="false" DisplayName="Halcyon" />
+        </desktop:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!--
+      Two, and no more.
+
+      `runFullTrust` is what a desktop application needs to exist at all under MSIX. It is a
+      restricted capability and Partner Center will ask for a written justification — docs/07
+      §2.7 has the wording, and it should say specifically: IMAP and SMTP over raw sockets, a
+      local SQLite database, and Windows Credential Manager for token storage.
+
+      `internetClient` is outbound network access, which a mail client obviously needs.
+
+      Deliberately absent: `internetClientServer` (nothing listens), `privateNetworkClientServer`
+      (no LAN discovery), `enterpriseAuthentication`, `documentsLibrary`, `broadFileSystemAccess`
+      — attachments are read and written through the file picker, which needs no capability and
+      gives the user the choice each time. Every capability asked for is one more thing to
+      justify and one more thing a reviewer can reject.
+    -->
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="internetClient" />
+  </Capabilities>
+</Package>

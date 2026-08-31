@@ -2,6 +2,9 @@
 
 **Halcyon, version 1.0. Last updated 31 August 2026.**
 
+> Published at <https://vnikie1.github.io/halcyon-mail/privacy.html>, which is the URL given to
+> the Microsoft Store. This file is the source it is generated from; the two must not drift.
+
 Halcyon is a mail client that runs on your computer. It has no server, no account, and no
 business model that involves knowing anything about you.
 
@@ -87,6 +90,10 @@ Pressing **Check for updates** requests one small public file from GitHub. Your 
 visible to GitHub, as it is to any web server you contact; nothing identifying you, your
 accounts or your mail is sent, and no request is made unless you press the button. The
 Microsoft Store version does not do this at all — the Store handles its own updates.
+
+For Store installs, Microsoft gives us aggregate install counts, ratings and crash figures. That
+is Microsoft measuring their own platform rather than this application reporting on you, and it
+cannot be turned off from here — but you should not have to discover it, so it is written down.
 
 ## Children
 
