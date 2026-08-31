@@ -22,13 +22,8 @@
   Where to write the report. Defaults to a timestamped file beside the package.
 
 .EXAMPLE
-  # An elevated prompt opens in C:\WINDOWS\system32, not in the repository, so a relative path
-  # will not resolve. Use the full one, quoted -- there is a space in it.
-  powershell -ExecutionPolicy Bypass -File "C:\path\to\MacMail-for-Windows\tools\run-wack.ps1"
-
-.EXAMPLE
-  # Or change directory first, which is less to get wrong:
-  cd "C:\path\to\MacMail-for-Windows"
+  # From an ordinary prompt, in the repository. No need to find an administrator window first:
+  # the script asks Windows for elevation itself and continues in a new one.
   powershell -ExecutionPolicy Bypass -File tools\run-wack.ps1
 #>
 
@@ -44,23 +39,39 @@ $elevated = (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole(
   [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $elevated) {
-  # `$PSCommandPath` is the absolute path to this file. Printing the *relative* one here was a
-  # small cruelty: an elevated prompt starts in C:\WINDOWS\system32, so pasting it fails with
-  # "the argument to the -File parameter does not exist" — which reads as though the script is
-  # missing, rather than as though the working directory is somewhere else.
-  throw @"
-The App Certification Kit requires an elevated prompt.
+  # Ask Windows for elevation rather than telling somebody how to.
+  #
+  # Two earlier versions printed instructions instead, and both failed in the same quiet way:
+  # a prompt sitting in C:\WINDOWS\system32 *looks* elevated — that is where an administrator
+  # prompt opens — but so does an ordinary one on many machines. So the instruction "open an
+  # elevated prompt" gets followed, appears to have worked, and the script refuses again with
+  # the same message. There is nothing on screen to tell the two windows apart.
+  #
+  # UAC is the consent, and it is a better consent than a paragraph: it names the program and
+  # cannot be skipped by accident. `-NoExit` keeps the new window open so the report is readable
+  # after the run finishes.
+  Write-Host "The App Certification Kit needs administrator rights."
+  Write-Host "Asking Windows for them now - approve the prompt that appears."
+  Write-Host ""
 
-Right-click Windows PowerShell, choose "Run as administrator", then paste this exactly. The
-quotes matter — there is a space in the path — and an elevated prompt does not start in the
-repository, so the full path is not optional.
+  $arguments = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"")
+  if ($Report) { $arguments += @('-Report', "`"$Report`"") }
+
+  try {
+    Start-Process powershell -Verb RunAs -ArgumentList $arguments
+    Write-Host "Started in a new elevated window. This one is done; watch that one."
+  } catch {
+    throw @"
+Elevation was declined, so WACK cannot run.
+
+To do it by hand: right-click Windows PowerShell, choose "Run as administrator" — the title bar
+of the new window will say "Administrator" — then paste this, quotes included:
 
   powershell -ExecutionPolicy Bypass -File "$PSCommandPath"
-
-Or open an elevated prompt straight from here, which skips the pasting:
-
-  Start-Process powershell -Verb RunAs -ArgumentList '-NoExit -ExecutionPolicy Bypass -File "$PSCommandPath"'
 "@
+  }
+
+  return
 }
 
 $appcert = "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit\appcert.exe"
