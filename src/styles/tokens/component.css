@@ -324,6 +324,7 @@
   --settings-pane-gap: var(--sp-7);
   --settings-report-max-height: 260px;
   --settings-signature-min-height: 200px;
+  --transfer-list-max-height: 220px;
 
   --account-row-height: 44px;
   --account-row-gap: var(--sp-5);

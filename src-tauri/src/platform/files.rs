@@ -178,6 +178,60 @@ pub fn open_files_dialog() -> Vec<PathBuf> {
     }
 }
 
+/// Shows the system folder picker. `None` means the user cancelled.
+///
+/// `IFileOpenDialog` with `FOS_PICKFOLDERS` rather than the old `SHBrowseForFolder`, which
+/// still exists and still shows the small tree-in-a-box from Windows 2000 — visibly not the
+/// dialog the rest of the system uses.
+///
+/// Blocking, like the other two here: it runs a modal message loop.
+pub fn pick_folder_dialog(title: &str) -> Option<PathBuf> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, IShellItem, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    };
+
+    unsafe {
+        // The dialog is apartment-threaded. Initialising here rather than at start-up keeps the
+        // COM lifetime to the call — and `CoInitializeEx` returning "already initialised" on
+        // this thread is a success, not an error, which is why the result is not checked.
+        let started = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+
+        let result = (|| -> Option<PathBuf> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+
+            // The options are read and merged rather than set outright: replacing them would
+            // drop the defaults the shell relies on, and the dialog misbehaves in ways that
+            // look like a Windows bug.
+            let options = dialog.GetOptions().ok()?;
+            dialog.SetOptions(options | FOS_PICKFOLDERS).ok()?;
+
+            let heading = HSTRING::from(title);
+            let _ = dialog.SetTitle(PCWSTR(heading.as_ptr()));
+
+            // Cancelling returns an error, and it is the ordinary path rather than a failure.
+            dialog.Show(None).ok()?;
+
+            let item: IShellItem = dialog.GetResult().ok()?;
+            let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path = wide.to_string().ok()?;
+            windows::Win32::System::Com::CoTaskMemFree(Some(wide.0 as *const _));
+
+            Some(PathBuf::from(path))
+        })();
+
+        if started.is_ok() {
+            CoUninitialize();
+        }
+
+        result
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

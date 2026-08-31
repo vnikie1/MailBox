@@ -2717,3 +2717,121 @@ driving it from PowerShell and reading the UI Automation tree — the same tree 
   "Settings" for ever while the code — and its comment claiming the title carries the pane —
   said otherwise. It now calls `setTitle` as well. Found by reading the window's Name in the UIA
   tree; Playwright had passed, because in a browser `document.title` _is_ the title.
+
+---
+
+## 2026-08-31 — Phase 11: import and export
+
+### Added
+
+- **mbox reading and writing**, hand-written. mbox has no length prefix and three incompatible
+  escaping conventions all called mbox; the reader is permissive and the writer is strict
+  mboxrd, so our own export round-trips exactly and somebody else's file imports as closely as
+  the format allows. Streams a line at a time — a Thunderbird `Inbox` of several gigabytes is
+  ordinary, and splitting one in memory simply fails.
+- **Thunderbird import.** Thunderbird stores mail as mbox files with no extension, so importing
+  it is finding the files and working out what each folder was called. Subfolders come from the
+  `.sbd` directories, and `X-Mozilla-Status` is read so **which mail had been read survives** —
+  without it an import of years of archives arrives as thousands of unread messages, which
+  makes the result unusable however correct the text is.
+- **Loose mbox import** through the system file picker, for anything else that can export one.
+- **Export to mbox and to an `.eml` tree.** Two formats because they answer different
+  questions: mbox is what Thunderbird and Apple Mail import, an `.eml` tree is what Windows and
+  Outlook can read and what a person can search with the tools they already have.
+- **A local account, "On My PC"**, which is where imported mail goes.
+- **A folder picker** (`IFileOpenDialog` with `FOS_PICKFOLDERS`), for where an export lands.
+- `src-tauri/tests/transfer_gate.rs` — eight gates over a sample containing every thing that
+  actually breaks importers.
+
+### Changed
+
+- **`platform/files.rs` grew a folder picker, and the new function landed after the test
+  module** because it was appended with `cat >>`. Clippy's `items_after_test_module` caught it.
+  Moved above.
+
+### Fixed
+
+- **A window remembered from a display that no longer exists stopped the app starting.** Found
+  while chasing something else, and kept because it is real on its own terms:
+  `tauri-plugin-window-state` restores the window where it was, and when that display is gone —
+  a laptop undocked, a monitor unplugged — WebView2 refuses the rectangle and Tauri's setup
+  hook panics. **No window appears, so there is no setting to change**; the only cure is
+  deleting a JSON file in `%APPDATA%` nobody knows the name of.
+
+  Remembered geometry is now clamped onto the current virtual screen before Tauri builds. A
+  window that still fits is left where it is — parking one half off the edge is deliberate, and
+  Windows itself restores those unchanged — while one that had to be shrunk is placed fully on
+  screen, because its position came from a coordinate space that no longer exists.
+
+  This was **not** the cause of the failure being chased. See Incidents.
+
+- **An unescaped `From ` line in a message body split the message in two.** The format says such
+  a line must be escaped; a great deal of real mbox was written by something that did not. The
+  reader now requires a header on the following line before treating `From ` as a separator, so
+  an ordinary sentence beginning "From here on…" stays in its message.
+
+### Incidents
+
+- **Two wrong diagnoses of the same startup failure, in a row, each confident.** The app began
+  failing with `failed to create webview: 0x80070057` and exit 101.
+
+  _First:_ RivaTuner. The identical HRESULT had appeared two days earlier with RivaTuner
+  running and had gone away when it was closed, so the note in memory said RivaTuner and the
+  check stopped there. RivaTuner was not running.
+
+  _Second:_ window geometry. The saved window was 2800×1800 and the desktop measured 1920×1080,
+  which is a real failure mode with a real fix — so the fix was written, tested, and it
+  corrected the rectangle exactly as designed. **The app still failed.** Deleting the state file
+  entirely and starting from the configured default also failed, which is what finally ruled
+  geometry out.
+
+  _Actual cause:_ **the machine was locked.** WebView2 cannot create a window on a locked
+  session, and while locked Windows reports the lock screen's metrics — which is where the
+  "1920×1080 display" came from. The screen had not changed at all.
+
+  Both wrong answers were arrived at by matching a symptom to a cause that had produced it
+  before, and testing the fix rather than the diagnosis. The decisive experiment in each case —
+  is RivaTuner running, does it fail with no state file at all — was cheaper than the fix and
+  was done second.
+
+- **The geometry fix then corrupted the thing it was protecting.** Running on a locked session,
+  it read the lock screen's 1920×1080 as the user's display and rewrote a perfectly good
+  2800×1800 window down to fit it, on every failed launch. It now skips entirely unless
+  `OpenInputDesktop` succeeds, which is false on a locked machine, during a UAC prompt, and on
+  any other secure desktop. The remembered geometry was restored by hand from the values the
+  new log line had recorded on its way past.
+- **The transfer gate found the `From `-line bug on its first run**, which is what it was
+  written for — but the sample that found it was itself malformed, and the first instinct was to
+  fix the sample. The right reading was the opposite: files like that are common, and an
+  importer that corrupts them is the problem. Both halves of the new separator rule were then
+  probed by breaking each in turn.
+- **A shell heredoc mangled `mbox.rs` badly enough to delete three items**, including the
+  `Counts` struct and both `read` signatures — backticks inside a `node -e` template literal
+  were interpreted by bash. Reassembled from the surviving parts. This is the fourth time this
+  session that quoting in a shell one-liner has damaged a file; the Write and Edit tools are
+  the way to change Rust and TypeScript, not `sed` and `node -e`.
+- **Playwright's dev server outlived the test run** and held port 1420, so the next
+  `npm run app:dev` failed with a message about the port rather than anything to do with the
+  app. Killed by hand.
+
+### Notes
+
+- **Import and export have not been exercised in the running window.** The machine is locked,
+  so the app cannot start at all. Everything beneath the UI is covered by the eight gates in
+  `src-tauri/tests/transfer_gate.rs` and forty unit tests, against real files and a real
+  database — what is outstanding is the pane itself: the folder list, the two pickers, and the
+  progress reporting.
+
+- **Outlook `.pst` import is not done**, and docs/06 asks for it. A `.pst` is not a mail file
+  but a MAPI object store — a pair of B-trees over a paged heap, holding messages as numbered
+  properties with no RFC 5322 anywhere in it. Reading the store is solved: Microsoft publish
+  `outlook-pst`, a clean-room MS-PST implementation in Rust. Turning MAPI properties back into a
+  message — recipient tables, `PR_TRANSPORT_MESSAGE_HEADERS` where it exists, a body that may be
+  plain, HTML or RTF compressed with a Microsoft dictionary — is the actual work, and it is its
+  own piece rather than a corner of this one. The import screen says so plainly and points at
+  the two paths that do work today: Outlook saves `.eml`, and an Outlook account can be added
+  over IMAP.
+- **Re-importing the same file duplicates**, and the UI says so before it starts. There is no
+  stable identity to match an mbox message against — `Message-ID` is missing from a lot of old
+  mail and forged in some of the rest — so deduplicating on it would silently drop messages that
+  are not duplicates.

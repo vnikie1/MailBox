@@ -11,6 +11,7 @@ pub mod mail;
 pub mod rules;
 pub mod search;
 pub mod sync;
+pub mod transfer;
 pub mod undo;
 
 mod ipc;
@@ -39,6 +40,20 @@ pub fn run() {
 
     init_tracing(&diagnostics);
 
+    // Before the window is built, not after. A window remembered on a display that no longer
+    // exists is a rectangle WebView2 refuses outright, and the failure is not a mis-placed
+    // window but a process that exits 101 with nothing on screen — see platform::window_state.
+    // Undocking a laptop is enough to cause it.
+    //
+    // Skipped on a locked session, where the metrics describe the lock screen rather than the
+    // user's displays. Correcting a window against those would shrink a perfectly good one.
+    if platform::window_state::on_the_users_desktop() {
+        platform::window_state::sanitise(
+            &platform::window_state::default_state_path(),
+            platform::window_state::virtual_screen(),
+        );
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
@@ -66,6 +81,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
             ipc::window::settings_open,
+            ipc::transfer::import_sources,
+            ipc::transfer::import_pick_files,
+            ipc::transfer::import_run,
+            ipc::transfer::export_pick_folder,
+            ipc::transfer::export_run,
             ipc::eml::eml_read,
             ipc::diagnostics::crash_reports,
             ipc::diagnostics::crash_report_read,

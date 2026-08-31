@@ -11,6 +11,8 @@ import {
 } from '@/lib/ipc'
 import { Button, useToast } from '@/ui'
 
+import { TransferSettings } from './TransferSettings'
+
 import styles from './settings.module.css'
 import pane from './AdvancedSettings.module.css'
 
@@ -33,6 +35,15 @@ function formatSize(bytes: number): string {
 }
 
 export function AdvancedSettings() {
+  return (
+    <>
+      <TransferSettings />
+      <Diagnostics />
+    </>
+  )
+}
+
+function Diagnostics() {
   const [reports, setReports] = useState<CrashReport[] | null>(null)
   const [open, setOpen] = useState<string | null>(null)
   const [text, setText] = useState<string>('')

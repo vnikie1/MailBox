@@ -96,10 +96,18 @@ export async function onWindowFocusChanged(
 import type { AccountRow } from './generated/AccountRow'
 import type { ComposeAddress } from './generated/ComposeAddress'
 import type { CrashReport } from './generated/CrashReport'
+import type { ImportRequest } from './generated/ImportRequest'
+import type { ImportSource } from './generated/ImportSource'
+import type { TransferProgress } from './generated/TransferProgress'
 import type { FlagPatch } from './generated/FlagPatch'
 import type { ListQuery } from './generated/ListQuery'
 import type { EmlMessage } from './generated/EmlMessage'
 import type { MailboxRow } from './generated/MailboxRow'
+export type { ImportFolder } from './generated/ImportFolder'
+export type { ImportRequest } from './generated/ImportRequest'
+export type { ImportSource } from './generated/ImportSource'
+export type { TransferProgress } from './generated/TransferProgress'
+export type { TransferResult } from './generated/TransferResult'
 export type { MailtoRequest } from './generated/MailtoRequest'
 import type { MailtoRequest } from './generated/MailtoRequest'
 import type { MessageFull } from './generated/MessageFull'
@@ -1027,4 +1035,61 @@ export async function diagnosticsReveal(): Promise<void> {
 export async function setWindowTitle(title: string): Promise<void> {
   if (!runningInTauri) return
   await getCurrentWindow().setTitle(title)
+}
+
+/* ----------------------------------------------------------- import and export */
+
+/**
+ * Thunderbird profiles found on this machine, with the folders in each.
+ *
+ * An empty list means Thunderbird is not installed, or has no mail. That is not an error and
+ * is not reported as one — a red banner in front of somebody whose only mistake was using a
+ * different mail client would be absurd.
+ */
+export async function importSources(): Promise<ImportSource[]> {
+  if (!runningInTauri) return []
+  return invoke<ImportSource[]>('import_sources')
+}
+
+/** The system file picker, for loose mbox files. Empty when cancelled. */
+export async function importPickFiles(): Promise<string[]> {
+  if (!runningInTauri) return []
+  return invoke<string[]>('import_pick_files')
+}
+
+/** The system folder picker, for where an export goes. `null` when cancelled. */
+export async function exportPickFolder(): Promise<string | null> {
+  if (!runningInTauri) return null
+  return invoke<string | null>('export_pick_folder')
+}
+
+/**
+ * Starts an import. Returns as soon as the work is scheduled.
+ *
+ * Everything after that arrives on `transfer:progress` — a Thunderbird profile of fifteen
+ * years is tens of thousands of messages, and a call that returned nothing until it finished
+ * would be indistinguishable from one that had hung.
+ */
+export async function importRun(requests: ImportRequest[]): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('import_run', { requests })
+}
+
+/** Starts an export. `format` is `mbox` or `eml`. */
+export async function exportRun(
+  mailboxIds: number[],
+  format: 'mbox' | 'eml',
+  directory: string,
+): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('export_run', { mailboxIds, format, directory })
+}
+
+export async function onTransferProgress(
+  handler: (progress: TransferProgress) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<TransferProgress>('transfer:progress', (event) => {
+    handler(event.payload)
+  })
 }

@@ -235,6 +235,88 @@ pub fn from_imap(envelope: &async_imap::imap_proto::Envelope<'_>) -> Envelope {
     }
 }
 
+/// Builds an [`Envelope`] from a parsed RFC 5322 message. docs/06 Phase 11.
+///
+/// The counterpart to [`from_imap`], for messages that arrive as a file rather than from a
+/// server: an import, or a `.eml`. IMAP hands over a structured ENVELOPE the server has already
+/// parsed; a file hands over the headers, and the parsing is ours.
+///
+/// It goes through the same decoders as the IMAP path — the same RFC 2047 decoding, the same
+/// message-id normalisation, the same subject-base stripping — so an imported message threads
+/// against a synced one. Two parsers that disagreed about what a subject base is would put the
+/// same conversation in two threads.
+pub fn from_headers(parsed: &mailparse::ParsedMail<'_>) -> Envelope {
+    use mailparse::MailHeaderMap;
+
+    let header = |name: &str| parsed.headers.get_first_value(name);
+
+    let addresses = |name: &str| -> Vec<Address> {
+        let Some(raw) = parsed.headers.get_first_value(name) else {
+            return Vec::new();
+        };
+
+        let Ok(list) = mailparse::addrparse(&raw) else {
+            // An unparseable address list is not a reason to lose the message. Standing rule 13.
+            return Vec::new();
+        };
+
+        let mut found = Vec::new();
+        collect_addresses(&list, &mut found);
+        found
+    };
+
+    let subject = header("Subject")
+        .map(|raw| decode_words(&raw))
+        .unwrap_or_default();
+
+    Envelope {
+        message_id: normalise_message_id(header("Message-ID")),
+        in_reply_to: normalise_message_id(header("In-Reply-To")),
+        subject_base: subject_base(&subject),
+        subject,
+        from: addresses("From"),
+        to: addresses("To"),
+        cc: addresses("Cc"),
+        // Deliberately read. A stored message on disk can carry a Bcc — it is the sender's own
+        // copy — and dropping it here would lose who a message went to. What must never happen
+        // is a Bcc being carried into a *reply*, and that is enforced in mail::reply.
+        bcc: addresses("Bcc"),
+        reply_to: addresses("Reply-To"),
+        date_sent: header("Date").map(|raw| parse_date(&raw)).unwrap_or(0),
+    }
+}
+
+/// Flattens an address list, including groups.
+///
+/// `Undisclosed recipients:;` is a group with no members, and a mailing list can address a
+/// named group. Ignoring groups loses every recipient inside one.
+fn collect_addresses(list: &mailparse::MailAddrList, into: &mut Vec<Address>) {
+    for entry in list.iter() {
+        match entry {
+            mailparse::MailAddr::Single(single) => {
+                if single.addr.trim().is_empty() {
+                    continue;
+                }
+                into.push(Address {
+                    name: single.display_name.as_ref().map(|name| decode_words(name)),
+                    email: single.addr.trim().to_string(),
+                });
+            }
+            mailparse::MailAddr::Group(group) => {
+                for single in &group.addrs {
+                    if single.addr.trim().is_empty() {
+                        continue;
+                    }
+                    into.push(Address {
+                        name: single.display_name.as_ref().map(|name| decode_words(name)),
+                        email: single.addr.trim().to_string(),
+                    });
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

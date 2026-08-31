@@ -76,9 +76,9 @@ errors is a definition-of-done item, not a preference.
   adds an `aria-labelledby` pointing at the trigger, and that outranks any `aria-label` a
   component sets before the spread. See `src/ui/Menu.tsx`.
 - **`npm run verify` fails while `npm run app:dev` is running.** The running app holds
-  `target\debug\halcyon.exe`, so `cargo test` cannot relink it: `failed to remove file …
-  Access is denied. (os error 5)`, exit 101. It looks like a compile failure and is a file
-  lock. Stop the app first.
+  `target\debug\halcyon.exe`, so `cargo test` cannot relink it and reports "Access is denied
+  (os error 5)" with exit 101. It looks like a compile failure and is a file lock. Stop the
+  app first.
 - **`assets/reference/` is empty.** Any claim of pixel fidelity is unverifiable until real
   macOS Mail screenshots are in it. Do not assert "matches Mail" without them.
 

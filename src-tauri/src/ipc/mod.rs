@@ -10,4 +10,5 @@ pub mod mail;
 pub mod organise;
 pub mod search;
 pub mod sync;
+pub mod transfer;
 pub mod window;

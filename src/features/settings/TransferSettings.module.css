@@ -1,0 +1,37 @@
+/* Settings → Advanced → Import and export. docs/06 Phase 11. */
+
+/* A profile of fifteen years has a lot of folders. Scrolled rather than allowed to push the
+   buttons below it off the pane — a list that grows without bound makes the action it belongs
+   to unreachable. */
+.folders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: var(--transfer-list-max-height);
+  padding: var(--sp-2);
+  margin: 0;
+  overflow-y: auto;
+  list-style: none;
+  background: var(--bg-window);
+  border-radius: var(--r-md);
+}
+
+/* The path takes the room, the size sits at the end. A long folder path is truncated at the
+   start rather than the end: `.../Work/Projects/2019` says more than `Local Folders/Work/...`. */
+.folderName {
+  flex: 1 1 auto;
+  overflow: hidden;
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.progress {
+  padding: var(--sp-3) var(--sp-4);
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  background: var(--fill-hover);
+  border-radius: var(--r-md);
+}

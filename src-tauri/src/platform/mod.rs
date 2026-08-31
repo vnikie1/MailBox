@@ -42,6 +42,7 @@ pub mod notify;
 pub mod sound;
 pub mod toast;
 pub mod tray;
+pub mod window_state;
 
 use std::ffi::c_void;
 
