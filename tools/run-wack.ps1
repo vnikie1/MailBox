@@ -22,10 +22,13 @@
   Where to write the report. Defaults to a timestamped file beside the package.
 
 .EXAMPLE
-  Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File "tools\run-wack.ps1"'
+  # An elevated prompt opens in C:\WINDOWS\system32, not in the repository, so a relative path
+  # will not resolve. Use the full one, quoted -- there is a space in it.
+  powershell -ExecutionPolicy Bypass -File "C:\path\to\MacMail-for-Windows\tools\run-wack.ps1"
 
 .EXAMPLE
-  # From an already-elevated prompt, in the repository root:
+  # Or change directory first, which is less to get wrong:
+  cd "C:\path\to\MacMail-for-Windows"
   powershell -ExecutionPolicy Bypass -File tools\run-wack.ps1
 #>
 
@@ -41,16 +44,22 @@ $elevated = (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole(
   [Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $elevated) {
+  # `$PSCommandPath` is the absolute path to this file. Printing the *relative* one here was a
+  # small cruelty: an elevated prompt starts in C:\WINDOWS\system32, so pasting it fails with
+  # "the argument to the -File parameter does not exist" — which reads as though the script is
+  # missing, rather than as though the working directory is somewhere else.
   throw @"
 The App Certification Kit requires an elevated prompt.
 
-Right-click Windows PowerShell, choose "Run as administrator", then from the repository root:
+Right-click Windows PowerShell, choose "Run as administrator", then paste this exactly. The
+quotes matter — there is a space in the path — and an elevated prompt does not start in the
+repository, so the full path is not optional.
 
-  powershell -ExecutionPolicy Bypass -File tools\run-wack.ps1
+  powershell -ExecutionPolicy Bypass -File "$PSCommandPath"
 
-Or, from here, to open one:
+Or open an elevated prompt straight from here, which skips the pasting:
 
-  Start-Process powershell -Verb RunAs -ArgumentList '-ExecutionPolicy Bypass -File "$PSCommandPath"'
+  Start-Process powershell -Verb RunAs -ArgumentList '-NoExit -ExecutionPolicy Bypass -File "$PSCommandPath"'
 "@
 }
 
