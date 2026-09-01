@@ -3448,3 +3448,46 @@ then never offer that release, which fails silently and months later. So CI now 
 throwaway key and signs the smoke-test artifact with something that verifies against nothing. That
 is the correct outcome for a build nobody installs, and it keeps the packaging path exercised end
 to end.
+
+## 2026-09-01 — Phase 7: the app can send
+
+### Added
+
+- **SMTP XOAUTH2.** Halcyon could not send mail at all. `send_one` refused anything but a password
+  account, and Gmail — the only account configured, and the only kind most people will add — is
+  OAuth. The refusal was deliberate and documented; what nobody had written down is that it left
+  the send half of Phase 7 unreachable, and it stayed unreachable until somebody tried to send a
+  message.
+
+  Almost none of this was new code. `lettre` already has `Mechanism::Xoauth2`, and it renders the
+  same SASL string the IMAP side assembles by hand in `session.rs`. `engine::credential_for`
+  already loaded a password or refreshed an expiring OAuth token and wrote the new expiry back;
+  the sender simply was not calling it. It calls it now, rather than growing a second copy of the
+  refresh logic — and the copy that sends mail would have been the one nobody noticed had gone
+  stale.
+
+  **An OAuth account is offered XOAUTH2 and nothing else.** `lettre` picks the first mechanism the
+  server also advertises, so leaving PLAIN in the list would let it win — and PLAIN puts the second
+  credential field in the password slot, which for an OAuth account holds the **access token**.
+  Gmail rejects it, so the visible symptom is "sending is broken"; the real cost is that the token
+  has already been transmitted as a password to a server with every reason to log a failed
+  authentication. `an_oauth_account_is_never_offered_a_password_mechanism` fails if PLAIN ever
+  reappears, and was probed by putting it back.
+
+### Notes — sending, verified end to end
+
+Driven through the real compose window against a **copy** of the mail store, so the app opened
+1,521 real messages and the real database was untouched throughout.
+
+    outbox: sent id=2      first attempt, about seven seconds
+
+The message was then filed into Gmail's Sent Mail by IMAP APPEND, synced back on the next pass,
+and appears in the local Sent Mail mailbox. It carries bold, italic, underline, three bullets, two
+numbered items, a block quote and a horizontal rule — lists and quotes chosen deliberately, since
+those are what a Word-based renderer mangles.
+
+What this does **not** yet establish is the rest of the gate: that the message threads and renders
+correctly in Gmail, Outlook and Apple Mail. That needs somebody to open it in each, and a reply
+from each to thread against. Outlook Windows is called out in the gate as the strict case, and it
+means _classic_ Outlook, whose renderer is Word — not the new Outlook, which is the web client in
+a window and will pass without proving anything.

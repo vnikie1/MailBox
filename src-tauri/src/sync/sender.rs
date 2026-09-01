@@ -17,8 +17,6 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::accounts::credentials::{self, Kind};
-use crate::accounts::provider::AuthKind;
 use crate::db::Db;
 
 use super::events::{payload, Events};
@@ -345,20 +343,22 @@ async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<(), smtp::SendE
 
     let envelope = smtp::envelope_for(&account.email, &recipients)?;
 
-    // OAuth accounts cannot use SMTP AUTH PLAIN with a password. Phase 7 covers password
-    // submission; XOAUTH2 for SMTP is the same shape as the IMAP one and arrives with it.
-    if account.auth_kind != AuthKind::Password {
-        return Err(smtp::SendError::Envelope {
-            detail: "sending from an OAuth account is not available yet".into(),
-        });
-    }
-
-    let secret = credentials::load(&credentials::reference_for(&account.email), Kind::Password)
-        .map_err(|_| smtp::SendError::Envelope {
-            detail: "no password is stored for this account".into(),
+    // The same resolver the IMAP side uses, which is the point: it loads a password, or
+    // refreshes an OAuth token when it is close to expiring and writes the new expiry back.
+    // Duplicating that here would mean a second copy of the refresh logic, and the copy that
+    // sends mail would be the one nobody noticed had gone stale.
+    //
+    // Until this call existed, `send_one` refused outright for anything but a password account,
+    // and the only account type Gmail offers is OAuth -- so the app could not send at all. The
+    // refusal was deliberate and documented; what was not written down is that it left the send
+    // half of Phase 7 unreachable, and it stayed that way until somebody tried to send a message.
+    let credential = super::engine::credential_for(db, &account)
+        .await
+        .map_err(|error| smtp::SendError::Envelope {
+            detail: error.to_string(),
         })?;
 
-    smtp::send(&server, &account.email, &secret, &envelope, &raw).await?;
+    smtp::send(&server, &account.email, &credential, &envelope, &raw).await?;
 
     // Filed only now, after the server has taken it. A copy in Sent for a message that never
     // left is a lie the user acts on; a message delivered but missing from Sent is merely

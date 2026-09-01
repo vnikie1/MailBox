@@ -23,6 +23,8 @@ use lettre::{Address as LettreAddress, AsyncTransport, Tokio1Executor};
 use crate::accounts::credentials::Secret;
 use crate::accounts::provider::{Security, ServerSettings};
 
+use super::session::Credential;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
     #[error("{host}:{port} is not an encrypted submission port")]
@@ -87,11 +89,33 @@ fn classify(host: &str, error: &lettre::transport::smtp::Error) -> SendError {
     }
 }
 
+/// Which SASL mechanisms to offer, and the secret to offer them with.
+///
+/// ## Why an OAuth account is offered XOAUTH2 and nothing else
+///
+/// `lettre` picks the first mechanism in this list that the server also advertises. Leaving
+/// PLAIN in the list for an OAuth account would let it win, and PLAIN would then send the
+/// **access token in the password field**. Gmail rejects that, so it would look merely broken --
+/// but the token would already have been transmitted as a password to a server that has every
+/// reason to log a failed authentication. A bearer token is not a password and must not be sent
+/// where one is expected.
+///
+/// The reverse is just as deliberate: a password account is never offered XOAUTH2, because a
+/// password in a `auth=Bearer` field is not a credential the server can check.
+fn mechanisms_for(credential: &Credential) -> (&Secret, Vec<Mechanism>) {
+    match credential {
+        // PLAIN and LOGIN only over an already-encrypted channel, which the `Tls` setting in
+        // `transport` guarantees.
+        Credential::Password(secret) => (secret, vec![Mechanism::Plain, Mechanism::Login]),
+        Credential::OAuth(token) => (token, vec![Mechanism::Xoauth2]),
+    }
+}
+
 /// Builds a transport for one account's submission server.
 fn transport(
     server: &ServerSettings,
     email: &str,
-    secret: &Secret,
+    credential: &Credential,
 ) -> Result<AsyncSmtpTransport<Tokio1Executor>, SendError> {
     // Port 25 is relay, not submission, and is blocked by most networks anyway. Anything
     // unencrypted is refused outright rather than downgraded — docs/05 §6.
@@ -107,16 +131,21 @@ fn transport(
         detail: error.to_string(),
     })?;
 
+    let (secret, mechanisms) = mechanisms_for(credential);
+
+    // For XOAUTH2 the second field is the access token, not a password: `lettre` renders it as
+    // `user=<email>auth=Bearer <token>`, which is the same SASL string the IMAP
+    // side builds by hand in `session.rs`.
+    //
+    // `builder_dangerous` names the *unencrypted* default it starts from; the encryption is
+    // applied below and is not optional.
     let builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&server.host)
         .port(server.port)
         .credentials(Credentials::new(
             email.to_string(),
             secret.expose().to_string(),
         ))
-        // PLAIN and LOGIN only over an already-encrypted channel, which the `Tls` setting
-        // below guarantees. `builder_dangerous` names the *unencrypted* default it starts
-        // from; the encryption is applied here and is not optional.
-        .authentication(vec![Mechanism::Plain, Mechanism::Login])
+        .authentication(mechanisms)
         .tls(match server.security {
             Security::Tls => Tls::Wrapper(tls),
             Security::StartTls => Tls::Required(tls),
@@ -167,11 +196,11 @@ pub fn envelope_for(from: &str, recipients: &[String]) -> Result<SmtpEnvelope, S
 pub async fn send(
     server: &ServerSettings,
     email: &str,
-    secret: &Secret,
+    credential: &Credential,
     envelope: &SmtpEnvelope,
     raw: &[u8],
 ) -> Result<(), SendError> {
-    let transport = transport(server, email, secret)?;
+    let transport = transport(server, email, credential)?;
 
     transport
         .send_raw(envelope, raw)
@@ -202,13 +231,48 @@ mod tests {
     }
 
     #[test]
+    fn an_oauth_account_is_never_offered_a_password_mechanism() {
+        // The one that matters. `lettre` picks the first mechanism the server also advertises,
+        // so leaving PLAIN in the list would let it win -- and PLAIN puts the second credential
+        // field in the password slot. That field holds an OAuth **access token**.
+        //
+        // Gmail would reject it, so the visible symptom would be "sending is broken" rather than
+        // anything alarming. The real cost is silent: the token would already have been sent as a
+        // password to a server with every reason to log a failed authentication.
+        let credential = Credential::OAuth(Secret::new("ya29.a-real-looking-access-token"));
+        let (secret, mechanisms) = mechanisms_for(&credential);
+
+        assert_eq!(
+            mechanisms,
+            vec![Mechanism::Xoauth2],
+            "an OAuth account must offer XOAUTH2 and nothing else"
+        );
+        assert!(!mechanisms.contains(&Mechanism::Plain));
+        assert!(!mechanisms.contains(&Mechanism::Login));
+        assert_eq!(secret.expose(), "ya29.a-real-looking-access-token");
+    }
+
+    #[test]
+    fn a_password_account_is_never_offered_xoauth2() {
+        // The mirror image, and not symmetry for its own sake: a password rendered into an
+        // `auth=Bearer` field is not a credential the server can check, so the send would fail
+        // with an authentication error that says nothing about the cause.
+        let credential = Credential::Password(Secret::new("hunter2"));
+        let (secret, mechanisms) = mechanisms_for(&credential);
+
+        assert!(!mechanisms.contains(&Mechanism::Xoauth2));
+        assert!(mechanisms.contains(&Mechanism::Plain));
+        assert_eq!(secret.expose(), "hunter2");
+    }
+
+    #[test]
     fn the_relay_port_is_refused_rather_than_used() {
         // Port 25 is relay, not submission. Submitting there is unauthenticated by convention,
         // blocked by most networks, and in the clear.
         let error = transport(
             &server(25, Security::StartTls),
             "me@x.test",
-            &Secret::new("p"),
+            &Credential::Password(Secret::new("p")),
         )
         .expect_err("should refuse");
 
@@ -221,10 +285,15 @@ mod tests {
         assert!(transport(
             &server(587, Security::StartTls),
             "me@x.test",
-            &Secret::new("p")
+            &Credential::Password(Secret::new("p"))
         )
         .is_ok());
-        assert!(transport(&server(465, Security::Tls), "me@x.test", &Secret::new("p")).is_ok());
+        assert!(transport(
+            &server(465, Security::Tls),
+            "me@x.test",
+            &Credential::Password(Secret::new("p"))
+        )
+        .is_ok());
     }
 
     #[test]
