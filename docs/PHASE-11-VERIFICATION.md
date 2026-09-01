@@ -201,3 +201,76 @@ out and leaving the dialog wedged.
 What works is genuine input: `AttachThreadInput` to take real foreground, then `SendKeys`. The
 folder picker additionally needs two Enters — the first navigates into the typed folder, the
 second selects it.
+
+---
+
+## 6. Phase 7: offline send, and killing the app mid-send
+
+The two thirds of the Phase 7 exit gate that need no second mail account. Both run against a copy
+of the mail store, sending real mail to a real address, so the evidence is what the server did
+rather than what the app believes.
+
+### A. Queued while the server was unreachable — PASS
+
+"Offline" was simulated by pointing the account's SMTP host at `127.0.0.1:587` with nothing
+listening. That is a **limitation and is recorded as one**: it produces the same classification a
+dead network produces — no SMTP status, therefore `SendError::Transport`, therefore retryable —
+but it does not exercise anything that depends on the OS reporting the adapter as down. The
+machine's network settings, firewall and hosts file were not touched, because they are not mine to
+change.
+
+    14:03:14  send failed  id=3  connection refused (os error 10061)  state="queued"
+    ~14:03:57 the SMTP host is restored
+    14:04:14  outbox: sending count=1        exactly RETRY_AFTER (60s) later
+    14:04:22  outbox: sent id=3
+
+| #   | Criterion                                      | Result                                        |
+| --- | ---------------------------------------------- | --------------------------------------------- |
+| A1  | Never lost                                     | Row and `.eml` both survived                   |
+| A2  | Never falsely reported as sent                 | State was `queued`, never `sent`               |
+| A3  | The failure names its cause                    | Logged in full; the banner shows failed rows   |
+| A4  | Goes out on reconnect                          | Automatically, 60s later, nothing retyped      |
+| A5  | Exactly one copy delivered                     | 1 in Sent                                      |
+
+A retryable failure returns the row to `queued`, not `failed`, so nothing is put in front of the
+user for a network blip. Only after `MAX_ATTEMPTS` (5, at 60s apart) does it become a banner.
+
+### B. Killed mid-send — PASS
+
+The process was killed the instant the row entered `sending`, by polling the outbox rather than
+sleeping a guessed number of seconds. Sleeping hits that window by luck; polling hits it every
+time.
+
+    11.4s   row 4 -> sending
+            process killed
+    (restart)
+    14:10:25  resolving interrupted sends count=1
+    14:10:29  resolved id=4 found_in_sent=false state="queued"
+    14:10:38  outbox: sent id=4
+
+| #   | Criterion                                        | Result                                     |
+| --- | ------------------------------------------------ | ------------------------------------------ |
+| B1  | Left genuinely in doubt, not `sent` or `failed`  | `sending`, `.eml` intact on disk           |
+| B2  | Resolved by searching Sent, not by guessing      | `found_in_sent=false` from an IMAP search  |
+| B3  | **Exactly one copy — never zero, never two**     | 1 in Sent                                   |
+| B4  | The interruption does not spend an attempt       | `attempts=0` after recovery and resend      |
+
+B2 is the part worth keeping. The recovery does not infer anything from local state: it asks the
+server whether a message carrying that Message-ID is in Sent, and the Message-ID is the app's own
+rather than the library's precisely so that question can be asked. Absent means it never left, so
+requeueing cannot duplicate; present would mean it went, so marking it sent cannot lose it.
+
+Verified across all three sends of the session: one copy each, none missing, none doubled.
+
+### A note on Message-ID storage, which looks like a bug and is not
+
+The outbox stores the Message-ID in header form, `<id@host>`; the `message` table stores the bare
+value. A local join between the two finds nothing, which looks alarming. It is correct: the only
+comparison that matters happens over IMAP, against a real `Message-ID:` header, which contains the
+angle brackets. Written down because the next person to check for duplicates with a SQL join will
+conclude, as this one briefly did, that no message was ever filed.
+
+### Still not covered
+
+That the message threads and renders correctly in Gmail, Outlook and Apple Mail — the third of the
+gate that needs a person at each client.

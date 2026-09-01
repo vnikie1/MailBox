@@ -3491,3 +3491,43 @@ correctly in Gmail, Outlook and Apple Mail. That needs somebody to open it in ea
 from each to thread against. Outlook Windows is called out in the gate as the strict case, and it
 means _classic_ Outlook, whose renderer is Word — not the new Outlook, which is the web client in
 a window and will pass without proving anything.
+
+### Notes — two thirds of the Phase 7 gate now verified
+
+> a send queued while offline goes out on reconnect; killing the app mid-send neither loses nor
+> duplicates the message
+
+Both pass. Criteria were written down before either was run, in
+`docs/PHASE-11-VERIFICATION.md` §6.
+
+**Offline.** Failed at 14:03:14 with the connection refused, went back to `queued` rather than
+`failed` — a retryable failure is not put in front of the user for a network blip — retried
+automatically 60 seconds later, and sent. Nothing retyped, one copy delivered.
+
+**Killed mid-send.** The process was killed the instant the row entered `sending`, found by
+polling the outbox rather than sleeping a guessed interval. On restart the app asked the _server_
+whether a message with that Message-ID was in Sent, got `found_in_sent=false`, correctly concluded
+it had never left, requeued it without spending an attempt, and sent it. One copy.
+
+That the recovery asks the server rather than inferring from local state is the whole design, and
+it is why the Message-ID is the app's own rather than the library's: absent from Sent means
+requeueing cannot duplicate, present means marking sent cannot lose.
+
+Across all three sends of the session: exactly one copy each, none missing, none doubled.
+
+### Incidents
+
+- **A message to iCloud was rejected by Apple, and it is not a defect here.** The send carried two
+  recipients in one envelope. Outlook received it; iCloud bounced within seconds with
+  `554 5.7.1 [CS01] Message rejected due to local policy`. The outbox row records both addresses,
+  Gmail accepted the message, and the bounce came back as ordinary mail — the app did nothing
+  wrong and had nothing to report, since SMTP submission succeeding is not delivery. Recorded
+  because "one recipient got it and the other did not" looks exactly like an envelope bug, and the
+  first instinct was that it was one.
+
+- **A duplicate check found zero copies of messages that had certainly been filed.** The outbox
+  keeps the Message-ID as `<id@host>` and the `message` table keeps the bare value, so a SQL join
+  between them matches nothing. Both are right: the comparison that matters is an IMAP search
+  against a real header, which has the brackets. The wrong conclusion available here — that the
+  Sent copies were never filed — is alarming and would have sent the next hour in the wrong
+  direction.
