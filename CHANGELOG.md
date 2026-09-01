@@ -3559,3 +3559,55 @@ terms before any of that, and would be worth fixing if iCloud had accepted both.
   address minutes later. The reasoning leaned on an absence (no mail arriving from iCloud) which
   had other explanations, and the cost was sending somebody to check a setting that was already
   on. The right next step was the one taken afterwards — read the message we actually sent.
+
+## 2026-09-01 — Threading was off for every Gmail account
+
+### Fixed
+
+- **Conversation threading did nothing on Gmail accounts, and had not since Phase 5.** `rethread`
+  built each message's `Threadable` like this:
+
+      gm_thrid: gm_msgid.and_then(|id| id.parse::<i64>().ok()),
+
+  `X-GM-MSGID` is unique to a message. `X-GM-THRID` is shared by every message in a conversation.
+  Threading treats a Gmail thread id as **authoritative and overriding** — docs/03 §5 — so
+  handing it a per-message id gave every message a thread containing only itself, and the JWZ
+  pass over `References` never got a chance to run.
+
+  The comment above that line said the fetch stored the thread id "separately". It did not: the
+  value was pulled from the server on every sync since Phase 5 and dropped, because no column
+  existed to hold it.
+
+  Nothing failed. There is no error state for "every conversation has one message in it"; the
+  list simply showed what looked like a lot of unrelated mail.
+
+  Found while checking whether a reply threaded correctly for the Phase 7 gate. The reply carried
+  `In-Reply-To` **and** `References` naming its parent, and still landed in a thread of its own —
+  on an account where 1,584 messages occupied 1,483 threads, 1,395 of them holding exactly one
+  message.
+
+  Migration 0010 adds the column, `write_batch` stores it, `rethread` reads it. Two tests cover
+  the fix, and the second is named after the mistake; it was probed by putting the old expression
+  back.
+
+- **The same migration repairs mailboxes that already exist.** Adding the column fixes what
+  happens next and does nothing for mail already stored, whose thread ids were computed from the
+  wrong key — and `rethread` only runs when a batch arrives or something is unthreaded, neither of
+  which is true of a mailbox that has finished syncing. So the migration sets every `thread_id` to
+  NULL, which is the exact signal `unthreaded_count` already watches for: the next sync runs one
+  full rethread over the account. It also deletes the orphaned `thread` rows the old assignment
+  left behind, which is why that account had _more threads than messages_.
+
+  Verified as an upgrade rather than in principle: a copy of a real 1,521-message store, opened
+  with the new build. The conversation that had been split across two threads came back as one.
+
+### Notes — what the averages hide
+
+Messages-per-thread barely moved (1.064 to 1.025), and the count of two-message threads _fell_.
+That is the fix working, not failing. Under the old key, the pairs were mostly the same message
+appearing under two Gmail labels and sharing a `gm_msgid` — an artifact of the bug rather than
+threading. Afterwards those copies join their real conversation, and a mailbox largely made of
+statements and alerts genuinely does consist of one-message threads.
+
+The number worth reading is the single conversation that was checked by hand, which went from two
+threads to one.

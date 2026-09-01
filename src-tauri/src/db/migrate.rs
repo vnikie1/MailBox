@@ -68,6 +68,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "search_history",
         sql: include_str!("../../migrations/0009_search_history.sql"),
     },
+    Migration {
+        version: 10,
+        name: "gmail_thread_id",
+        sql: include_str!("../../migrations/0010_gmail_thread_id.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.

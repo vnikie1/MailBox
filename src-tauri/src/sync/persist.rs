@@ -98,12 +98,13 @@ pub fn write_batch(
         tx.execute(
             "INSERT INTO message (
                  account_id, mailbox_id, uid, message_id, in_reply_to, references_, gm_msgid,
+                 gm_thrid,
                  subject, subject_base, from_name, from_addr, to_json, cc_json,
                  date_sent, date_received, size,
                  flag_seen, flag_answered, flag_flagged, flag_draft, flag_deleted,
                  has_attachment, body_state, from_all, to_all
              ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?24, ?8, ?9, ?10, ?11, ?12, ?13,
                  ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 0, 'none', ?22, ?23
              )",
             params![
@@ -134,6 +135,7 @@ pub fn write_batch(
                 i64::from(message.flags.deleted),
                 envelope.from_all(),
                 envelope.to_all(),
+                message.gm_thrid,
             ],
         )?;
 
@@ -166,7 +168,7 @@ fn addresses_json(addresses: &[super::envelope::Address]) -> String {
 /// not hold the writer for a minute.
 pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<usize, DbError> {
     let mut statement = tx.prepare(
-        "SELECT id, message_id, in_reply_to, references_, subject, date_received, gm_msgid
+        "SELECT id, message_id, in_reply_to, references_, subject, date_received, gm_thrid
            FROM message
           WHERE account_id = ?1
           ORDER BY date_received DESC
@@ -175,7 +177,6 @@ pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<u
 
     let rows = statement.query_map(params![account_id, limit as i64], |row| {
         let references: Option<String> = row.get(3)?;
-        let gm_msgid: Option<String> = row.get(6)?;
 
         Ok(Threadable {
             id: row.get(0)?,
@@ -191,9 +192,11 @@ pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<u
                 .unwrap_or_default(),
             subject: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
             date: row.get(5)?,
-            // Gmail's message id doubles as the thread key here only when the server also
-            // sent a thread id; the fetch stores that separately. Parsed leniently.
-            gm_thrid: gm_msgid.and_then(|id| id.parse::<i64>().ok()),
+            // `X-GM-THRID`, which names a conversation. This used to read `gm_msgid`, which
+            // names a *message* and is unique to it -- and because a Gmail thread id overrides
+            // the reference chain entirely, that gave every message a thread of its own and
+            // turned threading off for Gmail accounts without failing anything.
+            gm_thrid: row.get(6)?,
         })
     })?;
 
@@ -528,6 +531,73 @@ mod tests {
             gm_msgid: None,
             references: Vec::new(),
         }
+    }
+
+    /// Two messages Gmail says are one conversation, with nothing else linking them.
+    #[test]
+    fn a_gmail_conversation_threads_on_its_thread_id() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        // No References, no In-Reply-To, different subjects: the reference chain cannot join
+        // these. The only thing saying they belong together is the Gmail thread id, which is
+        // exactly the case docs/03 §5 says is authoritative.
+        let mut first = fetched(1, "<a@example.test>", "Lunch");
+        first.gm_thrid = Some(500);
+        first.gm_msgid = Some("9001".into());
+
+        let mut second = fetched(2, "<b@example.test>", "Somewhere else entirely");
+        second.gm_thrid = Some(500);
+        second.gm_msgid = Some("9002".into());
+
+        write_batch(&tx, 1, 1, &[first, second]).expect("write");
+        rethread(&tx, 1, 100).expect("rethread");
+
+        let threads: i64 = tx
+            .query_row("SELECT COUNT(DISTINCT thread_id) FROM message", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+
+        assert_eq!(
+            threads, 1,
+            "two messages sharing a Gmail thread id landed in different threads"
+        );
+    }
+
+    /// The mistake this replaced: `gm_msgid` used where `gm_thrid` belonged.
+    #[test]
+    fn the_gmail_message_id_is_not_treated_as_a_thread_id() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        // Same conversation by every ordinary measure -- the second is a reply to the first --
+        // but their Gmail *message* ids differ, as they always do. Reading the message id as a
+        // thread id put each in a thread of its own and silently disabled threading for every
+        // Gmail account: 1,584 messages across 1,483 threads on the account where it was found.
+        let mut parent = fetched(1, "<parent@example.test>", "Re: the plan");
+        parent.gm_msgid = Some("11111".into());
+        parent.gm_thrid = Some(77);
+
+        let mut reply = fetched(2, "<reply@example.test>", "Re: the plan");
+        reply.gm_msgid = Some("22222".into());
+        reply.gm_thrid = Some(77);
+        reply.envelope.in_reply_to = Some("<parent@example.test>".into());
+        reply.references = vec!["<parent@example.test>".into()];
+
+        write_batch(&tx, 1, 1, &[parent, reply]).expect("write");
+        rethread(&tx, 1, 100).expect("rethread");
+
+        let threads: i64 = tx
+            .query_row("SELECT COUNT(DISTINCT thread_id) FROM message", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+
+        assert_eq!(
+            threads, 1,
+            "a reply and its parent were split apart, which is what reading gm_msgid as a              thread id did to every Gmail conversation"
+        );
     }
 
     #[test]
