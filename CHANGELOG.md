@@ -3430,3 +3430,21 @@ reason. "Never silently drop a message" holds.
 - **The format-bar buttons do not expose `InvokePattern`**, so UI Automation cannot press them;
   they need a real mouse click at their screen coordinates. Worth knowing before the next attempt
   to drive this window.
+
+### Fixed — CI could no longer build the installer, and it was this session's doing
+
+`bundle.createUpdaterArtifacts: true` was added to the shipped config during the updater test and
+committed with it. The bundler then refuses to build at all without a signing key:
+
+    A public key has been found, but no private key.
+    Make sure to set `TAURI_SIGNING_PRIVATE_KEY` environment variable.
+
+The real key is not on CI and must never be, so the Installer job failed on the first run after
+the repository went public — the frontend and Rust jobs having just been fixed, which is what made
+it visible.
+
+Keeping the setting is right: a release built without it produces no `.sig`, and the updater can
+then never offer that release, which fails silently and months later. So CI now generates a
+throwaway key and signs the smoke-test artifact with something that verifies against nothing. That
+is the correct outcome for a build nobody installs, and it keeps the packaging path exercised end
+to end.

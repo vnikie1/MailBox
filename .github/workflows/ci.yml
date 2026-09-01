@@ -117,10 +117,28 @@ jobs:
 
       - run: npm ci
 
-      # Proves the whole thing links and packages from a clean clone. Unsigned here;
-      # code signing is a Phase 11 concern (docs/05 §7).
+      # Proves the whole thing links and packages from a clean clone. Not code-signed here;
+      # that is a Phase 11 concern (docs/05 §7).
+      #
+      # The throwaway updater key is not code signing. `bundle.createUpdaterArtifacts` is true in
+      # the shipped config, because a release built without it produces no .sig and the updater
+      # can then never offer that release -- a silent failure months later. The cost is that the
+      # bundler refuses to build at all without a signing key, which is how this job started
+      # failing the moment that setting was committed.
+      #
+      # The real key is not on CI and must never be. A key generated here signs the smoke-test
+      # artifact with something that verifies against nothing, which is correct: nobody installs
+      # this build, and the point is that the packaging path links and runs end to end.
       - name: Build installer
-        run: npm run app:build
+        shell: bash
+        run: |
+          npx tauri signer generate -w "$RUNNER_TEMP/updater-throwaway.key" -p "" --ci
+          # The variable holds the key itself, not a path to it. TAURI_SIGNING_PRIVATE_KEY_PATH
+          # is ignored without a word, which produces a build that succeeds and an update nobody
+          # signed.
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/updater-throwaway.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          npm run app:build
 
       - uses: actions/upload-artifact@v4
         with:
