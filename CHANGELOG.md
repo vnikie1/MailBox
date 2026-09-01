@@ -3111,3 +3111,87 @@ manifest — which is also the fastest loop for changing the manifest and seeing
   `ShellExecuteW`. Both are real and both are wanted — opening the diagnostics folder in Explorer,
   and opening the system browser for OAuth, which docs/03 requires rather than an embedded
   WebView. The test is optional and the references are expected for a `runFullTrust` app.
+
+---
+
+## 2026-09-01 — Phase 11: the App Certification Kit, three runs
+
+### Added
+
+- **`src-tauri/tests/manifest.rs`** — four tests over the embedded Win32 manifest: ASCII only, no
+  double hyphen inside an XML comment, the four settings still declared, tags balanced. Both real
+  mistakes below were probed by reintroducing them.
+- **`resources.pri`**, built by `makepri` during packaging. Without it the scale-qualified assets
+  are files with long names rather than an indexed set: Windows falls back to the unqualified copy
+  at every size, so the 400% assets are unreachable on exactly the high-DPI screens they exist for.
+
+### Fixed
+
+- **The embedded manifest was unparseable, twice, and both times it was punctuation in a comment.**
+
+  First an em-dash. The Windows manifest tooling reads the embedded resource as ANSI, so the three
+  utf-8 bytes arrive as three unrelated characters mid-document: `mt.exe` reported "An illegal
+  character was encountered", and WACK reported "Failed to process the binary" followed by "the
+  app is not DPI Aware" — a long way to travel to be told about a dash.
+
+  Then the obvious fix for it. Replacing each em-dash with two hyphens is illegal XML: a double
+  hyphen may not appear inside a comment. The error changed to "Windows was unable to parse the
+  requested XML data", which looks like progress and is a different bug.
+
+  Single hyphens throughout, and `tests/manifest.rs` now fails the build on either. Neither is
+  visible in a diff.
+
+- **The manifest declared a splash screen a desktop app never shows.** WACK failed the resource
+  test with _Image reference "Assets\Square150x150Logo.png": failed the size restrictions of
+  620 X 300_ — which reads as a problem with the tile and is not. 620x300 is the **splash screen**
+  size, and the manifest pointed the splash at the 150x150 tile. Windows only draws a splash for
+  UWP; a full-trust app draws its own window. The element is gone rather than accompanied by a
+  620x300 image nothing displays, which would have silenced the message and kept the mistake.
+
+### Verified
+
+Three runs, and the arc is the point:
+
+| Run | Verdict | Passed | Failed | Cause                                                        |
+| --- | ------- | ------ | ------ | ------------------------------------------------------------ |
+| 1   | FAIL    | 1      | 22     | Sideloaded from a loose folder, so WACK found no manifest    |
+| 2   | WARNING | 21     | 2      | Both optional: the splash image, and the process-launch APIs |
+| 3   | WARNING | **22** | **1**  | Only the process-launch APIs, which are correct              |
+
+The remaining failure is the optional `Blocked executables` test, noting `CreateProcessW` and
+`ShellExecuteW`. Both are wanted and neither is avoidable: Explorer for the diagnostics folder,
+and the system browser for OAuth, which docs/03 requires instead of an embedded WebView.
+
+### Incidents
+
+- **The failure summary gave advice that did not apply.** With a single failure it still printed
+  a paragraph telling the reader to go and check how the package was installed, because the
+  condition included `groups.Count -eq 1`. Advice that does not apply is worse than none: it
+  sends somebody to look at the one thing already known to be right. It now appears only when
+  more than three failures share a cause, and was probed against both reports.
+- **The manifest test failed on its first run, and the test was wrong.** `<assembly` also matches
+  `<assemblyIdentity`, so the balance check reported the manifest unbalanced when it was not. The
+  same loose-substring mistake as the earlier scan of the binary. It now requires a delimiter
+  after the tag name.
+
+### Notes — the DPI warning, honestly
+
+WACK reports `DPIAwarenessValidation` as a **warning**: "Failed to process the binary", then "the
+app is not DPI Aware". The fix above did not change that, and it was predicted that it would.
+
+What is established about the installed binary:
+
+- `mt.exe` — Microsoft's own manifest tool — reads its manifest cleanly, and it declares
+  `dpiAware=true/PM`, `dpiAwareness=PerMonitorV2`, `asInvoker`, `longPathAware` and UTF-8.
+- The app measurably renders at true 2x: a 780-logical-pixel window measured 1586 physical on a
+  200% display through the UI Automation tree.
+- `strip = true` removes debug symbols, not resources — the VERSIONINFO and RT_MANIFEST resources
+  both survive and are both readable.
+
+So the app is DPI-aware, from process creation rather than shortly after it, and WACK's own first
+message is the accurate one: its validator cannot process this binary. That is a limitation of the
+tool rather than a property of the app, it is a warning rather than a rejection, and no further
+time is being spent on it.
+
+The manifest work was still worth doing on its own terms — it moved DPI awareness ahead of the
+first painted frame, and it cleared the UAC run-level test.

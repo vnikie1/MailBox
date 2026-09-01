@@ -3,6 +3,28 @@
 <!--
   The Win32 application manifest, embedded into Halcyon.exe.
 
+  ## ASCII only, deliberately
+
+  There is not one non-ASCII character in this file, including in these comments, and there must
+  not be. The first version used em-dashes. The manifest then embedded as a resource that neither
+  mt.exe nor the App Certification Kit could read - "An illegal character was encountered" -
+  so WACK reported "Failed to process the binary" and then "the app is not DPI Aware", which is a
+  confusing way to be told about a punctuation mark in a comment.
+
+  The file is declared utf-8 and its bytes are utf-8, but the Windows manifest tooling reads the
+  embedded resource as ANSI, so the three bytes of an em-dash arrive as three unrelated
+  characters in the middle of an XML document.
+
+  ## No double hyphens either, which is the trap under the trap
+
+  Replacing those em-dashes with "-" + "-" fixed the encoding and broke the XML instead: a
+  double hyphen may not appear inside an XML comment at all. The error changed from "An illegal
+  character was encountered" to "Windows was unable to parse the requested XML data", which
+  looks like progress and is a different bug.
+
+  Single hyphens throughout. `tests/manifest.rs` fails the build on either mistake, because
+  neither is visible in a diff and both surface a thousand lines away as a DPI warning.
+
   ## Why this file exists
 
   The App Certification Kit flagged two things, and both were real:
@@ -10,11 +32,11 @@
     "The app is not DPI Aware."
     "Windows applications must have a manifest defining its execution level."
 
-  The first is the interesting one, because the app *is* DPI-aware — wry calls
+  The first is the interesting one, because the app *is* DPI-aware - wry calls
   `SetProcessDpiAwarenessContext` while it starts, which is why the window measures in real
   physical pixels on a 200% display. But that is a call made *after* the process begins. Until it
-  runs, Windows believes the process is DPI-unaware, and anything it does in that window — the
-  size it thinks the screen is, the first frame it paints — is computed against a virtualised
+  runs, Windows believes the process is DPI-unaware, and anything it does in that window - the
+  size it thinks the screen is, the first frame it paints - is computed against a virtualised
   desktop and then bitmap-stretched.
 
   Declaring it here makes it true from process creation instead of shortly afterwards. For a
@@ -23,16 +45,16 @@
 
   ## What each element is for
 
-  * `dpiAwareness = PerMonitorV2` — the modern one: the app is told when it moves between
+  * `dpiAwareness = PerMonitorV2` - the modern one: the app is told when it moves between
     monitors of different scale and re-lays-out, rather than being stretched. `dpiAware = true/PM`
     is the legacy fallback for Windows 8.1 and is read only when the first is not understood.
-  * `requestedExecutionLevel asInvoker` — run as whoever started it, and never ask for
+  * `requestedExecutionLevel asInvoker` - run as whoever started it, and never ask for
     administrator. A mail client has no business being elevated, and `uiAccess="false"` says it
     does not need to drive other applications' windows either.
-  * `longPathAware` — paths longer than 260 characters. A mail client writes files named after
+  * `longPathAware` - paths longer than 260 characters. A mail client writes files named after
     attachments, in a folder the user chose; both halves of that can be long, and the failure
     without this is a save that silently does nothing.
-  * `activeCodePage = UTF-8` — the process code page. Mail is full of non-ASCII, and any Win32
+  * `activeCodePage = UTF-8` - the process code page. Mail is full of non-ASCII, and any Win32
     API called with an `A` suffix anywhere in a dependency would otherwise interpret bytes in the
     machine's legacy code page.
   * The `compatibility` GUIDs say which Windows versions this was tested against. Without them

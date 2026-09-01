@@ -182,7 +182,11 @@ if ($failures.Count -eq 0) {
     ""
   }
 
-  if ($groups.Count -eq 1 -or ($groups | Sort-Object Count -Descending)[0].Count -gt 5) {
+  # Only when many failures share one cause. `$groups.Count -eq 1` was also in this condition,
+  # which meant a run with a single, well-understood failure printed a paragraph telling the
+  # reader to go and check how the package was installed. Advice that does not apply is worse
+  # than none: it sends somebody to look at the one thing that is already right.
+  if (($groups | Sort-Object Count -Descending)[0].Count -gt 3) {
     "Most or all of these share one cause. Before treating them as separate problems, check"
     "that the package is genuinely INSTALLED rather than registered from a loose folder —"
     "`Get-AppxPackage Unikie1.HalcyonMail` should show an InstallLocation under WindowsApps."

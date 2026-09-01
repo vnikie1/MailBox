@@ -84,7 +84,21 @@
             <uap:ShowOn Tile="square150x150Logo" />
           </uap:ShowNameOnTiles>
         </uap:DefaultTile>
-        <uap:SplashScreen Image="Assets\Square150x150Logo.png" />
+        <!--
+          No SplashScreen element, deliberately.
+
+          Windows shows one only for UWP apps; a full-trust desktop application like this one
+          draws its own window and the element is never used. Declaring it anyway is not free:
+          a splash image must be 620x300, this manifest pointed it at the 150x150 tile, and the
+          App Certification Kit failed the resource test with
+
+            Image reference "Assets\Square150x150Logo.png": the image failed the size
+            restrictions of 620 X 300
+
+          which reads as a problem with the tile rather than with an element that should not
+          have been there. Generating a 620x300 image nothing displays would have silenced it
+          and left the same mistake in place.
+        -->
       </uap:VisualElements>
 
       <Extensions>

@@ -151,6 +151,37 @@ foreach ($base in 'Square44x44Logo', 'Square71x71Logo', 'Square150x150Logo', 'Sq
   if (Test-Path $from) { Copy-Item $from (Join-Path $staging "Assets\$base.png") }
 }
 
+# ---------------------------------------------------------------- the resource index
+
+# `resources.pri` is the index that maps one logical image name onto its scale variants. Without
+# it the variants are just files with long names: Windows falls back to the unqualified copy at
+# every size, and the App Certification Kit reports
+#
+#   Image reference "Assets\Square150x150Logo.png": the image failed the size restrictions
+#
+# because it is checking one file against constraints meant for a whole indexed set. Building the
+# index is two commands and it is what makes the 400% assets reachable at all -- without it, the
+# work of generating them is wasted on exactly the high-DPI screens they exist for.
+$makepri = Join-Path $sdk.FullName 'x64\makepri.exe'
+if (Test-Path $makepri) {
+  $priConfig = Join-Path $staging 'priconfig.xml'
+
+  # en-GB to match <Resource Language="en-gb"> in the manifest. A mismatch here indexes the
+  # assets under a language nothing asks for, which is the same as not indexing them.
+  & $makepri createconfig /cf $priConfig /dq en-GB /o | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed" }
+
+  & $makepri new /pr $staging /cf $priConfig /of (Join-Path $staging 'resources.pri') /o | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "makepri new failed" }
+
+  # The config describes how to build the index; it is not part of the package.
+  Remove-Item $priConfig -Force
+  "built resources.pri"
+} else {
+  "WARNING: makepri.exe not found, so the package will have no resource index."
+  "         Scale variants will not be used and WACK will flag the image sizes."
+}
+
 # ---------------------------------------------------------------- pack
 
 $package = Join-Path $outDir "Halcyon_$($msixVersion)_x64.msix"
