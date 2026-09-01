@@ -11,7 +11,7 @@ in [PRIVACY.md](PRIVACY.md) is not true.
 **Email vnikie1@gmail.com** with `SECURITY` in the subject line.
 
 If you prefer, open a
-[GitHub security advisory](https://github.com/vnikie1/halcyon-mail/security/advisories/new),
+[GitHub security advisory](https://github.com/vnikie1/MailBox/security/advisories/new),
 which is private until published.
 
 **Please do not open a public issue for a security problem**, and please do not post a working

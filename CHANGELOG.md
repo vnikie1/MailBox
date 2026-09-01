@@ -3322,3 +3322,43 @@ bodies, into a local account, without disturbing the Gmail account.
   What works is genuine input: `AttachThreadInput` to take real foreground, then keystrokes. A
   wrong hypothesis about _why_ the first attempts failed (a wedged message loop) cost a restart
   and two more attempts before the real cause was tested.
+
+## 2026-09-01 — The source repository is public
+
+### Changed
+
+- **`vnikie1/MailBox` is now public**, and the whole project is on it. Until today GitHub held two
+  commits — the Phase 0 scaffold and a rename — while all 71 commits and 502 files of the actual
+  application existed only on one laptop. `main` was fast-forwarded to the work branch and pushed
+  before the visibility change.
+
+  This is why it mattered: the published site says, twice, that "the source code is published so
+  that anyone can check it". That claim was false in two separate ways — the repository was
+  private, and it did not contain the application. A privacy policy whose central promise is
+  verifiability, linking to a 404, is worse than one that makes no promise at all.
+
+- **The updater endpoint and the security-advisory link point back at `MailBox`.** Both were moved
+  to `halcyon-mail` earlier today purely because `MailBox` was private and its release assets were
+  not publicly downloadable. That reason is gone. Releases and the source now live in one place,
+  which is also where the site already tells people to look.
+
+### Removed
+
+- A real inbox subject line quoted in `docs/PHASE-11-VERIFICATION.md`, before publication. The
+  message id already made the point that a specific message survived the update, and an id is not
+  somebody's mail.
+
+### Notes — what was checked before publishing
+
+Making a repository public exposes its entire history, not the current tree, and it cannot
+meaningfully be undone once anything is cloned or indexed. All 73 commits were scanned first:
+
+| Looked for                                      | Found                                                                                                                                        |
+| ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Updater signing keys (`rsign`/minisign headers) | One hit — the leak-detector assembling its own search string                                                                                 |
+| OAuth client secrets                            | One hit — `GOCSPX-do-not-store-me`, a fixture asserting the secret never reaches SQLite                                                      |
+| Real Google client IDs                          | None                                                                                                                                         |
+| Certificates and private keys                   | None; `test/dovecot/certs.sh` generates them at run time                                                                                     |
+| Real mail content                               | None. Test addresses are all `example.test` / `halcyon.test`                                                                                 |
+| Large blobs or database dumps                   | None; the packed repository is 277 KB                                                                                                        |
+| Personal data                                   | The author's own address in LICENSE, PRIVACY and SECURITY, where it is a deliberate contact point, and one inbox subject line, removed above |
