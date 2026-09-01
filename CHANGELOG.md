@@ -3611,3 +3611,37 @@ statements and alerts genuinely does consist of one-message threads.
 
 The number worth reading is the single conversation that was checked by hand, which went from two
 threads to one.
+
+### Fixed — In-Reply-To and References went out without their angle brackets
+
+RFC 5322 §3.6.4 defines `msg-id` **with** the angle brackets; `In-Reply-To` and `References` are
+lists of `msg-id`. A reply sent from Halcyon carried
+
+    In-Reply-To: AEBD9264-7EF9-4943-A15D-885379DE30E5@icloud.com
+    References: 9Tj2ETUa_NNVrtfmmxIXBQ@gmail.com AEBD9264-...@icloud.com
+
+with none of them bracketed. `Message-ID` was correct only because lettre brackets that one
+itself.
+
+The bare values come from the store: `message.message_id` is kept stripped, which is right for a
+column and wrong for a header, and a reply is assembled from stored values. Lenient clients thread
+it regardless, which is why it went unnoticed; a strict one starts a new conversation, and
+docs/06 Phase 7 names Outlook as the strict one. Four tests, and the end-to-end one was probed by
+removing the call again.
+
+### Notes — the reply chain, checked and correct
+
+A reply sent from Halcyon into a two-message conversation produced:
+
+    In-Reply-To: <the parent>
+    References:  <the root> <the parent>
+
+which is what RFC 5322 §3.6.4 asks for — the parent's own References, then the parent. The
+toolbar Reply button opened the window, the recipient, `Re:` subject, attribution line and nested
+quote were all correct.
+
+**A correction to the record.** The References chain was first reported here as broken, carrying
+only the root. It was not: `sed`/`grep` had shown one line of a header folded across two, and the
+missing half was on the continuation line. The check that settled it unfolds the headers before
+matching. Reading a folded header as a truncated one is an easy mistake and produces a confident,
+wrong bug report.

@@ -149,6 +149,32 @@ fn mailbox(field: &'static str, address: &Address) -> Result<Mailbox, BuildError
 /// it unwraps the block structure so the text reads as paragraphs rather than one run-on line,
 /// and decodes the handful of entities that appear in ordinary prose.
 ///
+/// A message id in the form the headers require: `<id@host>`.
+///
+/// RFC 5322 §3.6.4 defines `msg-id` with the angle brackets as part of it, and `In-Reply-To` and
+/// `References` are lists of `msg-id`. They are not decoration.
+///
+/// They go missing because the store keeps the bare value — `message_id` in the `message` table
+/// is stripped on the way in, which is right for a database column and wrong for a header — and a
+/// reply is assembled from stored values. `Message-ID` escaped the problem only because lettre
+/// brackets that one itself.
+///
+/// A message went out with `In-Reply-To: AEBD9264-...@icloud.com` and no brackets. Lenient
+/// clients thread it anyway, which is why this survived; a strict one starts a new conversation,
+/// and docs/06 Phase 7 names Outlook as the strict one.
+fn bracketed(id: &str) -> String {
+    let trimmed = id.trim();
+
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return trimmed.to_string();
+    }
+
+    format!(
+        "<{}>",
+        trimmed.trim_start_matches('<').trim_end_matches('>')
+    )
+}
+
 /// Whether a class name is one of this app's own, and therefore meaningless in a mail message.
 ///
 /// The CSS-module convention is `_name_hash_line`: `_paragraph_j5qtj_34`. The hash changes when
@@ -342,11 +368,13 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
     // Outlook in particular refuses to thread when the two disagree.
     if let Some(parent) = draft.in_reply_to.as_deref().map(str::trim) {
         if !parent.is_empty() {
-            builder = builder.in_reply_to(parent.to_string());
+            builder = builder.in_reply_to(bracketed(parent));
         }
     }
     if !draft.references.is_empty() {
-        builder = builder.references(draft.references.join(" "));
+        let chain: Vec<String> = draft.references.iter().map(|id| bracketed(id)).collect();
+
+        builder = builder.references(chain.join(" "));
     }
 
     // Identifies the client in a way a postmaster can act on, and nothing more. Standing rule
@@ -621,6 +649,72 @@ fn original_message_id(raw: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod threading_header_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_stored_id_gets_the_brackets_the_header_requires() {
+        // The store keeps message ids bare, which is right for a column and wrong for a header.
+        assert_eq!(bracketed("abc@example.test"), "<abc@example.test>");
+    }
+
+    #[test]
+    fn an_id_that_already_has_them_is_left_alone() {
+        assert_eq!(bracketed("<abc@example.test>"), "<abc@example.test>");
+    }
+
+    #[test]
+    fn whitespace_and_a_half_bracketed_id_are_both_repaired() {
+        assert_eq!(bracketed("  abc@example.test "), "<abc@example.test>");
+        assert_eq!(bracketed("<abc@example.test"), "<abc@example.test>");
+    }
+
+    #[test]
+    fn a_reply_carries_a_bracketed_parent_and_chain() {
+        // The end-to-end shape. A real reply went out with neither header bracketed, and lenient
+        // clients threaded it anyway -- which is exactly why nobody noticed.
+        let draft = Draft {
+            from: Address {
+                name: None,
+                email: "me@example.test".into(),
+            },
+            to: vec![Address {
+                name: None,
+                email: "you@example.test".into(),
+            }],
+            subject: "Re: hello".into(),
+            html: "<p>hi</p>".into(),
+            in_reply_to: Some("parent@example.test".into()),
+            references: vec!["root@example.test".into(), "parent@example.test".into()],
+            ..Draft::default()
+        };
+
+        let built = build(&draft).expect("build");
+        let raw = String::from_utf8_lossy(&built.bytes).to_string();
+
+        // Headers fold across lines; unfold before matching, or a long References looks truncated.
+        let unfolded = raw
+            .replace(
+                "
+ ", " ",
+            )
+            .replace(
+                "
+	", " ",
+            );
+
+        assert!(
+            unfolded.contains("In-Reply-To: <parent@example.test>"),
+            "In-Reply-To is not bracketed: {unfolded}"
+        );
+        assert!(
+            unfolded.contains("References: <root@example.test> <parent@example.test>"),
+            "the References chain is not bracketed, or not in order: {unfolded}"
+        );
+    }
 }
 
 #[cfg(test)]
