@@ -23,7 +23,7 @@ import { ShortcutSheet } from '@/features/help/ShortcutSheet'
 import { ScopeBar, useSearch } from '@/features/search'
 import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
 import { junkMark, rulesRun } from '@/lib/organise'
-import { composeBlank, composeOpen, onJumpListTask, settingsOpen, syncAll } from '@/lib/ipc'
+import { composeOpen, onJumpListTask, settingsOpen, syncAll } from '@/lib/ipc'
 
 import { PaneDivider } from './PaneDivider'
 import { useBreakpoint } from './useBreakpoint'
@@ -153,95 +153,97 @@ export function AppShell() {
 
   // One dispatcher for the whole application. See `app/shortcuts.ts` for why they are not
   // registered where they are used.
-  useShortcuts(
-    {
-      newMessage: useCallback(() => {
-        // The account whose mailbox is open, falling back to the first. Composing from an
-        // arbitrary account would put the wrong address in the From line.
-        const account =
-          mailboxes.find((mailbox) => selectionMailboxIds.includes(mailbox.id))?.accountId ??
-          accounts[0]?.id
+  // One set of callbacks, driving both the keyboard shortcuts and the toolbar buttons.
+  //
+  // They drove only the shortcuts until now. Every button in the toolbar -- New Message, Reply,
+  // Reply All, Forward, Archive, Delete, Junk, Move to, Flag -- rendered, showed the right
+  // enabled state, showed a tooltip, and did nothing at all, because `ToolbarProps` carried no
+  // action callbacks for them to call. See the note in Toolbar.tsx.
+  const actions = {
+    newMessage: useCallback(() => {
+      // `composeOpen` opens the window. `composeBlank` -- which this called until now --
+      // returns the *contents* of a blank draft and opens nothing, so New Message fetched a
+      // draft, dropped it on the floor and left no trace. The compose window calls
+      // `composeBlank` itself once it is open, which is what that command is for.
+      void composeOpen().catch(failed('A new message could not be opened'))
+    }, [failed]),
 
-        if (account === undefined) return
-        void composeBlank(account).catch(failed('A new message could not be opened'))
-      }, [mailboxes, selectionMailboxIds, accounts, failed]),
+    reply: useCallback(() => {
+      if (only !== undefined) void composeOpen(only, 'reply').catch(failed('Reply failed'))
+    }, [only, failed]),
+    replyAll: useCallback(() => {
+      if (only !== undefined) void composeOpen(only, 'replyAll').catch(failed('Reply failed'))
+    }, [only, failed]),
+    forward: useCallback(() => {
+      if (only !== undefined) void composeOpen(only, 'forward').catch(failed('Forward failed'))
+    }, [only, failed]),
 
-      reply: useCallback(() => {
-        if (only !== undefined) void composeOpen(only, 'reply').catch(failed('Reply failed'))
-      }, [only, failed]),
-      replyAll: useCallback(() => {
-        if (only !== undefined) void composeOpen(only, 'replyAll').catch(failed('Reply failed'))
-      }, [only, failed]),
-      forward: useCallback(() => {
-        if (only !== undefined) void composeOpen(only, 'forward').catch(failed('Forward failed'))
-      }, [only, failed]),
+    // Each message goes to its *own* account's Archive, resolved in the core. "All Inboxes"
+    // means a selection routinely spans two accounts, and there is no single archive.
+    archive: useCallback(() => {
+      archive.mutate(selectedMessageIds)
+    }, [selectedMessageIds, archive]),
 
-      // Each message goes to its *own* account's Archive, resolved in the core. "All Inboxes"
-      // means a selection routinely spans two accounts, and there is no single archive.
-      archive: useCallback(() => {
-        archive.mutate(selectedMessageIds)
-      }, [selectedMessageIds, archive]),
+    delete: useCallback(() => {
+      remove.mutate({ ids: selectedMessageIds, permanent: false })
+    }, [selectedMessageIds, remove]),
 
-      delete: useCallback(() => {
-        remove.mutate({ ids: selectedMessageIds, permanent: false })
-      }, [selectedMessageIds, remove]),
+    deletePermanently: useCallback(() => {
+      remove.mutate({ ids: selectedMessageIds, permanent: true })
+    }, [selectedMessageIds, remove]),
 
-      deletePermanently: useCallback(() => {
-        remove.mutate({ ids: selectedMessageIds, permanent: true })
-      }, [selectedMessageIds, remove]),
+    // The core decides the direction from the stored rows, so the window keeps no second copy
+    // of what is read — which would be stale the moment another client changed it.
+    toggleRead: useCallback(() => {
+      toggleRead.mutate(selectedMessageIds)
+    }, [selectedMessageIds, toggleRead]),
 
-      // The core decides the direction from the stored rows, so the window keeps no second copy
-      // of what is read — which would be stale the moment another client changed it.
-      toggleRead: useCallback(() => {
-        toggleRead.mutate(selectedMessageIds)
-      }, [selectedMessageIds, toggleRead]),
+    flag: useCallback(() => {
+      toggleFlag.mutate(selectedMessageIds)
+    }, [selectedMessageIds, toggleFlag]),
 
-      flag: useCallback(() => {
-        toggleFlag.mutate(selectedMessageIds)
-      }, [selectedMessageIds, toggleFlag]),
+    markJunk: useCallback(() => {
+      void junkMark(selectedMessageIds, true).catch(failed('That could not be marked as junk'))
+    }, [selectedMessageIds, failed]),
 
-      markJunk: useCallback(() => {
-        void junkMark(selectedMessageIds, true).catch(failed('That could not be marked as junk'))
-      }, [selectedMessageIds, failed]),
+    moveTo: useCallback(() => {
+      setMovingTo(true)
+    }, []),
 
-      moveTo: useCallback(() => {
-        setMovingTo(true)
-      }, []),
-
-      runRules: useCallback(() => {
-        void rulesRun(selectedMessageIds)
-          .then((report) => {
-            toast.show({
-              title:
-                report.matched === 0
-                  ? 'No rules matched'
-                  : `${String(report.matched)} of ${String(report.examined)} messages matched`,
-            })
+    runRules: useCallback(() => {
+      void rulesRun(selectedMessageIds)
+        .then((report) => {
+          toast.show({
+            title:
+              report.matched === 0
+                ? 'No rules matched'
+                : `${String(report.matched)} of ${String(report.examined)} messages matched`,
           })
-          .catch(failed('The rules could not be run'))
-      }, [selectedMessageIds, toast, failed]),
+        })
+        .catch(failed('The rules could not be run'))
+    }, [selectedMessageIds, toast, failed]),
 
-      undo,
-      redo,
+    undo,
+    redo,
 
-      search: focusSearch,
+    search: focusSearch,
 
-      getMail: useCallback(() => {
-        void syncAll().catch(failed('Could not check for new mail'))
-      }, [failed]),
+    getMail: useCallback(() => {
+      void syncAll().catch(failed('Could not check for new mail'))
+    }, [failed]),
 
-      toggleSidebar: useCallback(() => {
-        toggleSidebar()
-      }, [toggleSidebar]),
+    toggleSidebar: useCallback(() => {
+      toggleSidebar()
+    }, [toggleSidebar]),
 
-      showShortcuts: useCallback(() => {
-        setShowingShortcuts(true)
-      }, []),
+    showShortcuts: useCallback(() => {
+      setShowingShortcuts(true)
+    }, []),
 
-      settings: openSettings,
-    },
-    { hasSelection: selectedMessageIds.length > 0 },
-  )
+    settings: openSettings,
+  }
+
+  useShortcuts(actions, { hasSelection: selectedMessageIds.length > 0 })
 
   // Open on the first account's inbox once the mailboxes arrive. The store starts with no
   // selection because it no longer owns the data and cannot know what exists.
@@ -379,6 +381,7 @@ export function AppShell() {
                 search: search.text,
                 onSearchChange: search.setText,
                 onSearchCommit: search.commit,
+                actions,
               }}
             />
           </div>

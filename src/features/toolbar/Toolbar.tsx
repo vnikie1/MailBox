@@ -35,13 +35,37 @@ import styles from './Toolbar.module.css'
  * toolbar whose buttons come and go changes width and shifts the search field — standing
  * rule 6.
  */
+/**
+ * What the toolbar buttons do.
+ *
+ * These are the same callbacks the keyboard shortcuts use, passed down from AppShell rather than
+ * rebuilt here, so a button and its shortcut cannot drift apart.
+ *
+ * There were none of these until Phase 7's gate was attempted. Every button below rendered, took
+ * a tooltip, greyed itself out correctly when nothing was selected -- and had no onClick. The
+ * toolbar was decorative, which nobody noticed because the message list carries its own Reply,
+ * Reply All and Forward buttons and the shortcuts all worked.
+ */
+export interface ToolbarActions {
+  newMessage: () => void
+  reply: () => void
+  replyAll: () => void
+  forward: () => void
+  archive: () => void
+  delete: () => void
+  markJunk: () => void
+  moveTo: () => void
+  flag: () => void
+}
+
 export interface ToolbarProps {
+  actions: ToolbarActions
   search: string
   onSearchChange: (text: string) => void
   onSearchCommit: (text: string) => void
 }
 
-export function Toolbar({ search, onSearchChange, onSearchCommit }: ToolbarProps) {
+export function Toolbar({ actions, search, onSearchChange, onSearchCommit }: ToolbarProps) {
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
 
   const hasSelection = selectedMessageIds.length > 0
@@ -53,38 +77,75 @@ export function Toolbar({ search, onSearchChange, onSearchCommit }: ToolbarProps
         <div className={styles.group}>
           <Tooltip
             content="New Message"
-            trigger={<IconButton icon={PenSquare} label="New Message" />}
+            trigger={
+              <IconButton icon={PenSquare} label="New Message" onClick={actions.newMessage} />
+            }
           />
         </div>
 
         <div className={styles.group}>
           <Tooltip
             content="Reply"
-            trigger={<IconButton icon={Reply} label="Reply" disabled={!single} />}
+            trigger={
+              <IconButton icon={Reply} label="Reply" disabled={!single} onClick={actions.reply} />
+            }
           />
           <Tooltip
             content="Reply All"
-            trigger={<IconButton icon={ReplyAll} label="Reply All" disabled={!single} />}
+            trigger={
+              <IconButton
+                icon={ReplyAll}
+                label="Reply All"
+                disabled={!single}
+                onClick={actions.replyAll}
+              />
+            }
           />
           <Tooltip
             content="Forward"
-            trigger={<IconButton icon={Forward} label="Forward" disabled={!single} />}
+            trigger={
+              <IconButton
+                icon={Forward}
+                label="Forward"
+                disabled={!single}
+                onClick={actions.forward}
+              />
+            }
           />
         </div>
 
         <div className={styles.group}>
           <Tooltip
             content="Archive"
-            trigger={<IconButton icon={Archive} label="Archive" disabled={!hasSelection} />}
+            trigger={
+              <IconButton
+                icon={Archive}
+                label="Archive"
+                disabled={!hasSelection}
+                onClick={actions.archive}
+              />
+            }
           />
           <Tooltip
             content="Delete"
-            trigger={<IconButton icon={Trash2} label="Delete" disabled={!hasSelection} />}
+            trigger={
+              <IconButton
+                icon={Trash2}
+                label="Delete"
+                disabled={!hasSelection}
+                onClick={actions.delete}
+              />
+            }
           />
           <Tooltip
             content="Move to Junk"
             trigger={
-              <IconButton icon={ShieldAlert} label="Move to Junk" disabled={!hasSelection} />
+              <IconButton
+                icon={ShieldAlert}
+                label="Move to Junk"
+                disabled={!hasSelection}
+                onClick={actions.markJunk}
+              />
             }
           />
         </div>
@@ -92,11 +153,25 @@ export function Toolbar({ search, onSearchChange, onSearchCommit }: ToolbarProps
         <div className={styles.group}>
           <Tooltip
             content="Move to…"
-            trigger={<IconButton icon={FolderInput} label="Move to" disabled={!hasSelection} />}
+            trigger={
+              <IconButton
+                icon={FolderInput}
+                label="Move to"
+                disabled={!hasSelection}
+                onClick={actions.moveTo}
+              />
+            }
           />
           <Tooltip
             content="Flag"
-            trigger={<IconButton icon={Flag} label="Flag" disabled={!hasSelection} />}
+            trigger={
+              <IconButton
+                icon={Flag}
+                label="Flag"
+                disabled={!hasSelection}
+                onClick={actions.flag}
+              />
+            }
           />
         </div>
       </TooltipGroup>

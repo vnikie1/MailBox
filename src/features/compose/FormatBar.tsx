@@ -264,7 +264,25 @@ export function FormatBar() {
   }, [editor, active.link])
 
   return (
-    <div className={styles.bar} role="toolbar" aria-label="Formatting">
+    <div
+      className={styles.bar}
+      role="toolbar"
+      aria-label="Formatting"
+      // Keep the caret where it was.
+      //
+      // A button takes focus on mousedown, so clicking Bold moved focus out of the editor and
+      // into the toolbar: the command still applied, but the next keystroke went nowhere and the
+      // person had to click back into the body before they could carry on typing. Every button
+      // here had it, and it is the sort of thing that is invisible in a screenshot and maddening
+      // to use. Preventing the default on mousedown stops the focus change without stopping the
+      // click, which is what every rich-text toolbar does.
+      //
+      // It is on the container rather than on fifteen buttons because mousedown bubbles, and
+      // fifteen copies of a subtlety is fifteen chances to leave one out.
+      onMouseDown={(event) => {
+        event.preventDefault()
+      }}
+    >
       <TooltipGroup>
         <Tooltip
           content="Bold"

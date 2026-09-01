@@ -3362,3 +3362,71 @@ meaningfully be undone once anything is cloned or indexed. All 73 commits were s
 | Real mail content                               | None. Test addresses are all `example.test` / `halcyon.test`                                                                                 |
 | Large blobs or database dumps                   | None; the packed repository is 277 KB                                                                                                        |
 | Personal data                                   | The author's own address in LICENSE, PRIVACY and SECURITY, where it is a deliberate contact point, and one inbox subject line, removed above |
+
+## 2026-09-01 — Phase 7: the toolbar did nothing, and the app cannot send
+
+### Fixed
+
+- **Every button in the main toolbar was decorative.** New Message, Reply, Reply All, Forward,
+  Archive, Delete, Move to Junk, Move to and Flag rendered, took tooltips, greyed themselves out
+  correctly against the selection — and had no `onClick`. `ToolbarProps` carried no action
+  callbacks at all, so there was nothing for them to call.
+
+  The nine handlers already existed in `AppShell`, wired to the keyboard shortcuts. They are now
+  one object driving both, so a button and its shortcut cannot drift apart.
+
+  It went unnoticed because everything the toolbar offers is reachable another way: the message
+  list carries its own Reply, Reply All and Forward, and every shortcut worked.
+
+- **There was no way to start a new message inside the window.** The `newMessage` shortcut called
+  `composeBlank()`, which returns the _contents_ of a blank draft and opens nothing, where
+  `composeOpen()` is what creates the window. So New Message fetched a draft, dropped it, and left
+  no trace — no window, no error, nothing in the log. Reply, Reply All and Forward all used
+  `composeOpen` correctly, which is why the mistake looked like working code. The only way in was
+  the taskbar Jump List, which goes through Rust.
+
+- **The format bar took focus away from the editor on every click.** A button takes focus on
+  mousedown, so clicking Bold moved the caret out of the body: the command applied, but the next
+  keystroke went nowhere and you had to click back into the message before typing again. Fixed by
+  preventing the default on mousedown at the toolbar container, which is what every rich-text
+  toolbar does. Verified that the colour and size menus still open.
+
+- **`gate_2_a_five_predicate_smart_mailbox_agrees_with_hand_written_sql` was passing vacuously off
+  this machine.** The test uses the real mail store when one exists and a 199-row fixture when it
+  does not. `add_message` hardcodes `has_attachment = 1`; the predicate requires
+  `has_attachment = 0`. So on the fixture the hand-written query matched nothing, the compiled
+  query matched nothing, and the two agreed over an empty set.
+
+  The test's own vacuity assertion caught it — but only where there is no mail store, and the
+  machine it was written on always had one. It failed for the first time in CI, on the first run
+  after the repository went public. The fixture now varies sender, subject, attachment, read state
+  and size, so each of the five clauses can matter: 79 of 199 rows match, against 283 of 1,521 on
+  the real store.
+
+### Notes — the Phase 7 gate cannot be run
+
+> Exit gate: send a reply to Gmail, Outlook and Apple Mail and confirm all three thread it
+> correctly and render the HTML correctly…
+
+**Halcyon cannot send mail from the only kind of account it has.** A message composed and sent to
+two real addresses failed in the outbox with
+
+    the message has no usable envelope: sending from an OAuth account is not available yet
+
+This is deliberate and documented in `sync/sender.rs` — Phase 7 implemented password submission,
+and SMTP XOAUTH2 was left for later. The consequence had not been written down anywhere: the
+configured account is Gmail over OAuth, so there is no account this build can send from, and the
+send half of Phase 7 has never been exercised end to end by anybody.
+
+What did work, and is worth recording: the failure was **loud**. The outbox moved the message to
+`failed` after five attempts, kept the message, and the main window showed a banner naming the
+reason. "Never silently drop a message" holds.
+
+### Incidents
+
+- **Driving the compose window found the three bugs above in the first ten minutes**, which is the
+  argument for exercising a feature in the running app rather than trusting its unit tests. All
+  three are invisible in a screenshot and none is reachable from a test that does not click.
+- **The format-bar buttons do not expose `InvokePattern`**, so UI Automation cannot press them;
+  they need a real mouse click at their screen coordinates. Worth knowing before the next attempt
+  to drive this window.

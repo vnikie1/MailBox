@@ -331,15 +331,47 @@ fn gate_2_a_five_predicate_smart_mailbox_agrees_with_hand_written_sql() {
         )
     } else {
         let conn = store();
+
+        // Varied deliberately, because every clause of the predicate has to be able to matter.
+        //
+        // This used to insert 199 near-identical rows. `add_message` hardcodes
+        // `has_attachment = 1` and the predicate requires `has_attachment = 0`, so the
+        // hand-written query matched nothing, the compiled query matched nothing, and the two
+        // agreed over an empty set. The vacuity assertion below is what caught it.
+        //
+        // It took months to surface because this branch only runs when there is no mail store on
+        // the machine, and the machine it was written on always had one. CI has none, so the
+        // first CI run after the repository went public failed on a test that had "passed"
+        // locally every time.
         for id in 1..200 {
-            add_message(
-                &conn,
-                id,
-                &format!("sender{id}@example.test"),
-                &format!("Message {id} here"),
-                1,
-            );
+            // Some rows must fail each clause, or a compiled predicate that dropped that clause
+            // would still agree with the hand-written one.
+            let sender = if id % 7 == 0 {
+                format!("s{id}@ex.test") // no 'a'
+            } else {
+                format!("sender{id}@example.test")
+            };
+
+            let subject = if id % 5 == 0 {
+                format!("Msg {id}") // no 'e'
+            } else {
+                format!("Message {id} here")
+            };
+
+            add_message(&conn, id, &sender, &subject, 1);
+
+            conn.execute(
+                "UPDATE message SET has_attachment = ?2, flag_seen = ?3, size = ?4 WHERE id = ?1",
+                params![
+                    id,
+                    i64::from(id % 3 == 0),
+                    i64::from(id % 11 == 0),
+                    if id % 13 == 0 { 50 } else { 2048 },
+                ],
+            )
+            .expect("vary the fixture row");
         }
+
         (conn, "a fixture")
     };
 
