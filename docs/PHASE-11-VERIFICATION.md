@@ -38,7 +38,7 @@ Criterion 4 in full:
     messages    1521 -> 1521      mailboxes    45 -> 45      threads  1590 -> 1590
     withBodies    48 -> 48        flagged       3 -> 3       unread    382 -> 382
     attachments    7 -> 7         accounts      1 -> 1
-    newest message id 101643 -> 101643 ("Word of the day - Tact")
+    newest message id 101643 -> 101643 (subject unchanged)
     settings 3 -> 3, account signature present -> present
 
 Counts were read from the database directly rather than from the app's own UI, because the app is
