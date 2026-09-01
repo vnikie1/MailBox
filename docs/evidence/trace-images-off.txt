@@ -1,0 +1,5 @@
+﻿Halcyon network trace
+recorded 2026-09-01 23:21:07, 70 seconds, 300ms polling
+
+ADDRESS                  PORT    FIRST     HOST
+192.178.158.109          993     23:19:57  lcdels-in-f109.1e100.net

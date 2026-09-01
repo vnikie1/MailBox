@@ -3657,3 +3657,69 @@ passed. Neither party has a classic Outlook client. The machine has the new Outl
 web client in a window and shares outlook.com's permissive renderer; the gate names Outlook
 Windows precisely because classic Outlook renders through the Word engine. Checking there would
 pass without touching the case the clause was written for.
+
+## 2026-09-01 — Four unverified gate clauses, closed or honestly measured
+
+An audit of every phase's exit gate found several with no recorded evidence behind them. Four were
+closeable without another person; these are those four.
+
+### Added
+
+- **The XSS corpus, at last.** docs/06 Phase 6 says "write that corpus first and commit it", and
+  it never was. `src-tauri/tests/fixtures/xss-corpus.txt` holds 69 payloads; `tests/xss_corpus.rs`
+  runs each through **`render`** rather than `sanitise`, because the allowlist is only the first
+  of four passes and a hole introduced after it would leave the sanitiser innocent.
+
+      XSS corpus: 69 payloads, images blocked, 0 survived
+      XSS corpus: 69 payloads, images allowed, 0 survived
+
+- **`tools/network-trace.ps1`**, and the trace the gate asks for. Reading 18 real newsletters with
+  images blocked produced **one** outbound connection — the mail server. The same 18 with images
+  allowed produced **24**, to CloudFront, Akamai, Cloudflare and Google. The second figure is the
+  control: without it, "no connections" is equally consistent with an instrument that cannot see
+  any. Both traces are committed under `docs/evidence/`.
+
+- **`tools/cold-start.ps1`**, and the first honest cold-start figure. What existed was 545ms
+  core-side, debug, excluding WebView paint. Measured properly — release build, process creation
+  to a toolbar that UI Automation can find — the median is **627ms against a 800ms budget**, with
+  the first launch after an install at 1487ms. That outlier is reported rather than averaged away.
+
+- **`tools/shoot-window.ps1`**, and newsletter screenshots in both themes under `docs/evidence/`.
+
+- **`docs/PHASE-6-VERIFICATION.md`**, which did not exist.
+
+### Fixed
+
+- **`&shy;` was showing in the message list.** A real row read
+
+      Sign up to rider Insurance at Rs 3/trip. &shy; &shy; &shy; &shy;
+
+  Bulk senders pad with hundreds of soft hyphens to push their own text into whatever a client
+  shows as a preview. Decoded they are invisible; undecoded they are five visible characters each.
+  `decode_entities` handled named and numeric entities but not `&shy;`, `&zwnj;` or `&zwj;`, and
+  `build_preview` never called it at all. Four tests, including that "Marks & Spencer" and "R&D"
+  survive an over-eager decoder.
+
+  Previews are computed once and stored, so this corrects a message whose body is fetched again
+  and not one already cached.
+
+### Notes — what is still not closed
+
+Phase 6's third clause remains **PARTIAL**: 18 newsletters were opened and none rendered to empty
+output, but the gate describes comparing twenty against another client, and nobody has. Calling
+that a pass would be the overclaim this record exists to correct.
+
+The gate's "no network request **before consent**" has also drifted from the app: remote images
+have loaded by default since 2026-08-28, at the owner's request, so the clause now tests the
+setting rather than the default. `PRIVACY.md` says so in those words. Recorded because a gate that
+quietly stops describing the app is worse than one that fails.
+
+### Incidents
+
+- **The corpus test reported a survivor that was not one.** `<xmp><img src=x onerror=alert(1)>`
+  came back as "kept the event handler onerror=". It had not: `<xmp>` renders its contents as
+  text, the sanitiser escapes them, and the output was `&lt;img ...&gt;` — characters on a page.
+  The detector was scanning raw output without distinguishing a tag from escaped text. Worth
+  writing down because a test that cries wolf is worse than no test: the next real finding gets
+  waved through as "probably the xmp thing again". It now scans only inside tag boundaries, and
+  asserts both that a live handler is caught and that escaped text is not.

