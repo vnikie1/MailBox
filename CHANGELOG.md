@@ -3645,3 +3645,15 @@ only the root. It was not: `sed`/`grep` had shown one line of a header folded ac
 missing half was on the continuation line. The check that settled it unfolds the headers before
 matching. Reading a folded header as a truncated one is an easy mistake and produces a confident,
 wrong bug report.
+
+### Notes — Apple Mail threading confirmed, Outlook still untested
+
+The account holder confirms iCloud shows all three messages as one conversation, so the reply
+threads correctly in Apple Mail as well as in Gmail. Combined with §6, six of the eight clauses of
+the Phase 7 exit gate now pass.
+
+The two that do not are the Outlook ones, and they are recorded as **not tested** rather than
+passed. Neither party has a classic Outlook client. The machine has the new Outlook, which is the
+web client in a window and shares outlook.com's permissive renderer; the gate names Outlook
+Windows precisely because classic Outlook renders through the Word engine. Checking there would
+pass without touching the case the clause was written for.

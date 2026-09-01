@@ -274,3 +274,43 @@ conclude, as this one briefly did, that no message was ever filed.
 
 That the message threads and renders correctly in Gmail, Outlook and Apple Mail — the third of the
 gate that needs a person at each client.
+
+---
+
+## 7. Phase 7 exit gate — where it actually stands
+
+> Exit gate: send a reply to Gmail, Outlook and Apple Mail and confirm all three thread it
+> correctly and render the HTML correctly (Outlook Windows is the strictest — check it
+> specifically); a send queued while offline goes out on reconnect; killing the app mid-send
+> neither loses nor duplicates the message.
+
+| Clause                                        | Status  | Evidence                                                        |
+| --------------------------------------------- | ------- | --------------------------------------------------------------- |
+| Sending works at all                          | PASS    | XOAUTH2; first attempt, ~7s; filed in Sent by IMAP APPEND        |
+| Threads correctly in Gmail                    | PASS    | Reply and parent share one `thread_id` after the threading fix   |
+| Threads correctly in Apple Mail               | PASS    | Confirmed by the account holder: iCloud shows one conversation   |
+| Threads correctly in Outlook                  | **NOT TESTED** | No Outlook client available to either party              |
+| Renders correctly in Outlook (the strict case) | **NOT TESTED** | As above                                                 |
+| Offline send goes out on reconnect            | PASS    | §6A — retried 60s later, one copy                                |
+| Mid-send kill loses nothing, duplicates nothing | PASS  | §6B — resolved against Sent, one copy, no attempt spent          |
+
+### The two clauses that are not met, and why they are not being called met
+
+Neither party has an Outlook client. The machine has `Microsoft.OutlookForWindows` — the *new*
+Outlook, which is the web client in a window and shares outlook.com's permissive renderer. The
+gate names Outlook Windows specifically because **classic** Outlook renders HTML through the Word
+engine, which is where tables collapse, margins vanish and CSS silently stops applying.
+
+Testing on new Outlook would pass easily and prove nothing about the case the clause exists for.
+Recording it as untested is the honest outcome; recording it as passed because a message looked
+fine in a webmail client would be worse than leaving it blank.
+
+What can be said without a client is that the message is now well-formed in the two ways that
+most often break Word-engine rendering and strict threading: it is a complete HTML document rather
+than a fragment (§5), and `In-Reply-To` and `References` carry the angle brackets RFC 5322
+requires. Both were wrong until this session, and both were found by looking at bytes rather than
+at a rendering.
+
+**To close these:** classic Outlook comes with a Microsoft 365 subscription. Open the message,
+look at the bullets and the block quote indent, and reply to it; the reply threading either works
+or it does not, and it takes about ten minutes.
