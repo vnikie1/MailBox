@@ -27,10 +27,42 @@ import styles from './settings.module.css'
  * markup, for the same reason a message body goes through a sanitiser: it is remote content,
  * and the fact that we published it does not make it safe to inject.
  */
+/**
+ * What to say when an update will not install.
+ *
+ * ## Why this is not one message
+ *
+ * A refused signature and a failed download are the same event from the user's side -- the
+ * button did nothing -- and completely different events in fact. One means the file was damaged
+ * or is not the file we published; the other means the network went away halfway through. Saying
+ * "something went wrong" for both wastes the one moment when the distinction is cheap to draw.
+ *
+ * The signature case deliberately says the app was not changed. Somebody who has just been told
+ * an update was rejected as unsigned has every reason to wonder what it did before being caught,
+ * and the answer -- nothing, it is verified before it is run -- is the reassuring part.
+ */
+function describeInstallFailure(error: unknown): string {
+  const message =
+    typeof error === 'object' && error !== null && 'message' in error
+      ? String(error.message)
+      : String(error)
+
+  if (/signature|verif/i.test(message)) {
+    return (
+      'That update was refused: its signature did not match. Halcyon has not been changed. ' +
+      'This usually means the download was damaged; it can also mean the file was not the one ' +
+      'we published.'
+    )
+  }
+
+  return 'The update could not be installed. Halcyon has not been changed, so it is safe to try again.'
+}
+
 export function UpdateSettings() {
   const [status, setStatus] = useState<UpdateStatus | null>(null)
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
+  const [installError, setInstallError] = useState<string | null>(null)
 
   // Asked once when the pane opens, because somebody who has opened Settings is not going to be
   // interrupted by the answer. Nothing checks on a timer.
@@ -79,8 +111,10 @@ export function UpdateSettings() {
                 disabled={installing}
                 onClick={() => {
                   setInstalling(true)
-                  void updateInstall().catch(() => {
+                  setInstallError(null)
+                  void updateInstall().catch((error: unknown) => {
                     setInstalling(false)
+                    setInstallError(describeInstallFailure(error))
                   })
                 }}
               >
@@ -102,6 +136,12 @@ export function UpdateSettings() {
                     ? `Version ${status.version ?? 'unknown'} is available.`
                     : 'Halcyon is up to date.'}
           </p>
+
+          {installError !== null && (
+            <p className={styles.hint} role="alert">
+              {installError}
+            </p>
+          )}
 
           {status?.available === true && status.notes !== null && (
             <p className={styles.hint}>{status.notes}</p>

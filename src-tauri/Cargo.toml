@@ -5,9 +5,23 @@ description = "A macOS-Mail-quality email client for Windows 11"
 edition = "2021"
 rust-version = "1.82"
 publish = false
-# Two binaries now exist (the app and the dev seed tool), so `cargo run` and therefore
+# Several binaries exist (the app and the dev tools), so `cargo run` and therefore
 # `tauri dev` need to be told which one is the app.
 default-run = "halcyon"
+
+# Every file in src/bin/ is auto-discovered by cargo as a binary of this package, built into
+# target/release by a release build, and then picked up by the NSIS bundler. That is how
+# seed.exe and crashgate.exe came to be installed on a real machine: a clean install of 1.0.0
+# put both of them in %LOCALAPPDATA%Halcyon, next to halcyon.exe.
+#
+# seed.exe writes fabricated mail into the database. crashgate.exe deliberately crashes the
+# app. Neither is dangerous by itself, but neither has any business being shipped, and the
+# comment that used to sit below asserted the opposite -- that Tauri bundles only the product
+# binary. It does not, and nobody checked until an installed copy was listed file by file.
+#
+# With auto-discovery off, every binary is declared explicitly and the dev tools sit behind a
+# feature that release builds do not enable, so they are never built and cannot be bundled.
+autobins = false
 
 [lib]
 name = "halcyon_lib"
@@ -146,11 +160,40 @@ strip = true
 proptest = "1.9.0"
 tempfile = "3"
 
-# Development seed tool. Tauri bundles only the productName binary, so this is built in
-# development and never installed.
+[[bin]]
+name = "halcyon"
+path = "src/main.rs"
+
+# The development tools. required-features is what keeps them out of a release: without
+# --features devtools cargo does not build them at all, so there is nothing in target/release
+# for the bundler to find.
+#
+#   cargo run --features devtools --bin seed
+
 [[bin]]
 name = "seed"
 path = "src/bin/seed.rs"
+required-features = ["devtools"]
+
+[[bin]]
+name = "crashgate"
+path = "src/bin/crashgate.rs"
+required-features = ["devtools"]
+
+[[bin]]
+name = "junkgate"
+path = "src/bin/junkgate.rs"
+required-features = ["devtools"]
+
+[[bin]]
+name = "searchgate"
+path = "src/bin/searchgate.rs"
+required-features = ["devtools"]
+
+[[bin]]
+name = "unseed"
+path = "src/bin/unseed.rs"
+required-features = ["devtools"]
 
 [features]
 # Store builds turn the updater off. The Microsoft Store installs updates itself, and two
@@ -159,6 +202,10 @@ path = "src/bin/seed.rs"
 default = ["self-update"]
 self-update = ["dep:tauri-plugin-updater"]
 store = []
+
+# The tools in src/bin/. Off by default so a release build does not produce them, and
+# therefore cannot ship them -- see the note on autobins above.
+devtools = []
 
 # The twelve-hour soak. Behind a feature so an ordinary `cargo test` does not try to *link* it
 # — while a soak is running, its own binary is locked and the linker fails with LNK1104, which

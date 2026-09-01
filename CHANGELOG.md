@@ -3195,3 +3195,78 @@ time is being spent on it.
 
 The manifest work was still worth doing on its own terms — it moved DPI awareness ahead of the
 first painted frame, and it cleared the UAC run-level test.
+
+## 2026-09-01 — Phase 11: the updater, actually run
+
+### Added
+
+- **`src-tauri/tests/bundle.rs`** — three tests asserting that a release build produces the app
+  and nothing else. Probed by removing `required-features` from one tool and by turning
+  `autobins` back on; each probe failed the intended test with the intended message.
+- **An error message when an update will not install.** `UpdateSettings.tsx` now renders the
+  failure in a `role="alert"`, with separate wording for a rejected signature, both saying the
+  app has not been changed.
+
+### Fixed
+
+- **`seed.exe` and `crashgate.exe` were being installed on users' machines.** Every file in
+  `src-tauri/src/bin/` is auto-discovered by cargo as a binary, built into `target/release` by a
+  release build, and picked up from there by the NSIS bundler. A clean install of 1.0.0 — after a
+  full uninstall, so nothing was stale — put both next to `halcyon.exe` in `%LOCALAPPDATA%\Halcyon`.
+
+  `seed.exe` writes fabricated mail into the user's database; `crashgate.exe` crashes the app on
+  purpose. Fixed with `autobins = false` plus `required-features = ["devtools"]` on all five dev
+  tools, so a release build does not produce them and therefore cannot ship them.
+
+  A comment in `Cargo.toml` had asserted the opposite — "Tauri bundles only the productName
+  binary" — for months. It was wrong, and writing it down is probably why nobody checked.
+
+- **A refused update was silent.** `updateInstall().catch(() => setInstalling(false))` reset the
+  button and said nothing, so a rejected signature was indistinguishable from not having clicked.
+  Found by the tamper test below, not by reading the code — it had been read several times.
+
+### Notes — the updater gate
+
+1.0.0 installed from its own installer, offered a signed 1.0.1 from a local server, driven
+through the app's own UI. All six pre-written criteria passed; the database came through
+identical:
+
+    messages 1521 -> 1521   mailboxes 45 -> 45   threads 1590 -> 1590   attachments 7 -> 7
+    withBodies 48 -> 48     flagged 3 -> 3       unread 382 -> 382      accounts 1 -> 1
+    newest message id 101643 unchanged, settings 3 -> 3, signature intact
+
+The half worth keeping is the second check: the updated app, asked by the same server still
+offering 1.0.1, answered "Halcyon is up to date". A comparison that always returns true would
+have passed criterion 1 just as well.
+
+**Tamper test.** The signed 1.0.1 installer was copied to a 1.0.2 name, its signature kept, and
+one byte flipped in the middle. The app offered it, downloaded all 4,803,972 bytes, and refused
+to install it. That is the security argument in `ipc/update.rs` — TLS proves where a file came
+from, the signature proves whose it is — demonstrated rather than asserted.
+
+### Notes — uninstall
+
+`uninstall.exe /S` removes the install directory, the Start Menu entry, the `HKCU` uninstall key
+and the `Halcyon.eml` class. `%LOCALAPPDATA%\com.uniki.halcyon` is deliberately left: it holds
+the mail database, and an uninstaller that silently deletes somebody's mail is the worse failure.
+
+### Incidents
+
+- **Two hours were spent building a local HTTPS server that was never needed.** A release build
+  refuses a plain-`http` updater endpoint, so a self-signed certificate for `127.0.0.1` was
+  created, exported and added to the machine's trusted roots. The actual cause of the original
+  failure was that the build predated adding `dangerousInsecureTransportProtocol` to the override
+  config — the `--config` merge had worked all along. Checking the built binary for the endpoint
+  string took one command and would have settled it before any of the certificate work started.
+
+  The certificate has been removed from `Cert:\LocalMachine\Root` and `Cert:\CurrentUser\My`, and
+  the `.pfx` deleted. Nothing about the machine's trust store is left changed.
+
+- **A conclusion was reported that turned out to be wrong.** "`dangerousInsecureTransportProtocol`
+  did not survive the `--config` merge" was recorded as established. It had not been checked. It
+  is the second time this phase that a diagnosis was believed rather than tested, after the
+  manifest, and both cost more than the test would have.
+
+- **The lint gate caught two problems in this session's own new code** — an unnecessary type
+  assertion and five `eslint-disable` directives that never applied — neither of which would have
+  been noticed by reading.

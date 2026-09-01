@@ -38,12 +38,15 @@ and your provider, and no analytics of any kind.
 
 ## Installing
 
-Download the installer from [Releases](https://github.com/vnikie1/MailBox/releases), or install
-from the Microsoft Store.
+**From the Microsoft Store.** That is the only way Halcyon is distributed at present, and it is
+the better one: the Store signs the package, so there is no SmartScreen warning, and updates
+arrive through Windows Update rather than through the app.
 
-> **Windows may warn you the first time.** Until the certificate has been seen by enough
-> machines, SmartScreen shows "Windows protected your PC" for a downloaded installer. Choose
-> **More info → Run anyway**. The Store version never shows this.
+A downloadable installer is built and works, but is **not offered yet**. An unsigned `.exe` shows
+"Windows protected your PC" on every machine that downloads it, and Smart App Control — on by
+default on new Windows 11 installs — blocks it outright with no way to override. Publishing one
+in that state would mean asking every user to click through a security warning, which is a habit
+worth nobody's convenience. It will appear here once the code-signing certificate is in place.
 
 Windows 11, 64-bit. The WebView2 runtime is required and is already present on Windows 11.
 

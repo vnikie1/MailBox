@@ -89,7 +89,8 @@
       }
     ],
     "publisher": "Unikie1",
-    "licenseFile": "../LICENSE"
+    "licenseFile": "../LICENSE",
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "deep-link": {

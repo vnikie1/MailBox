@@ -74,6 +74,41 @@ fn no_comment_contains_a_double_hyphen() {
 }
 
 #[test]
+fn the_common_controls_dependency_is_declared() {
+    // The one that actually mattered, and the one the other tests would have let through.
+    //
+    // Supplying a custom manifest REPLACES the one tauri-build writes, and that manifest exists
+    // almost entirely to declare this dependency. Without it the app calls into comdlg32 and
+    // comctl32 for its file dialogs, side-by-side resolution fails, and the process dies before
+    // `main` with 0xC0000139 or "the side-by-side configuration is incorrect" - no window, no
+    // log line, no crash report, nothing in the event log.
+    //
+    // It went unnoticed for hours because every launch in between happened to be under MSIX
+    // package identity, where side-by-side resolution does not apply. The certification kit
+    // started the packaged app two dozen times without complaint while the ordinary build could
+    // not start at all.
+    assert!(
+        MANIFEST.contains("Microsoft.Windows.Common-Controls"),
+        "the Common Controls v6 dependency is missing. A custom manifest replaces tauri-build's, \
+         and without this the app cannot start outside an MSIX package - see the note at the top \
+         of halcyon.exe.manifest."
+    );
+
+    // The exact identity matters: a wrong publicKeyToken resolves to nothing, which fails the
+    // same silent way as omitting it.
+    for part in [
+        "version=\"6.0.0.0\"",
+        "publicKeyToken=\"6595b64144ccf1df\"",
+        "processorArchitecture=\"*\"",
+    ] {
+        assert!(
+            MANIFEST.contains(part),
+            "the Common Controls dependency is missing {part}, so it will not resolve"
+        );
+    }
+}
+
+#[test]
 fn the_manifest_declares_what_it_is_there_to_declare() {
     // The four settings the certification kit and Windows actually read. A manifest that parses
     // but declares nothing would pass the two tests above and change nothing about the app.

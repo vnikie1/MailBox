@@ -43,6 +43,25 @@
   text-heavy application on a high-DPI laptop, the difference is whether the first thing anybody
   sees is sharp.
 
+  ## The two ways this file stopped the app starting at all
+
+  Supplying this file REPLACES the manifest tauri-build would have written, and that manifest
+  existed almost entirely to declare the Common Controls v6 dependency below. Dropping it made
+  every standalone launch die before a single line of the program ran, with 0xC0000139
+  STATUS_ENTRYPOINT_NOT_FOUND and later "the side-by-side configuration is incorrect": no window,
+  no log line, no crash report, no event-log entry.
+
+  A stray <assemblyIdentity> at the top level made it worse and changed the error, which sent
+  the search in the wrong direction for an hour.
+
+  It went unnoticed for hours because every run in between happened to be under MSIX package
+  identity, where side-by-side resolution does not apply - the App Certification Kit drove the
+  packaged app twenty-four times and it started every time. The first standalone run was the
+  NSIS build, and the failure looked like an installer problem, then like an updater problem,
+  and was neither.
+
+  The element is optional and means nothing for an application manifest. It is not coming back.
+
   ## What each element is for
 
   * `dpiAwareness = PerMonitorV2` - the modern one: the app is told when it moves between
@@ -62,7 +81,30 @@
 -->
 
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="com.uniki.halcyon" version="1.0.0.0" />
+  <!--
+    Common Controls v6. Copied from tauri-build's default manifest, and it is not optional.
+
+    Supplying a custom manifest REPLACES Tauri's, and Tauri's exists almost entirely to declare
+    this. The app calls GetOpenFileNameW and GetSaveFileNameW for attachments and for the export
+    folder, which pull in comdlg32 and comctl32; without this dependency the side-by-side loader
+    cannot resolve them and the process dies before main with 0xC0000139,
+    STATUS_ENTRYPOINT_NOT_FOUND, or "the side-by-side configuration is incorrect".
+
+    tauri-build's own documentation warns about this. It was not read until the app had failed
+    to start about a dozen times.
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
 
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>

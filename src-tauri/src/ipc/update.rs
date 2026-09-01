@@ -162,6 +162,38 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_config_carries_no_dangerous_updater_flags() {
+        // The updater plugin has three escape hatches: allow plain HTTP, accept invalid
+        // certificates, accept mismatched hostnames. Each one is exactly what somebody needs to
+        // test an update against a local server, and exactly what must never reach a release --
+        // any of them turns "an update is signed and came from us over TLS" into "an update came
+        // from whoever answered".
+        //
+        // They are used, deliberately, in a throwaway config passed to `tauri build --config`
+        // for the update test. That is why this test exists: the mechanism to enable them is a
+        // one-line edit to a JSON file that looks exactly like the real one.
+        let config = std::fs::read_to_string("tauri.conf.json").expect("config");
+
+        for flag in [
+            "dangerousInsecureTransportProtocol",
+            "dangerousAcceptInvalidCerts",
+            "dangerousAcceptInvalidHostnames",
+        ] {
+            assert!(
+                !config.contains(flag),
+                "tauri.conf.json sets {flag}. That belongs in a test-only --config override and \
+                 never in the shipped configuration."
+            );
+        }
+
+        // And the endpoint is https, which is the property those flags exist to disable.
+        assert!(
+            config.contains("https://github.com/"),
+            "the updater endpoint is not an https GitHub URL"
+        );
+    }
+
+    #[test]
     fn the_public_key_is_in_the_config_and_the_private_key_is_not_in_the_repository() {
         // The whole security argument for the updater. TLS proves the file came from GitHub; the
         // signature proves it came from us. If the private key were ever committed, anyone with
