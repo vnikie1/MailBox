@@ -3270,3 +3270,55 @@ the mail database, and an uninstaller that silently deletes somebody's mail is t
 - **The lint gate caught two problems in this session's own new code** — an unnecessary type
   assertion and five `eslint-disable` directives that never applied — neither of which would have
   been noticed by reading.
+
+## 2026-09-01 — Phase 11: import and export, and a backup that lost mail
+
+### Fixed
+
+- **"Export all mail" silently omitted mail that had just been imported.** `startExport` iterates
+  the `useMailboxes()` query, and an import creates a mailbox and an account that did not exist
+  when the Settings window opened. Nothing invalidated that query, so the export enumerated a
+  stale list: **46 mailboxes in the database, 45 files written**, no error and a completion
+  message reporting success. Closing and reopening Settings produced all 46.
+
+  The shape of this matters more than the size. Somebody imports years of old mail, exports
+  everything as a backup, and the backup is missing precisely the mail they just imported — from
+  a button labelled "Export all mail". Now invalidates `keys.mailboxes` when a transfer finishes;
+  re-running the whole sequence in one sitting wrote 47 files for 47 mailboxes.
+
+- **The updater endpoint pointed at a private repository.** `vnikie1/MailBox` is private, so its
+  release assets are not publicly downloadable and _every_ update check would have failed for
+  every user. Changed to `vnikie1/halcyon-mail`, which is public and already hosts the policy
+  pages. This was found by reading, not by the updater test, which deliberately substitutes
+  localhost — the one string that test cannot check turned out to be the one that was wrong.
+
+- **`SECURITY.md` sent reporters to a security-advisory form on the same private repository**,
+  where they would have been met with a 404. The published copy at
+  <https://vnikie1.github.io/halcyon-mail/security.html> still carries the old link and needs the
+  same change.
+
+- **"Done. 3 messages in 1 mailboxes."** Importing a single mbox is the commonest case there is,
+  so the number most likely to be 1 was the one printed wrong every time.
+
+### Notes — import and export, exercised in the running app
+
+Built in this phase and never run outside the Rust tests. Driven through the real UI against a
+**copy** of the mail store: `%LOCALAPPDATA%` redirected to a sandbox, so the app opened 1,521 real
+messages and every change landed on the copy. The real database was unchanged throughout —
+1 account, 45 mailboxes, 1,521 messages, before and after.
+
+Import handled the case that matters: a line beginning `From ` inside a message body did not split
+the message, and survived verbatim in the stored body. Three of three messages arrived with full
+bodies, into a local account, without disturbing the Gmail account.
+
+### Incidents
+
+- **Five ways of driving a Windows file dialog failed before one worked**, and the most misleading
+  was `SetDlgItemText` on control 1148: it sets the ComboBoxEx _host_, and `GetDlgItemText` reads
+  the value straight back, so it looks like it worked while the dialog never sees it. `WM_COMMAND`
+  with `IDOK`, `BM_CLICK`, and UIA `ValuePattern.SetValue` all fail as well — the last by timing
+  out and wedging the dialog, which then made every later attempt look like a fresh failure.
+
+  What works is genuine input: `AttachThreadInput` to take real foreground, then keystrokes. A
+  wrong hypothesis about _why_ the first attempts failed (a wedged message loop) cost a restart
+  and two more attempts before the real cause was tested.

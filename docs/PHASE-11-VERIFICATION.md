@@ -138,3 +138,66 @@ both failure modes were probed.
   interrupted partway through. The cause was a truncated `resource.lib` left in
   `target/debug/build/halcyon-*/out`. Deleting that one build directory fixed it. It presents as a
   linker failure and is a half-written file.
+
+---
+
+## 5. Import and export, driven in the running app
+
+Built in this phase and never exercised outside the Rust integration tests. Run against a **copy**
+of the real mail store: `%LOCALAPPDATA%` was redirected to a sandbox holding a copy of
+`com.uniki.halcyon`, so the app opened 1,521 real messages and every change landed on the copy.
+The real database was 1 account / 45 mailboxes / 1,521 messages before and after.
+
+### Import — correct
+
+An mbox carrying the case that separates a working reader from one that looks like it works: a
+line beginning `From ` inside a message body.
+
+| Check                                        | Result                                    |
+| -------------------------------------------- | ----------------------------------------- |
+| Messages imported                            | 3 of 3, all with full bodies              |
+| The `From ` line did not split message 3     | 1 message from that sender, 0 fragments   |
+| The quoted header survived in the body       | Present verbatim                          |
+| Destination                                  | A local `local@localhost` account, mailbox named from the file |
+| Existing accounts disturbed                  | None                                      |
+
+### Export — found a data-loss bug
+
+**"Export all mail" silently omitted the mail that had just been imported.**
+
+Same session, same data:
+
+- Settings opened *before* the import, then export: **45 files written, 46 mailboxes in the
+  database.** No `Archive.mbox`. No error, no warning.
+- Settings closed and reopened, then export: **46 files**, `Archive.mbox` present with all three
+  messages and the quoted header intact.
+
+The cause is that `startExport` iterates the `useMailboxes()` query, and an import creates a
+mailbox and an account that were not there when the window opened. Nothing invalidated the
+mailbox list, so the export enumerated a stale one.
+
+This is worse than a missing refresh in a list. Somebody imports years of old mail, exports
+everything as a backup, and the backup is missing exactly the mail they just imported — with a
+button labelled "Export all mail" and a completion message reporting success.
+
+**Fixed** by invalidating `keys.mailboxes` when a transfer reports finished. Verified by repeating
+the whole sequence in one sitting: 47 mailboxes in the database, **47 files written**, both
+imported mailboxes present and correct.
+
+### Also fixed
+
+"Done. 3 messages in 1 mailboxes." Importing a single mbox file is the commonest case there is,
+so the one number most likely to be `1` was the one printed wrong every time. Now
+"3 messages in 1 mailbox".
+
+### Note — the file dialogs cannot be driven by messages
+
+Five approaches failed before one worked, which is worth writing down because the next person will
+try them in the same order. `SetDlgItemText` on control 1148 sets the ComboBoxEx *host* and reads
+back correctly, so it looks like it worked; the dialog never sees it. `WM_COMMAND` with `IDOK`,
+`BM_CLICK` on the OK button, and UIA's `ValuePattern.SetValue` all fail too, the last by timing
+out and leaving the dialog wedged.
+
+What works is genuine input: `AttachThreadInput` to take real foreground, then `SendKeys`. The
+folder picker additionally needs two Enters — the first navigates into the typed folder, the
+second selects it.

@@ -1,7 +1,8 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Download, FolderOpen, Upload } from 'lucide-react'
 
-import { useMailboxes } from '@/app/queries'
+import { keys, useMailboxes } from '@/app/queries'
 import type { ImportSource } from '@/lib/generated/ImportSource'
 import type { TransferProgress } from '@/lib/generated/TransferProgress'
 import {
@@ -43,6 +44,16 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/**
+ * "3 messages in 1 mailbox", not "3 messages in 1 mailboxes".
+ *
+ * The import of a single mbox file is the most common case there is, so the one number most
+ * likely to be 1 was the one being printed wrong every time.
+ */
+function count(n: number, singular: string, plural = `${singular}s`): string {
+  return `${String(n)} ${n === 1 ? singular : plural}`
+}
+
 export function TransferSettings() {
   const [sources, setSources] = useState<ImportSource[] | null>(null)
   const [chosen, setChosen] = useState<Set<string>>(new Set())
@@ -50,6 +61,7 @@ export function TransferSettings() {
   const [format, setFormat] = useState<'mbox' | 'eml'>('mbox')
 
   const { data: mailboxes = [] } = useMailboxes()
+  const client = useQueryClient()
 
   useEffect(() => {
     void importSources().then(setSources)
@@ -59,7 +71,19 @@ export function TransferSettings() {
     let cancelled = false
     let stop: (() => void) | undefined
 
-    void onTransferProgress(setProgress).then((unlisten) => {
+    void onTransferProgress((update) => {
+      setProgress(update)
+
+      // An import creates a mailbox and an account that were not there when this window
+      // opened, and `mailboxes` is what "Export all mail" iterates. Without this, importing
+      // and then exporting in the same sitting writes a backup that is silently missing the
+      // mail just imported -- no error, no warning, just one file fewer than there are
+      // mailboxes. Observed: 46 mailboxes in the database, 45 files written, and the same
+      // export from a freshly opened Settings window produced all 46.
+      if (update.finished !== null) {
+        void client.invalidateQueries({ queryKey: keys.mailboxes })
+      }
+    }).then((unlisten) => {
       if (cancelled) unlisten()
       else stop = unlisten
     })
@@ -68,7 +92,7 @@ export function TransferSettings() {
       cancelled = true
       stop?.()
     }
-  }, [])
+  }, [client])
 
   const running = progress !== null && progress.finished === null
 
@@ -265,9 +289,11 @@ export function TransferSettings() {
               ? `Finished with a problem: ${progress.finished.error}. ${String(
                   progress.finished.messages,
                 )} messages were handled.`
-              : `Done. ${String(progress.finished.messages)} messages in ${String(
+              : `Done. ${count(progress.finished.messages, 'message')} in ${count(
                   progress.finished.folders,
-                )} mailboxes${
+                  'mailbox',
+                  'mailboxes',
+                )}${
                   progress.finished.skipped > 0
                     ? `, ${String(progress.finished.skipped)} skipped`
                     : ''
