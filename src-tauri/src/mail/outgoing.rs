@@ -149,6 +149,86 @@ fn mailbox(field: &'static str, address: &Address) -> Result<Mailbox, BuildError
 /// it unwraps the block structure so the text reads as paragraphs rather than one run-on line,
 /// and decodes the handful of entities that appear in ordinary prose.
 ///
+/// Whether a class name is one of this app's own, and therefore meaningless in a mail message.
+///
+/// The CSS-module convention is `_name_hash_line`: `_paragraph_j5qtj_34`. The hash changes when
+/// the stylesheet changes, so these names differ between builds and refer to a stylesheet the
+/// recipient will never have.
+fn is_internal_class(token: &str) -> bool {
+    token.starts_with('_')
+        && token.matches('_').count() >= 3
+        && token
+            .rsplit('_')
+            .next()
+            .is_some_and(|last| !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Removes this app's own class names, keeping any the user's own content brought with it.
+fn strip_internal_classes(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(at) = rest.find(" class=\"") {
+        let (before, from_attr) = rest.split_at(at);
+        let value_start = &from_attr[8..];
+
+        let Some(end) = value_start.find('"') else {
+            break; // an unterminated attribute; leave the remainder alone
+        };
+
+        let kept: Vec<&str> = value_start[..end]
+            .split_whitespace()
+            .filter(|token| !is_internal_class(token))
+            .collect();
+
+        out.push_str(before);
+        if !kept.is_empty() {
+            out.push_str(" class=\"");
+            out.push_str(&kept.join(" "));
+            out.push('"');
+        }
+
+        rest = &value_start[end + 1..];
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// The editor's fragment, made into a whole HTML document.
+///
+/// ## Why this is not cosmetic
+///
+/// What the editor hands over is a run of `<p>` elements: no `<html>`, no `<head>`, no charset,
+/// and every element tagged with a CSS-module class from this app's own stylesheet. Every other
+/// mail client sends a complete document, and a bare fragment carrying machine-generated class
+/// names is a shape that spam filters recognise, because it is the shape bulk mail arrives in.
+///
+/// A message sent this way was refused outright by iCloud —
+/// `554 5.7.1 [CS01] Message rejected due to local policy` — while the same envelope reached
+/// Outlook. That is not proof this was the cause, and it is not claimed as proof: Apple does not
+/// say what its filter objected to. But the markup was wrong on its own terms before any of that,
+/// leaking build-specific class names into other people's mailboxes, and a mail client that emits
+/// a document fragment where a document belongs has a defect regardless of who accepts it.
+///
+/// A fragment that already carries `<html` is passed through, since it came from somewhere that
+/// had already made a document of it.
+fn document_html(fragment: &str) -> String {
+    let cleaned = strip_internal_classes(fragment);
+
+    if cleaned.to_ascii_lowercase().contains("<html") {
+        return cleaned;
+    }
+
+    format!(
+        "<!DOCTYPE html>
+<html>
+<head><meta charset=\"utf-8\"></head>
+<body>{cleaned}</body>
+</html>"
+    )
+}
+
 /// The editor supplies the real thing — it knows what the user actually typed, which is always
 /// a better plain-text version than anything recovered from markup afterwards.
 pub fn text_from_html(html: &str) -> String {
@@ -292,7 +372,7 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
             SinglePart::builder()
                 .header(ContentType::TEXT_HTML)
                 .header(header::ContentTransferEncoding::QuotedPrintable)
-                .body(draft.html.clone()),
+                .body(document_html(&draft.html)),
         );
 
     // With attachments the alternative becomes the first part of a `multipart/mixed`. That
@@ -541,6 +621,77 @@ fn original_message_id(raw: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod html_document_tests {
+    use super::*;
+
+    #[test]
+    fn the_apps_own_class_names_do_not_leave_the_machine() {
+        // These are CSS-module names from this app's stylesheet. The hash changes between builds,
+        // and the stylesheet is not something the recipient has, so they are noise that also
+        // happens to advertise how the message was made.
+        let out = document_html("<p class=\"_paragraph_j5qtj_34\">Hello</p>");
+
+        assert!(
+            !out.contains("_paragraph_j5qtj_34"),
+            "an internal class survived: {out}"
+        );
+        assert!(out.contains("Hello"));
+        assert!(
+            !out.contains("class="),
+            "the attribute should go when nothing is left in it"
+        );
+    }
+
+    #[test]
+    fn a_class_the_user_brought_with_them_is_kept() {
+        // Pasted content carries its own markup, and throwing it away would be a different kind
+        // of wrong: the sender chose it, and it means something wherever it came from.
+        let out = document_html("<p class=\"signature _bold_ab12_7\">Bye</p>");
+
+        assert!(
+            out.contains("class=\"signature\""),
+            "the user's class was dropped: {out}"
+        );
+        assert!(!out.contains("_bold_ab12_7"));
+    }
+
+    #[test]
+    fn what_goes_on_the_wire_is_a_document_rather_than_a_fragment() {
+        let out = document_html("<p>Body</p>");
+
+        for required in [
+            "<!DOCTYPE html>",
+            "<html>",
+            "<head>",
+            "charset=\"utf-8\"",
+            "<body>",
+            "</html>",
+        ] {
+            assert!(
+                out.contains(required),
+                "the document is missing {required}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn something_that_is_already_a_document_is_left_alone() {
+        // A forwarded message arrives as a whole document. Wrapping it again would nest one
+        // inside another, which renderers handle differently and none handle well.
+        let original = "<html><body><p>Forwarded</p></body></html>";
+        assert_eq!(document_html(original), original);
+    }
+
+    #[test]
+    fn an_unterminated_class_attribute_does_not_lose_the_message() {
+        // Malformed input should cost the attribute, never the body. The editor should not
+        // produce this, but "should not" is not a guarantee about what a paste can contain.
+        let out = document_html("<p class=\"broken>Still here</p>");
+        assert!(out.contains("Still here"), "the body was lost: {out}");
+    }
 }
 
 #[cfg(test)]

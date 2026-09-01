@@ -3531,3 +3531,31 @@ Across all three sends of the session: exactly one copy each, none missing, none
   against a real header, which has the brackets. The wrong conclusion available here — that the
   Sent copies were never filed — is alarming and would have sent the next hour in the wrong
   direction.
+
+### Fixed — outgoing HTML was a fragment, not a document
+
+Halcyon put the editor's raw output on the wire: a run of `<p>` elements with no `<html>`, no
+`<head>`, no charset, and twelve CSS-module class names from this app's own stylesheet —
+`_paragraph_j5qtj_34` and friends. Those names are build hashes. They change whenever the
+stylesheet changes, they refer to a stylesheet the recipient will never have, and they were going
+into other people's mailboxes.
+
+`outgoing::build` now wraps the body in a whole document and removes only this app's own class
+names, keeping any a sender's pasted content brought with it. Something that already contains
+`<html` is passed through rather than nested inside a second document.
+
+**What this is not:** a proven fix for the iCloud rejection. A message sent as a fragment was
+refused with `554 5.7.1 [CS01] Message rejected due to local policy` while the same envelope
+reached Outlook, and a second attempt sent as a proper document has not bounced — but Apple does
+not say what its filter objected to, and one send is not evidence. The markup was wrong on its own
+terms before any of that, and would be worth fixing if iCloud had accepted both.
+
+### Incidents
+
+- **A wrong theory was published before it was tested.** When mail to iCloud bounced and no mail
+  arrived _from_ iCloud either, the conclusion offered was that the address had no mailbox behind
+  it — that an Apple ID can exist without iCloud Mail ever being enabled. It was a coherent story
+  that fitted the evidence available and was wrong: a test message from Yahoo reached the same
+  address minutes later. The reasoning leaned on an absence (no mail arriving from iCloud) which
+  had other explanations, and the cost was sending somebody to check a setting that was already
+  on. The right next step was the one taken afterwards — read the message we actually sent.
