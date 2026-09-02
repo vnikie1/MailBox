@@ -65,32 +65,18 @@ export function useUndo(): {
     run(performRedo, 'Redid')
   }, [run])
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || event.altKey) return
-      if (event.key.toLowerCase() !== 'z') return
-
-      // A text field owns its own undo. Stealing Ctrl+Z from a half-written search or a
-      // compose body to put a message back in the Inbox would be maddening.
-      const target = event.target
-      if (target instanceof HTMLElement) {
-        const editable =
-          target.isContentEditable ||
-          target instanceof HTMLInputElement ||
-          target instanceof HTMLTextAreaElement
-        if (editable) return
-      }
-
-      event.preventDefault()
-      if (event.shiftKey) redo()
-      else undo()
-    }
-
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [undo, redo])
+  // Ctrl+Z is bound by `useShortcuts`, not here.
+  //
+  // This hook used to register a second `window` keydown listener of its own for the same chord.
+  // Both fired: they are separate listeners on the same target, and `preventDefault` does not
+  // stop a sibling. One keypress ran `undo()` twice, so with two things on the stack a single
+  // Ctrl+Z took back two actions — archiving two messages and pressing it once returned both.
+  //
+  // It hid behind the shape of the stack. With one step, the second call found nothing and did
+  // nothing, which is the case anyone testing by hand reaches for first.
+  //
+  // `shortcuts.ts` is the one table: the dispatcher binds from it and the Help sheet is rendered
+  // from it, so a chord that lives anywhere else is invisible to both.
 
   return { available, undo, redo }
 }

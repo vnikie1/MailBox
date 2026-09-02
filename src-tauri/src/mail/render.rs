@@ -234,7 +234,12 @@ fn rewrite_images(
                 }
             }
         } else if url.starts_with("http://") || url.starts_with("https://") {
-            match (load_remote, remote.get(url)) {
+            // Decoded the same way the enumeration decodes it, so the key looked up here is the
+            // key `fetch_remote` stored. Decode on one side only and every remote image with an
+            // `&` in its query silently misses the map and renders blocked.
+            let fetched = url_from_attribute(url);
+
+            match (load_remote, remote.get(&fetched)) {
                 // Loaded through the core, which is what keeps the sender from seeing the
                 // user's IP. docs/03 §6.3.
                 (true, Some(data_uri)) => {
@@ -320,6 +325,29 @@ fn next_src_attribute(haystack: &str) -> Option<usize> {
     None
 }
 
+/// An attribute value as a URL, with the escaping HTML required removed again.
+///
+/// ## Why a URL out of markup is not the URL
+///
+/// `&` separates query parameters and is also the start of an HTML entity, so a serialiser has
+/// to write it as `&amp;`. Ammonia does, correctly. Taking the attribute's characters and
+/// treating them as a URL therefore yields a *different* URL from the one the sender wrote: a
+/// sender's `?w=600&h=400&s=abc` parses as `w=600`, `amp;h=400`, `amp;s=abc`.
+///
+/// Every parameter after the first is renamed. A CDN answers with the wrong size, a signed URL
+/// fails its signature, and the image the message meant to show does not appear — for any URL
+/// carrying more than one parameter, which is most of them.
+///
+/// Both the enumeration and the rewrite use this, so the fetch list and the lookup keys stay the
+/// same strings. They were consistent before, which is why the map still matched: the requests
+/// simply went somewhere else.
+fn url_from_attribute(value: &str) -> String {
+    // `&amp;` is the entity that matters and the only one a serialiser must introduce here — the
+    // others (`&lt;`, `&gt;`, `&quot;`) cannot appear unescaped inside a quoted attribute in the
+    // first place. `&amp;amp;` decodes once, to `&amp;`, which is the sender's own text.
+    value.replace("&amp;", "&")
+}
+
 pub fn remote_urls(html: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut rest = html;
@@ -331,7 +359,7 @@ pub fn remote_urls(html: &str) -> Vec<String> {
         let url = &after[..end];
 
         if url.starts_with("http://") || url.starts_with("https://") {
-            let url = url.to_string();
+            let url = url_from_attribute(url);
             if !urls.contains(&url) {
                 urls.push(url);
             }
@@ -777,6 +805,43 @@ mod tests {
         );
 
         assert_eq!(urls, vec!["https://a.test/1.png", "https://b.test/2.png"]);
+    }
+
+    #[test]
+    fn a_url_with_several_query_parameters_is_fetched_as_written() {
+        // `&` separates query parameters and opens an HTML entity, so a serialiser must write
+        // it as `&amp;`. Reading the attribute back without undoing that gives a different URL:
+        // every parameter after the first is renamed to `amp;<name>`. A CDN returns the wrong
+        // size, a signed URL fails its signature, and the image does not appear.
+        let raw = r#"<img src="https://cdn.example/i.png?w=600&h=400&s=abc">"#;
+        let urls = remote_urls(&sanitise(raw));
+
+        assert_eq!(
+            urls,
+            vec!["https://cdn.example/i.png?w=600&h=400&s=abc"],
+            "the enumerated URL still carries HTML escaping"
+        );
+    }
+
+    #[test]
+    fn the_fetch_list_and_the_lookup_agree() {
+        // The half that would break everything if only one side decoded: the map is keyed by
+        // what the enumeration returned, and the rewrite must look up the same string. Decode on
+        // one side only and every remote image with an `&` in its query renders blocked.
+        let raw = r#"<img src="https://cdn.example/i.png?w=600&h=400">"#;
+        let urls = remote_urls(&sanitise(raw));
+
+        let mut remote = HashMap::new();
+        remote.insert(urls[0].clone(), "data:image/png;base64,AAAA".to_string());
+
+        let rendered = render(Some(raw), None, &HashMap::new(), true, &remote);
+
+        assert_eq!(
+            rendered.loaded_remote, 1,
+            "the rewrite did not find the URL the enumeration fetched: {}",
+            rendered.html
+        );
+        assert!(rendered.html.contains("data:image/png;base64,AAAA"));
     }
 
     #[test]

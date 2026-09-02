@@ -199,7 +199,15 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const collapsed = useMemo(() => new Set(collapsedSections), [collapsedSections])
 
   const onSelect = (node: SidebarNode) => {
-    if (node.mailboxIds.length === 0) return
+    // A row is selectable if it names mailboxes **or** carries a predicate. The guard used to
+    // test only the first, and `buildSidebar` gives every predicate row `mailboxIds: []` — the
+    // type's own comment says a row has "one or the other, never both".
+    //
+    // So every predicate row was dead on click: Flagged, all seven flag colours, VIPs, and every
+    // Smart Mailbox the user had made. They rendered, they showed counts, they highlighted on
+    // hover, and selecting one did nothing at all. Clicking an ordinary mailbox beside them
+    // worked, which is what made it look like the click had simply missed.
+    if (node.mailboxIds.length === 0 && node.predicate === undefined) return
     selectMailbox({
       nodeId: node.id,
       label: node.label,

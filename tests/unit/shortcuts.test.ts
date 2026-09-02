@@ -182,3 +182,48 @@ describe('the Phase 10 exit gate', () => {
     }
   })
 })
+
+describe('one listener, one table', () => {
+  it('registers no window keydown handler outside the dispatcher', async () => {
+    // `binds no chord twice` above checks the registry. It cannot see a chord bound somewhere
+    // else entirely, and one was: `useUndo` kept its own `window` keydown listener for Ctrl+Z
+    // alongside the table's. Both fired — separate listeners on the same target, and
+    // `preventDefault` does not stop a sibling — so one keypress ran undo twice and took back
+    // two actions.
+    //
+    // It hid behind the shape of the stack: with a single step, the second call found nothing
+    // and did nothing, which is exactly the case anyone testing by hand tries first.
+    // Namespaces rather than destructured methods: pulling a method off a module loses its
+    // binding as far as the linter is concerned, and it is right to say so in general.
+    const files = await import('node:fs/promises')
+    const paths = await import('node:path')
+
+    const walk = async (dir: string): Promise<string[]> => {
+      const entries = await files.readdir(dir, { withFileTypes: true })
+      const found: string[] = []
+
+      for (const entry of entries) {
+        const path = paths.join(dir, entry.name)
+        if (entry.isDirectory()) found.push(...(await walk(path)))
+        else if (/\.tsx?$/.test(entry.name)) found.push(path)
+      }
+
+      return found
+    }
+
+    const offenders: string[] = []
+
+    for (const file of await walk('src')) {
+      if (file.includes('useShortcuts')) continue
+
+      const source = await files.readFile(file, 'utf8')
+      if (/addEventListener\(\s*['"]keydown['"]/.test(source)) offenders.push(file)
+    }
+
+    expect(
+      offenders,
+      `these files bind keys outside the shortcut table, so the table, the Help sheet and the ` +
+        `dispatcher no longer agree — and a chord bound in two places fires twice`,
+    ).toEqual([])
+  })
+})

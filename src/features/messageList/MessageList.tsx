@@ -12,6 +12,7 @@ import {
   ArrowDownUp,
   Inbox,
   ListFilter,
+  AlertTriangle,
   MailCheck,
   MoreHorizontal,
   PanelLeft,
@@ -144,7 +145,7 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
   )
   const saved = useSmartMessages(searching ? undefined : selection.predicate)
 
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isPending } =
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isPending, isError, refetch } =
     selection.predicate === undefined ? folders : saved
 
   const now = useMemo(storeNow, [])
@@ -414,9 +415,35 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
           </div>
         )}
 
+        {/* A query that failed, which is not an empty mailbox.
+            
+            This branch did not exist: `isError` was never taken from the query, so a failure
+            left `rows` empty and `isPending` false and the pane said "This mailbox is empty —
+            New mail will appear here as it arrives." For a mail client that is the worst
+            available lie: it reads as *your mail is gone*, and the note below about a blank pane
+            being indistinguishable from a broken one was written without this case being
+            handled. */}
+        {rows.length === 0 && !isPending && isError && (
+          <EmptyState
+            icon={AlertTriangle}
+            title="This mailbox could not be loaded"
+            description="Your mail is still here. Something went wrong reading it."
+            action={
+              <Button
+                variant="bordered"
+                onClick={() => {
+                  void refetch()
+                }}
+              >
+                Try again
+              </Button>
+            }
+          />
+        )}
+
         {/* Every reason the list can be empty, each saying which one it is. A blank pane is
             indistinguishable from a broken one, and the user's next move is to reload. */}
-        {rows.length === 0 && !isPending && (
+        {rows.length === 0 && !isPending && !isError && (
           <EmptyState
             {...(searching
               ? {
