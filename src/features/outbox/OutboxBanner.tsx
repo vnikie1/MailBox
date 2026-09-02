@@ -11,7 +11,7 @@ import {
   outboxSchedule,
   runningInTauri,
 } from '@/lib/ipc'
-import { Button } from '@/ui'
+import { Button, useToast } from '@/ui'
 
 import { SendLaterSheet } from './SendLaterSheet'
 import styles from './OutboxBanner.module.css'
@@ -62,6 +62,7 @@ export function OutboxBanner() {
   const [scheduling, setScheduling] = useState<number | null>(null)
   const [, forceTick] = useState(0)
   const timer = useRef<number | undefined>(undefined)
+  const toast = useToast()
 
   const refresh = useCallback(() => {
     outboxList()
@@ -71,6 +72,43 @@ export function OutboxBanner() {
         setRows([])
       })
   }, [])
+
+  /**
+   * Undo Send, and the one case where it does not work.
+   *
+   * `compose_undo` returns false when the message has already left `holding` — the sender
+   * picked it up in the moment between the click and the write, and bytes are on their way to
+   * a server. Its own doc comment says returning false rather than true is the point, because
+   * "reporting success there would be a lie the user would discover from the recipient".
+   *
+   * That boolean was being discarded. The banner refreshed, the row was gone from it because
+   * the message was no longer held, and the screen showed exactly what a successful undo shows.
+   * The user believed they had caught it; the recipient had it either way.
+   */
+  const undoSend = useCallback(
+    (id: number) => {
+      composeUndo(id)
+        .then((cancelled) => {
+          if (!cancelled) {
+            toast.show({
+              title: 'Too late to undo',
+              description: 'The message had already started sending and is on its way.',
+            })
+          }
+          refresh()
+        })
+        .catch((cause: unknown) => {
+          // Also not a success. Leaving this uncaught meant a failed undo looked identical to
+          // one that worked, because nothing on screen changed either way.
+          toast.show({
+            title: 'The message could not be recalled',
+            description: cause instanceof Error ? cause.message : String(cause),
+          })
+          refresh()
+        })
+    },
+    [refresh, toast],
+  )
 
   useEffect(() => {
     if (!runningInTauri) return
@@ -164,7 +202,7 @@ export function OutboxBanner() {
                 variant="bordered"
                 icon={Undo2}
                 onClick={() => {
-                  void composeUndo(row.id).then(refresh)
+                  undoSend(row.id)
                 }}
               >
                 Undo Send

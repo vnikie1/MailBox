@@ -120,6 +120,21 @@ export function useSync(): SyncState {
       onSyncProgress((progress) => {
         setBusy(!progress.done)
         if (progress.done) invalidateSoon()
+
+        // Progress is proof the account recovered. The core emits this only after a fetch has
+        // come back and its rows are written, so an account that reports progress is talking
+        // to its server — whatever went wrong before has stopped being true.
+        //
+        // Nothing used to clear these. One dropped connection, one laptop lid closed for a
+        // minute, and the sidebar carried "could not connect" for the rest of the session
+        // while mail arrived underneath it. An error that outlives its cause trains people to
+        // ignore the one that matters.
+        setErrors((current) => {
+          if (!current.has(progress.accountId)) return current
+          const next = new Map(current)
+          next.delete(progress.accountId)
+          return next
+        })
       }),
     )
 

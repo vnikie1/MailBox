@@ -818,11 +818,15 @@ async fn check_smtp(
     if response.starts_with("235") {
         report.passed("Sign in", "Signed in to the outgoing server.", started);
     } else {
+        // Redacted for the same reason as the IMAP side: a server that echoes the rejected
+        // command back puts `AUTH PLAIN <base64 of user and password>` on screen, and that
+        // base64 is trivially reversible. This half was passing the response through raw
+        // while the IMAP half had guarded against it since it was written.
         report.failed(
             "Sign in",
             "The outgoing server rejected the sign-in.",
             Some(diagnose(provider, &response, true)),
-            Some(response),
+            Some(redact_command_echo(&response)),
             started,
         );
     }

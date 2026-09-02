@@ -64,16 +64,30 @@ const TOKENS: &[(&str, &str)] = &[
 /// Suggestions are about what the caret is in, not about the whole field. Someone who has typed
 /// `invoice fr` wants `from:` offered, not suggestions for `invoice`.
 fn active_word(text: &str) -> &str {
-    match text.rfind(char::is_whitespace) {
-        Some(at) => &text[at + 1..],
+    match last_space(text) {
+        Some((at, width)) => &text[at + width..],
         None => text,
     }
 }
 
+/// The byte offset and width of the last whitespace character.
+///
+/// The width is the point. `char::is_whitespace` is Unicode-aware -- it matches NBSP, the em
+/// and en spaces, and the ideographic space -- but `rfind` returns a byte offset, and assuming
+/// the match was one byte wide puts the next slice inside the character. A single NBSP in the
+/// search field, which is what pasting from a web page or from Outlook usually carries, crashed
+/// the suggestion list.
+fn last_space(text: &str) -> Option<(usize, usize)> {
+    text.char_indices()
+        .rev()
+        .find(|(_, character)| character.is_whitespace())
+        .map(|(at, character)| (at, character.len_utf8()))
+}
+
 /// Replaces the active word, keeping everything before it.
 fn with_word(text: &str, replacement: &str) -> String {
-    match text.rfind(char::is_whitespace) {
-        Some(at) => format!("{}{replacement}", &text[..=at]),
+    match last_space(text) {
+        Some((at, width)) => format!("{}{replacement}", &text[..at + width]),
         None => replacement.to_string(),
     }
 }
@@ -317,5 +331,30 @@ mod tests {
         assert!(found
             .iter()
             .any(|s| s.kind == Kind::Mailbox && s.label == "Archive"));
+    }
+
+    /// Multi-byte whitespace used to crash the suggestion list.
+    ///
+    /// `char::is_whitespace` matches NBSP and the typographic spaces, but the byte offset
+    /// `rfind` returns was being advanced by one, landing inside the character. Pasting a
+    /// phrase copied from a web page or from Outlook is the ordinary way to get an NBSP into
+    /// a search field, and it took the panic with it on the next keystroke.
+    #[test]
+    fn multi_byte_whitespace_does_not_panic() {
+        for space in [" ", " ", "　", " ", " "] {
+            let text = format!("invoice{space}fr");
+            assert_eq!(active_word(&text), "fr", "after {space:?}");
+            assert_eq!(
+                with_word(&text, "from:"),
+                format!("invoice{space}from:"),
+                "after {space:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_word_is_still_found_without_any_space() {
+        assert_eq!(active_word("from:ada"), "from:ada");
+        assert_eq!(with_word("fr", "from:"), "from:");
     }
 }

@@ -234,6 +234,14 @@ fn collect_leaf(part: &ParsedMail<'_>, mime: &str, path: &str, body: &mut Body) 
 /// in the reader before Phase 6 builds the real renderer. It strips tags rather than
 /// interpreting them, and it drops `<script>` and `<style>` contents entirely so their source
 /// never reaches the list.
+/// The byte width of the character starting at `index`, or 1 past the end.
+///
+/// Exists so a byte-wise walk cannot stop halfway through a character and leave `index` at a
+/// position that panics the moment anything slices there.
+fn next_char_width(text: &str, index: usize) -> usize {
+    text[index..].chars().next().map_or(1, char::len_utf8)
+}
+
 fn text_from_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut in_tag = false;
@@ -249,7 +257,11 @@ fn text_from_html(html: &str) -> String {
                 index += end_tag.len();
                 continue;
             }
-            index += 1;
+            // By character, not by byte. Stepping one byte at a time lands `index` inside a
+            // multi-byte character, and the slice on the line above then panics -- taking down
+            // body extraction for the whole message. `<!-- café -->` was enough to do it, and
+            // marketing mail is full of comments with accented text, curly quotes and emoji.
+            index += next_char_width(&lowered, index);
             continue;
         }
 
@@ -958,5 +970,34 @@ Sent from my phone\r\n";
         assert_ne!(a, b, "the same message id in two accounts must not collide");
         assert!(a.ends_with("42.eml"));
         assert!(a.to_string_lossy().contains("bodies"));
+    }
+
+    /// Non-ASCII inside a skipped region used to panic the whole body extraction.
+    ///
+    /// The skip walked one byte at a time, so a comment, script or style block containing
+    /// any multi-byte character left `index` mid-character and the next slice panicked with
+    /// "byte index N is not a char boundary". Not an edge case: an accented word or a curly
+    /// quote in an Outlook conditional comment is ordinary marketing mail, and the failure
+    /// took out the preview and the search text for the entire message.
+    #[test]
+    fn non_ascii_inside_a_skipped_region_does_not_panic() {
+        for html in [
+            "<!-- café --><p>Body text.</p>",
+            "<style>.a { content: \"“\"; }</style><p>Body text.</p>",
+            "<script>var s = \"😀\";</script><p>Body text.</p>",
+            "<!-- 你好 --><p>Body text.</p>",
+            "<!-- unterminated é",
+        ] {
+            let text = text_from_html(html);
+            assert!(
+                !text.contains("caf") && !text.contains("var s"),
+                "skipped content leaked into the text: {text:?}"
+            );
+        }
+
+        assert_eq!(
+            text_from_html("<!-- café --><p>Body text.</p>"),
+            "Body text."
+        );
     }
 }

@@ -277,6 +277,21 @@ export function useMailEvents(): void {
         // The event carries the new counts, but the sidebar reads them from the mailbox
         // query — invalidating is one line and cannot drift from what the store holds.
         void client.invalidateQueries({ queryKey: keys.mailboxes })
+
+        // The list and search too, because this is the only event three commands emit.
+        // Undo, Mark as Junk and Run Rules do not go through a mutation hook — they call the
+        // core directly — so nothing else marked the list stale. An undone move left the
+        // message sitting in the folder it had been moved out of, and a message marked as
+        // junk stayed in the Inbox, both until something unrelated forced a refetch. The
+        // action had worked; only the screen disagreed, which is the version of this bug
+        // that is hardest to trust your own eyes about.
+        //
+        // Coarse on purpose. A command that announces a mailbox changed cannot say which
+        // rows moved, and the alternative — remembering to invalidate at every call site —
+        // is exactly the bookkeeping those three call sites already forgot.
+        void client.invalidateQueries({ queryKey: ['messages'] })
+        void client.invalidateQueries({ queryKey: ['search'] })
+        void client.invalidateQueries({ queryKey: ['thread'] })
       })
       .then(keep)
 

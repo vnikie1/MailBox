@@ -31,15 +31,24 @@ export interface Autosave {
   saveNow: () => void
   /** Forgets the draft, so a sent message is not saved again on the way out. */
   abandon: () => void
+  /**
+   * Undoes an abandon that turned out to be premature, after a send that failed before the
+   * message reached the outbox. Only the failure path calls this: on the success path the
+   * message has gone and must never be written back as a draft.
+   */
+  resume: () => void
 }
 
 export function useAutosave(build: () => OutgoingMessage | null): Autosave {
   const messageId = useRef<string | null>(null)
   const lastSaved = useRef<string>('')
   const abandoned = useRef(false)
+  const inFlight = useRef(false)
 
   const save = useCallback(() => {
-    if (!runningInTauri || abandoned.current) return
+    // The in-flight guard replaces what used to be an early fingerprint commit. Both stop a
+    // second save racing the first; only this one lets a failed save be retried.
+    if (!runningInTauri || abandoned.current || inFlight.current) return
 
     const message = build()
     if (message === null) return
@@ -66,15 +75,26 @@ export function useAutosave(build: () => OutgoingMessage | null): Autosave {
     ])
 
     if (fingerprint === lastSaved.current) return
-    lastSaved.current = fingerprint
+
+    // Recorded only once the write has actually succeeded. Recording it before the call --
+    // which is what this did -- meant the guard above suppressed every later save of unchanged
+    // content, so a single transient failure left the draft unsaved for the life of the window
+    // and killed the timer, the blur save and Save as Draft together. The comment below
+    // promised a retry the code had just made impossible.
+    inFlight.current = true
 
     composeSaveDraft(message, messageId.current)
       .then((saved) => {
         messageId.current = saved.messageId
+        lastSaved.current = fingerprint
       })
       .catch((cause: unknown) => {
-        // Worth a line in the console, never an interruption. The next save will try again.
+        // Worth a line in the console, never an interruption. The next save will try again --
+        // and now it genuinely can, because the fingerprint was never committed.
         console.warn('[compose] draft not saved', cause)
+      })
+      .finally(() => {
+        inFlight.current = false
       })
   }, [build])
 
@@ -96,6 +116,9 @@ export function useAutosave(build: () => OutgoingMessage | null): Autosave {
     saveNow: save,
     abandon: () => {
       abandoned.current = true
+    },
+    resume: () => {
+      abandoned.current = false
     },
   }
 }

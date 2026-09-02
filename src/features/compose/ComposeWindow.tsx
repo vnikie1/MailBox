@@ -307,17 +307,30 @@ export function ComposeWindow() {
       return
     }
 
+    // Whether the core took ownership. Everything that can fail inside compose_send fails
+    // before the message reaches the outbox, so up to this point the window is the only copy;
+    // past it, the message exists on disk and a draft of it would be a duplicate of something
+    // already sent.
+    let queued = false
+
     try {
       // Before the send, so a draft that was never autosaved does not reappear afterwards as
       // an unsent copy of a message that has gone.
       autosave.abandon()
 
       await composeSend(message)
+      queued = true
 
       // The core has the message on disk and in the outbox before this resolves, so closing
       // now cannot lose it — and for the length of the undo hold it has not been sent either.
       await closeThisWindow()
     } catch (cause: unknown) {
+      // Undoing the abandon is what keeps an unqueued message savable. Without it the timer,
+      // the blur save and the Save as Draft button in the close sheet are all dead for the
+      // life of the window, and that button silently discards the message instead of saving
+      // it. Only when the send itself failed: a window that will not close is a nuisance, but
+      // a draft copy of a message already in the outbox is a second message.
+      if (!queued) autosave.resume()
       setSending(false)
       const message =
         typeof cause === 'object' && cause !== null && 'message' in cause

@@ -273,13 +273,28 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
   )
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      moveSelection(1, order)
-    } else if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      moveSelection(-1, order)
-    }
+    const delta = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
+    if (delta === 0) return
+
+    event.preventDefault()
+    moveSelection(delta, order)
+
+    // Moving the selection is state; following it with the viewport is not, and nothing else
+    // did it. The highlight walked out of the rendered window and the list sat still, so
+    // holding ArrowDown looked like the list had frozen. It also stopped dead partway: the
+    // infinite-scroll prefetch below keys off the last *visible* index, which never advanced,
+    // so the next page was never requested and the selection hit the end of page one.
+    //
+    // Read back from the store rather than recomputing the target here, so there is one
+    // definition of where the selection went — this cannot drift from moveSelection's own
+    // clamping at the ends of the list.
+    const moved = useMailStore.getState().selectedMessageIds[0]
+    if (moved === undefined) return
+
+    // Searched in `items`, not `order`: the virtualiser counts date headers as rows, so an
+    // index into the message ids would land further and further off as the list grows.
+    const index = items.findIndex((item) => item.kind === 'row' && item.message.id === moved)
+    if (index !== -1) virtualiser.scrollToIndex(index, { align: 'auto' })
   }
 
   // A unified row spans several mailboxes and belongs to no single account, so the header

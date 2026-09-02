@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 
 import type { AttachmentData } from '@/lib/generated/AttachmentData'
 import { attachmentPreview, attachmentSave } from '@/lib/ipc'
-import { Button, Sheet } from '@/ui'
+import { Button, Sheet, useToast } from '@/ui'
 
 import styles from './AttachmentPreview.module.css'
 
@@ -60,6 +60,7 @@ function frameDocument(data: AttachmentData): string {
 export function AttachmentPreview({ attachmentId, filename, onClose }: AttachmentPreviewProps) {
   const [data, setData] = useState<AttachmentData | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const toast = useToast()
 
   useEffect(() => {
     let cancelled = false
@@ -100,7 +101,21 @@ export function AttachmentPreview({ attachmentId, filename, onClose }: Attachmen
           <Button
             variant="bordered"
             onClick={() => {
-              void attachmentSave(attachmentId)
+              // The result is not discardable. `null` means the user closed the file dialog,
+              // which deserves silence -- but a rejection is a real failure the core has
+              // already worded ("The file could not be saved to that location", for a full
+              // disk, a read-only folder or a disconnected drive), and throwing it away left
+              // Save… looking like it had worked. The file simply was not there afterwards.
+              attachmentSave(attachmentId)
+                .then((saved) => {
+                  if (saved !== null) toast.show({ title: `Saved ${filename}` })
+                })
+                .catch((cause: unknown) => {
+                  toast.show({
+                    title: 'The attachment could not be saved',
+                    description: cause instanceof Error ? cause.message : String(cause),
+                  })
+                })
             }}
           >
             Save…
