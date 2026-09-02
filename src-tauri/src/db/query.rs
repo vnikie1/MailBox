@@ -488,7 +488,8 @@ pub fn reply_source(conn: &Connection, message_id: i64) -> Option<ReplySource> {
     let row = conn
         .query_row(
             "SELECT account_id, message_id, subject, from_name, from_addr,
-                    to_json, cc_json, references_, body_html, body_text, date_sent
+                    to_json, cc_json, references_, body_html, body_text, date_sent,
+                    reply_to_json
                FROM message WHERE id = ?1",
             rusqlite::params![message_id],
             |row| {
@@ -504,6 +505,7 @@ pub fn reply_source(conn: &Connection, message_id: i64) -> Option<ReplySource> {
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, i64>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
@@ -521,6 +523,7 @@ pub fn reply_source(conn: &Connection, message_id: i64) -> Option<ReplySource> {
         body_html,
         body_text,
         date_sent,
+        reply_to_json,
     ) = row;
 
     let addresses = |json: Option<String>| -> Vec<crate::sync::envelope::Address> {
@@ -555,6 +558,10 @@ pub fn reply_source(conn: &Connection, message_id: i64) -> Option<ReplySource> {
         from,
         to: addresses(to_json),
         cc: addresses(cc_json),
+        // `reply::recipients` prefers this over From when it is present, and it was never
+        // present: the column was never written and this query never asked for it, so the
+        // preference had nothing to prefer.
+        reply_to: addresses(reply_to_json),
         date_sent,
         ..crate::sync::envelope::Envelope::default()
     };

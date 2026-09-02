@@ -98,7 +98,13 @@ function toToken(address: ComposeAddress): Token {
 function bodyWithSignature(draft: ReplyDraft): string {
   if (draft.signatureHtml.trim() === '') return draft.quotedHtml
 
-  const signature = `<p><br></p><div></div>`
+  // The signature itself, which this used to leave out. The template was
+  // `<p><br></p><div></div>` — a blank line and an empty div — so every message carried the
+  // wrapper and none carried the signature, while the guard above proved one had been set.
+  //
+  // Nothing failed and nothing was logged. Settings showed the signature, the editor showed an
+  // empty line where it should have been, and the only way to notice was to know it was missing.
+  const signature = `<p><br></p><div>${draft.signatureHtml}</div>`
 
   return draft.signaturePlacement === 'below'
     ? draft.quotedHtml + signature

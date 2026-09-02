@@ -21,85 +21,25 @@ fn placeholders(count: usize, start: usize) -> String {
         .join(", ")
 }
 
-fn now_seconds() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// Records what the sync engine still owes the server.
-///
-/// One op per account rather than per message: the IMAP work is a single STORE or COPY over
-/// a set of UIDs, and splitting it into one op per message would turn a hundred-message
-/// archive into a hundred round trips.
-fn accounts_of(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<i64>, DbError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let in_list = placeholders(ids.len(), 1);
-    let sql = format!("SELECT DISTINCT account_id FROM message WHERE id IN ({in_list})");
-    let params: Vec<&dyn rusqlite::ToSql> =
-        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-
-    let accounts = tx
-        .prepare(&sql)?
-        .query_map(params.as_slice(), |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(accounts)
-}
-
-/// Enqueues against accounts the caller has already resolved.
-///
-/// Separate from `enqueue` because a permanent delete has to look the accounts up *before*
-/// removing the rows. The first version enqueued afterwards, found nothing to join against,
-/// and silently wrote no op at all — so the server would never have been told to expunge and
-/// the message would have reappeared on the next sync. Deleted mail coming back is the worst
-/// class of bug this project can ship, and it was invisible until a test asked for the op.
-fn enqueue_for(
-    tx: &Transaction<'_>,
-    kind: &str,
-    accounts: &[i64],
-    ids: &[i64],
-    extra: Option<(&str, i64)>,
-) -> Result<(), DbError> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-
-    for account_id in accounts.iter().copied() {
-        // serde_json rather than string building: a filename or a mailbox name with a
-        // quote in it must not be able to corrupt the payload.
-        let mut payload = serde_json::json!({ "ids": ids });
-        if let Some((key, value)) = extra {
-            payload[key] = serde_json::json!(value);
-        }
-
-        tx.execute(
-            "INSERT INTO pending_op (account_id, kind, payload_json, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            (account_id, kind, payload.to_string(), now_seconds()),
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Records what the sync engine still owes the server, resolving the accounts itself.
-///
-/// Safe for mutations that leave the rows in place. A delete must use `accounts_of` before
-/// removing them and then `enqueue_for`.
-fn enqueue(
-    tx: &Transaction<'_>,
-    kind: &str,
-    ids: &[i64],
-    extra: Option<(&str, i64)>,
-) -> Result<(), DbError> {
-    let accounts = accounts_of(tx, ids)?;
-    enqueue_for(tx, kind, &accounts, ids, extra)
-}
+// ## Why nothing here queues a server operation
+//
+// It used to. `set_flags`, `move_to` and `delete` each wrote a `pending_op` row of their own,
+// with a payload like `{"ids":[..],"mailboxId":7}`.
+//
+// Not one of those rows ever reached a server. `sync::ops::Op` is `#[serde(tag = "kind")]`, so
+// a payload without a `kind` field cannot deserialise; the drain logs "pending_op payload could
+// not be read; dropping it" and DELETEs the row. Every one, every time, since Phase 5.
+//
+// It went unnoticed because every command that calls into this module *also* builds a real
+// `Op` and enqueues it — so the work got done, and these rows were silent duplicates that were
+// thrown away. The two places that relied on them alone, the rules engine and undo, were
+// therefore local-only: a rule filed mail here and nowhere else.
+//
+// A test named `every_mutation_leaves_a_pending_op_for_the_sync_engine` asserted the rows
+// existed and never asked whether the sync engine could read one.
+//
+// Queuing now belongs to the caller, which is the only layer that knows the mailbox path and
+// the UIDs a server operation needs.
 
 /// Which mailboxes a set of messages currently sits in.
 ///
@@ -257,7 +197,6 @@ pub fn set_flags(tx: &Transaction<'_>, ids: &[i64], patch: FlagPatch) -> Result<
     let changed = tx.execute(&sql, borrowed.as_slice())?;
 
     apply_delta(tx, &before, &snapshot(tx, ids)?)?;
-    enqueue(tx, "flag", ids, None)?;
 
     Ok(changed)
 }
@@ -288,7 +227,6 @@ pub fn move_to(tx: &Transaction<'_>, ids: &[i64], mailbox_id: i64) -> Result<usi
     // The source mailboxes appear in the first snapshot and the destination in the second,
     // so both ends are corrected from the same pair.
     apply_delta(tx, &before, &snapshot(tx, ids)?)?;
-    enqueue(tx, "move", ids, Some(("mailboxId", mailbox_id)))?;
 
     Ok(changed)
 }
@@ -317,10 +255,8 @@ pub fn delete(
         return Ok(0);
     }
 
+    // Taken while the rows still exist: afterwards there is nothing to count.
     let before = snapshot(tx, ids)?;
-
-    // Both of these have to happen while the rows still exist.
-    let accounts = accounts_of(tx, ids)?;
 
     let in_list = placeholders(ids.len(), 1);
     let sql = format!("DELETE FROM message WHERE id IN ({in_list})");
@@ -331,7 +267,6 @@ pub fn delete(
 
     // The rows are gone, so the second snapshot is empty and every delta is negative.
     apply_delta(tx, &before, &snapshot(tx, ids)?)?;
-    enqueue_for(tx, "expunge", &accounts, ids, None)?;
 
     Ok(changed)
 }

@@ -259,6 +259,66 @@ impl Stack {
 /// The inverse is captured *before* restoring, from the same rows, so redo is exact rather than
 /// a re-run of the original command. Re-running would be wrong for anything whose effect
 /// depends on when it happens — a rule, a snooze, a filter verdict.
+/// Queues the server side of an undone move, before the local row is rewritten.
+///
+/// ## Why undo needs this at all
+///
+/// Undo put the local row back and told the server nothing. Archiving a message and pressing
+/// Ctrl+Z returned it to the Inbox here and left it in the Archive everywhere else, and the next
+/// sync of the Archive — which still lists it — would put it back, so the undo silently came
+/// apart a minute later.
+///
+/// The commands that *make* these changes all queue an operation (see `ipc::mail`); the code
+/// that reverses them did not, which is the same omission the rules engine had.
+fn queue_move(tx: &Transaction<'_>, id: i64, destination: i64) -> Result<(), DbError> {
+    let Some(to) = crate::sync::ops::mailbox_path(tx, destination)? else {
+        return Ok(());
+    };
+
+    // Located before the write: afterwards the row names the destination, and the operation
+    // would ask the server to move it out of where it had just been put.
+    for group in crate::sync::ops::locate(tx, &[id])? {
+        if group.mailbox == to {
+            continue;
+        }
+
+        crate::sync::ops::enqueue(
+            tx,
+            group.account_id,
+            &crate::sync::ops::Op::Move {
+                from: group.mailbox,
+                to: to.clone(),
+                uids: group.uids,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Queues the server side of an undone flag change. See `queue_move`.
+fn queue_flags(
+    tx: &Transaction<'_>,
+    id: i64,
+    seen: Option<bool>,
+    flagged: Option<bool>,
+) -> Result<(), DbError> {
+    for group in crate::sync::ops::locate(tx, &[id])? {
+        crate::sync::ops::enqueue(
+            tx,
+            group.account_id,
+            &crate::sync::ops::Op::Flag {
+                mailbox: group.mailbox,
+                uids: group.uids,
+                seen,
+                flagged,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
 fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
     let mut inverse = Vec::with_capacity(step.priors.len());
 
@@ -280,6 +340,7 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     mailbox_id: current,
                 });
 
+                queue_move(tx, *id, *mailbox_id)?;
                 crate::db::write::move_to(tx, &[*id], *mailbox_id)?;
             }
             Prior::Seen { id, seen } => {
@@ -297,6 +358,8 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     id: *id,
                     seen: current != 0,
                 });
+
+                queue_flags(tx, *id, Some(*seen), None)?;
 
                 tx.execute(
                     "UPDATE message SET flag_seen = ?2 WHERE id = ?1",
@@ -321,6 +384,8 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     flagged: current_flagged != 0,
                     color: current_color,
                 });
+
+                queue_flags(tx, *id, None, Some(*flagged))?;
 
                 tx.execute(
                     "UPDATE message SET flag_flagged = ?2, flag_color = ?3 WHERE id = ?1",

@@ -3797,3 +3797,78 @@ asking turned out to be the best one anybody asked today.
   with what the dispatcher binds — which is exactly what it is not. Left as a finding rather than
   fixed: implementing two features or withdrawing three documented ones is not a decision to take
   while bug-hunting.
+
+### Fixed — changes that never reached the server
+
+A sweep of every subsystem, with each finding put to three verifiers told to refute it, surfaced
+one defect with several faces. All of the below were re-verified by hand before anything changed.
+
+- **`db::write` queued operations no server could ever read.** `set_flags`, `move_to` and
+  `delete` each wrote a `pending_op` row with a payload like `{"ids":[..],"mailboxId":7}`.
+  `sync::ops::Op` is `#[serde(tag = "kind")]`, so none of them deserialises: the drain logs
+  _"pending_op payload could not be read; dropping it"_ and deletes the row. Every one, every
+  time, since Phase 5 — and that exact line was sitting in the log during this session's earlier
+  testing, attributed to nothing.
+
+  It survived because every _command_ also builds a real `Op` and enqueues it, so the work got
+  done and these rows were silent duplicates. Queuing now belongs to the caller, which is the only
+  layer that knows the mailbox path and UIDs an operation needs.
+
+- **Rules filed mail locally and nowhere else.** `rules/engine.rs` contained no `ops::enqueue` at
+  all, relying entirely on those unreadable rows. A rule moving mail to a folder moved it in
+  Halcyon while it stayed in the Inbox on every other device, permanently. Worse, the local row
+  then sat in a mailbox the server had never heard of it being in, so a later sync could find one
+  more message locally than the server reports and `persist::remove_missing` would delete the row
+  the user could see, leaving the server's copy untouched.
+
+  Move, Delete, MarkRead, MarkUnread, Flag, Unflag and the `\Flagged` half of SetColour now queue
+  properly. `MarkJunk` deliberately still does not: whether a junk verdict is local or belongs on
+  the server is a design question, not an omission to patch while bug-hunting.
+
+- **Undo changed only the local database.** `undo::restore` moved rows with `write::move_to` and
+  set flags with raw `UPDATE`, so archiving a message and pressing Ctrl+Z put it back here and
+  left it in the Archive everywhere else — and the next sync of the Archive, which still listed
+  it, would undo the undo. The commands that make these changes all queue an operation; the code
+  that reverses them did not.
+
+- **A test asserted the bug.** `every_mutation_leaves_a_pending_op_for_the_sync_engine` checked
+  that the rows existed and never asked whether the sync engine could read one. It passed for
+  months while asserting, in its own name, a property that was false. Replaced with
+  `a_local_write_queues_nothing_by_itself`, and four behavioural tests in `rules/engine_tests.rs`
+  that read the queue back **through `ops::queued`** — the function that used to throw the work
+  away — rather than counting rows.
+
+### Notes — the sweep itself
+
+`docs/BUG-HUNT-2026-09-02.md` has all 71 surviving findings with their evidence, the 6 refuted
+ones, and which are fixed.
+
+**The survival rate is the thing to distrust.** 88% surviving an adversarial pass means the bar
+was too low, not that the code is 88% broken. Two of three verifiers had to refute a finding to
+kill it, which is generous when a finding is plausible and wrong. The document says so at the top,
+and everything acted on here was re-read by hand first — one finding was argued down from
+data-loss to high by a verifier whose reasoning was better than the finder's.
+
+### Fixed — two more from the sweep, verified by hand first
+
+- **The signature was never put in any message.** `bodyWithSignature` checked that a signature had
+  been set, then built `<p><br></p><div></div>` — a blank line and an empty div. `signatureHtml`
+  appears in the guard and nowhere in the output, so every message carried the wrapper and none
+  carried the signature.
+
+  Nothing failed. Settings showed the signature, the editor showed an empty line where it belonged,
+  and the only way to notice was to already know it was missing.
+
+- **Reply-To was parsed and thrown away.** `reply::recipients` prefers Reply-To over From and has a
+  test proving it; that code had never once run on a real message. `sync::envelope` extracts the
+  header, the `reply_to_json` column has existed since migration 0001 — and `persist` never wrote
+  it, so `reply_source` had nothing to select and the envelope reaching the reply builder always
+  had an empty list.
+
+  Three correct pieces with no connection between them. Replying to a mailing list, a ticketing
+  system or anything with a no-reply From went to the wrong address, which is the failure docs/06
+  Phase 7 names when it asks for Reply-To to be honoured. Now stored, selected and used, with a
+  test that runs `reply_source` and `recipients` together — the join that was missing.
+
+  **Existing messages stay wrong.** The column is filled when a message is fetched, so this
+  corrects mail that arrives from now on, not what is already stored.

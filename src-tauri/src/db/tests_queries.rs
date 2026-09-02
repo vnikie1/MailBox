@@ -371,7 +371,18 @@ fn a_delete_with_nowhere_to_put_it_refuses_rather_than_improvising() {
 }
 
 #[test]
-fn every_mutation_leaves_a_pending_op_for_the_sync_engine() {
+fn a_local_write_queues_nothing_by_itself() {
+    // This used to be `every_mutation_leaves_a_pending_op_for_the_sync_engine`, and it asserted
+    // that `set_flags`, `move_to` and `delete` each left a row in `pending_op` with kinds
+    // "flag", "move" and "expunge".
+    //
+    // The rows were real and the sync engine could not read one of them: their payloads carry no
+    // `kind` field, `ops::Op` is internally tagged, and the drain deletes what it cannot parse.
+    // The test checked the `kind` *column* and never the payload, so it passed for months while
+    // asserting a property — "for the sync engine" — that was false.
+    //
+    // Queuing is the caller's job now, because only the caller knows the mailbox path and UIDs.
+    // What this checks is that the local write no longer invents rows nobody can use.
     let mut conn = fixture();
 
     let tx = conn.transaction().expect("tx");
@@ -388,15 +399,14 @@ fn every_mutation_leaves_a_pending_op_for_the_sync_engine() {
     write::delete(&tx, &[5], true, None).expect("delete");
     tx.commit().expect("commit");
 
-    let kinds: Vec<String> = conn
-        .prepare("SELECT kind FROM pending_op ORDER BY id")
-        .expect("prepare")
-        .query_map([], |row| row.get(0))
-        .expect("query")
-        .collect::<Result<Vec<_>, _>>()
-        .expect("rows");
+    let queued: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pending_op", [], |row| row.get(0))
+        .expect("count");
 
-    assert_eq!(kinds, vec!["flag", "move", "expunge"]);
+    assert_eq!(
+        queued, 0,
+        "a local write queued {queued} operation(s) of its own; the drain cannot parse them and          deletes them, which is how the rules engine came to file mail locally and nowhere else"
+    );
 }
 
 #[test]
@@ -582,5 +592,54 @@ fn the_page_cache_is_an_explicit_budget() {
     assert_eq!(
         cache, -8192,
         "the page cache is no longer the 8MB per connection the soak was measured against"
+    );
+}
+
+#[test]
+fn a_reply_goes_to_the_reply_to_address_when_there_is_one() {
+    // The whole point of Reply-To, and the reason docs/06 Phase 7 names it: a mailing list, a
+    // ticketing system or a no-reply sender puts the address that should receive replies here,
+    // and answering the From address instead sends the message to the wrong place — often to a
+    // mailbox nobody reads.
+    //
+    // `reply::recipients` has always preferred Reply-To over From, and has a test proving it.
+    // It never fired in the running app: `persist` did not store the column and `reply_source`
+    // did not select it, so the envelope reaching that code always had an empty list. Three
+    // correct pieces and no connection between them.
+    let conn = fixture();
+
+    conn.execute(
+        "UPDATE message
+            SET from_name = 'A Person', from_addr = 'person@example.test',
+                reply_to_json = ?1
+          WHERE id = 1",
+        rusqlite::params![r#"[{"name":"The List","email":"list@example.test"}]"#],
+    )
+    .expect("set reply-to");
+
+    let source = query::reply_source(&conn, 1).expect("source");
+
+    assert_eq!(
+        source
+            .envelope
+            .reply_to
+            .iter()
+            .map(|address| address.email.as_str())
+            .collect::<Vec<_>>(),
+        vec!["list@example.test"],
+        "reply_source dropped Reply-To, so a reply would go to the From address"
+    );
+
+    let recipients =
+        crate::mail::reply::recipients(&source.envelope, crate::mail::reply::Kind::Reply, &[]);
+
+    assert_eq!(
+        recipients
+            .to
+            .iter()
+            .map(|address| address.email.as_str())
+            .collect::<Vec<_>>(),
+        vec!["list@example.test"],
+        "the reply was addressed to the sender rather than to Reply-To"
     );
 }

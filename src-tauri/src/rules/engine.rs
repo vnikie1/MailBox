@@ -304,31 +304,103 @@ impl OwnedSubject {
     }
 }
 
+/// Queues the server side of a move, before the local row is rewritten.
+///
+/// ## Why every action here needs one of these
+///
+/// A rule used to change only the local database. Nothing in this file called `ops::enqueue`,
+/// so a rule that filed mail into a folder filed it *here*: the message stayed in the Inbox on
+/// the phone, on the web, and on every other client, for ever.
+///
+/// It looked like it worked, because `db::write::move_to` does enqueue something — a legacy row
+/// whose payload has no `kind` field. `ops::Op` is internally tagged, so the drain cannot parse
+/// it, logs "pending_op payload could not be read; dropping it", and deletes the row. Every
+/// other caller of `write::move_to` builds a real `Op` first and is therefore fine; this one
+/// did not, and the failure announced itself only as a debug line nobody was reading.
+///
+/// It could also lose the message outright. The local row now sits in a mailbox the server has
+/// never heard of it being in, so the next sync of that mailbox finds one more message locally
+/// than the server reports and `persist::remove_missing` deletes the row whose UID is not in the
+/// server's list. The copy on the server survives; the one the user could see does not.
+fn queue_move(tx: &Transaction<'_>, message_id: i64, destination: i64) -> Result<(), DbError> {
+    let Some(to) = crate::sync::ops::mailbox_path(tx, destination)? else {
+        return Ok(());
+    };
+
+    // Located before the write, never after: the move rewrites `mailbox_id`, so a lookup
+    // afterwards would ask the server to move the message out of where it had just arrived.
+    for group in crate::sync::ops::locate(tx, &[message_id])? {
+        if group.mailbox == to {
+            continue;
+        }
+
+        crate::sync::ops::enqueue(
+            tx,
+            group.account_id,
+            &crate::sync::ops::Op::Move {
+                from: group.mailbox,
+                to: to.clone(),
+                uids: group.uids,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Queues the server side of a flag change. See `queue_move` for why this is not optional.
+fn queue_flags(
+    tx: &Transaction<'_>,
+    message_id: i64,
+    seen: Option<bool>,
+    flagged: Option<bool>,
+) -> Result<(), DbError> {
+    for group in crate::sync::ops::locate(tx, &[message_id])? {
+        crate::sync::ops::enqueue(
+            tx,
+            group.account_id,
+            &crate::sync::ops::Op::Flag {
+                mailbox: group.mailbox,
+                uids: group.uids,
+                seen,
+                flagged,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
 /// Applies one action to one message.
 fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), DbError> {
     match action {
         Action::MoveTo(mailbox_id) => {
+            queue_move(tx, message_id, *mailbox_id)?;
             crate::db::write::move_to(tx, &[message_id], *mailbox_id)?;
         }
         Action::MarkRead => {
+            queue_flags(tx, message_id, Some(true), None)?;
             tx.execute(
                 "UPDATE message SET flag_seen = 1 WHERE id = ?1",
                 params![message_id],
             )?;
         }
         Action::MarkUnread => {
+            queue_flags(tx, message_id, Some(false), None)?;
             tx.execute(
                 "UPDATE message SET flag_seen = 0 WHERE id = ?1",
                 params![message_id],
             )?;
         }
         Action::Flag => {
+            queue_flags(tx, message_id, None, Some(true))?;
             tx.execute(
                 "UPDATE message SET flag_flagged = 1 WHERE id = ?1",
                 params![message_id],
             )?;
         }
         Action::Unflag => {
+            queue_flags(tx, message_id, None, Some(false))?;
             tx.execute(
                 "UPDATE message SET flag_flagged = 0, flag_color = NULL WHERE id = ?1",
                 params![message_id],
@@ -340,6 +412,11 @@ fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), D
             if !is_flag_colour(colour) {
                 return Ok(());
             }
+
+            // The colour is ours alone -- IMAP has no notion of one -- but this also sets
+            // Flagged, and that half the server does need to be told about.
+            queue_flags(tx, message_id, None, Some(true))?;
+
             tx.execute(
                 "UPDATE message SET flag_flagged = 1, flag_color = ?2 WHERE id = ?1",
                 params![message_id, colour],
@@ -365,6 +442,7 @@ fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), D
                 .ok();
 
             if let Some(trash) = trash {
+                queue_move(tx, message_id, trash)?;
                 crate::db::write::move_to(tx, &[message_id], trash)?;
             }
         }

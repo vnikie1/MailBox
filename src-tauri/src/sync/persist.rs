@@ -99,12 +99,12 @@ pub fn write_batch(
             "INSERT INTO message (
                  account_id, mailbox_id, uid, message_id, in_reply_to, references_, gm_msgid,
                  gm_thrid,
-                 subject, subject_base, from_name, from_addr, to_json, cc_json,
+                 subject, subject_base, from_name, from_addr, to_json, cc_json, reply_to_json,
                  date_sent, date_received, size,
                  flag_seen, flag_answered, flag_flagged, flag_draft, flag_deleted,
                  has_attachment, body_state, from_all, to_all
              ) VALUES (
-                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?24, ?8, ?9, ?10, ?11, ?12, ?13,
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?24, ?8, ?9, ?10, ?11, ?12, ?13, ?25,
                  ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, 0, 'none', ?22, ?23
              )",
             params![
@@ -136,6 +136,12 @@ pub fn write_batch(
                 envelope.from_all(),
                 envelope.to_all(),
                 message.gm_thrid,
+                // Reply-To. Parsed since Phase 5 and stored by nobody: the column existed, the
+                // envelope carried the value, and the INSERT skipped it -- so `reply::recipients`
+                // read an always-empty list and every reply to a mailing list went to whoever
+                // happened to send that copy instead of to the list. docs/06 Phase 7 asks for
+                // this explicitly.
+                addresses_json(&envelope.reply_to),
             ],
         )?;
 

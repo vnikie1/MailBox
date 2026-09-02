@@ -343,3 +343,128 @@ fn a_rule_round_trips_through_storage() {
     assert_eq!(saved[0].actions, actions, "the actions changed in storage");
     assert!(saved[0].enabled);
 }
+
+/// What a rule tells the *server*, which for a long time was nothing at all.
+///
+/// A rule that files mail used to change only the local database. The message moved here and
+/// stayed in the Inbox on every other device, and the next sync of the destination could delete
+/// the local row outright — the server had never been told it belonged there.
+///
+/// It looked wired up because `db::write::move_to` does enqueue a row. That row's payload has no
+/// `kind` field, `ops::Op` is internally tagged, and the drain deletes what it cannot parse. So
+/// these tests assert the queued operation **round-trips through `ops::queued`**, which is the
+/// step that used to throw the work away.
+mod server_side {
+    use super::*;
+    use crate::sync::ops;
+
+    #[test]
+    fn a_rule_that_moves_a_message_tells_the_server() {
+        let mut conn = store();
+        add_message(&conn, 1, "news@example.test", "Weekly");
+
+        let tx = conn.transaction().expect("tx");
+        let rules = vec![rule(
+            1,
+            0,
+            Field::From,
+            "news@example.test",
+            vec![Action::MoveTo(2)],
+        )];
+        run_over(&tx, &[1], &rules).expect("run");
+
+        let queued = ops::queued(&tx, 1).expect("queued");
+
+        let moved = queued.iter().any(|(_, op)| {
+            matches!(op, ops::Op::Move { from, to, uids }
+                if from == "INBOX" && to == "Archive" && uids == &[1])
+        });
+
+        assert!(
+            moved,
+            "a rule moved a message and queued no usable Move for the server: {queued:?}"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_flags_a_message_tells_the_server() {
+        let mut conn = store();
+        add_message(&conn, 1, "news@example.test", "Weekly");
+
+        let tx = conn.transaction().expect("tx");
+        let rules = vec![rule(
+            1,
+            0,
+            Field::From,
+            "news@example.test",
+            vec![Action::Flag],
+        )];
+        run_over(&tx, &[1], &rules).expect("run");
+
+        let queued = ops::queued(&tx, 1).expect("queued");
+
+        assert!(
+            queued.iter().any(|(_, op)| {
+                matches!(op, ops::Op::Flag { flagged: Some(true), uids, .. } if uids == &[1])
+            }),
+            "a rule flagged a message and queued no usable Flag: {queued:?}"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_deletes_a_message_moves_it_on_the_server_too() {
+        let mut conn = store();
+        add_message(&conn, 1, "spam@example.test", "Buy");
+
+        let tx = conn.transaction().expect("tx");
+        let rules = vec![rule(
+            1,
+            0,
+            Field::From,
+            "spam@example.test",
+            vec![Action::Delete],
+        )];
+        run_over(&tx, &[1], &rules).expect("run");
+
+        let queued = ops::queued(&tx, 1).expect("queued");
+
+        assert!(
+            queued
+                .iter()
+                .any(|(_, op)| matches!(op, ops::Op::Move { to, .. } if to == "Trash")),
+            "a rule deleted a message and the server was never told: {queued:?}"
+        );
+    }
+
+    #[test]
+    fn the_queue_is_read_the_way_the_drain_reads_it() {
+        // The guard on the guard. `ops::queued` is the function that silently deleted the old
+        // rows; if these tests read `pending_op` directly instead, they would pass against
+        // exactly the payload that was broken.
+        let mut conn = store();
+        add_message(&conn, 1, "news@example.test", "Weekly");
+
+        let tx = conn.transaction().expect("tx");
+        let rules = vec![rule(
+            1,
+            0,
+            Field::From,
+            "news@example.test",
+            vec![Action::MoveTo(2)],
+        )];
+        run_over(&tx, &[1], &rules).expect("run");
+
+        let rows: i64 = tx
+            .query_row("SELECT COUNT(*) FROM pending_op", [], |row| row.get(0))
+            .expect("count");
+        let parsed = ops::queued(&tx, 1).expect("queued").len() as i64;
+
+        assert!(rows > 0, "nothing was queued at all");
+        assert_eq!(
+            parsed,
+            rows,
+            "{} of {rows} queued rows could not be parsed and would be dropped by the drain",
+            rows - parsed
+        );
+    }
+}
