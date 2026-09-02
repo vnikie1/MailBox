@@ -208,7 +208,7 @@ fn rewrite_images(
     let mut inlined = 0u32;
     let mut rest = html;
 
-    while let Some(position) = rest.find("src=\"") {
+    while let Some(position) = next_src_attribute(rest) {
         let (before, after) = rest.split_at(position + 5);
         out.push_str(before);
 
@@ -281,11 +281,50 @@ pub fn sanitise_for_enumeration(html: &str) -> String {
 ///
 /// Used to fetch them through the core when the user asks for them, so that the frame never
 /// makes a request of its own.
+/// The offset of the next `src="` that is really an attribute, skipping any in text.
+///
+/// ## Why this cannot just be `find("src=\"")`
+///
+/// It was, in both `remote_urls` and `rewrite_images`, and a message whose visible text
+/// *contains* markup was treated as though it contained an image. A quoted HTML example or a
+/// code snippet arrives as escaped text — `<pre>&lt;img src="https://tracker/beacon"&gt;</pre>` —
+///
+/// which every client on earth draws as the characters `<img src="...">` and none treats as an
+/// image. Halcyon collected that URL as a remote image and, with images allowed, **fetched it** —
+/// a tracking beacon that fires from text the reader can see is only text, and that no amount of
+/// looking at the message would explain.
+///
+/// It also rewrote the visible characters, so somebody reading a snippet saw
+/// `<img src="data:image/png;base64,...">` where the sender had written a URL, or
+/// `<img src="blocked:remote">` with images off. The message was altered, not just its images.
+///
+/// A tag boundary scan is enough here and a parser is not needed: this runs on output from
+/// ammonia, where every `<` and `>` in text has already been escaped, so a raw one is a tag.
+fn next_src_attribute(haystack: &str) -> Option<usize> {
+    let mut cursor = 0;
+
+    while let Some(open) = haystack[cursor..].find('<') {
+        let tag_start = cursor + open;
+        let Some(close) = haystack[tag_start..].find('>') else {
+            return None; // an unterminated tag: nothing after it is safe to rewrite
+        };
+        let tag_end = tag_start + close;
+
+        if let Some(at) = haystack[tag_start..tag_end].find("src=\"") {
+            return Some(tag_start + at);
+        }
+
+        cursor = tag_end + 1;
+    }
+
+    None
+}
+
 pub fn remote_urls(html: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut rest = html;
 
-    while let Some(position) = rest.find("src=\"") {
+    while let Some(position) = next_src_attribute(rest) {
         let after = &rest[position + 5..];
 
         let Some(end) = after.find('"') else { break };
@@ -738,6 +777,54 @@ mod tests {
         );
 
         assert_eq!(urls, vec!["https://a.test/1.png", "https://b.test/2.png"]);
+    }
+
+    #[test]
+    fn markup_shown_as_text_is_not_treated_as_an_image() {
+        // A message that displays HTML rather than being it: a quoted example, a code snippet,
+        // a bounce report. Every client draws this as characters. Halcyon used to collect the
+        // URL as a remote image and fetch it, which is a tracking beacon firing from text the
+        // reader can see is only text -- and then rewrote the characters the sender wrote.
+        let raw = r#"<pre>&lt;img src="https://tracker.example/beacon?id=42"&gt;</pre>"#;
+
+        assert!(
+            remote_urls(&sanitise(raw)).is_empty(),
+            "a URL in escaped text was collected as a remote image"
+        );
+
+        let rendered = render(Some(raw), None, &HashMap::new(), true, &HashMap::new());
+        assert_eq!(rendered.loaded_remote, 0, "escaped text caused a fetch");
+        assert_eq!(
+            rendered.blocked_remote, 0,
+            "escaped text was counted as an image"
+        );
+        assert!(
+            rendered
+                .html
+                .contains("https://tracker.example/beacon?id=42"),
+            "the sender's own text was rewritten: {}",
+            rendered.html
+        );
+    }
+
+    #[test]
+    fn a_real_image_is_still_found_and_still_rewritten() {
+        // The other half. Fixing the false positive by finding nothing at all would be worse
+        // than the bug: every tracking pixel would sail straight through.
+        let raw = r#"<p>hello</p><img src="https://a.test/pixel.png">"#;
+
+        assert_eq!(
+            remote_urls(&sanitise(raw)),
+            vec!["https://a.test/pixel.png"],
+            "a genuine image attribute was missed"
+        );
+
+        let blocked = render(Some(raw), None, &HashMap::new(), false, &HashMap::new());
+        assert_eq!(
+            blocked.blocked_remote, 1,
+            "a genuine remote image was not blocked"
+        );
+        assert!(!blocked.html.contains("https://a.test/pixel.png"));
     }
 
     #[test]

@@ -3723,3 +3723,77 @@ quietly stops describing the app is worse than one that fails.
   writing down because a test that cries wolf is worse than no test: the next real finding gets
   waved through as "probably the xmp thing again". It now scans only inside tag boundaries, and
   asserts both that a live handler is caught and that escaped text is not.
+
+## 2026-09-02 — Testing the app by using it, and four bugs that only surface that way
+
+### Fixed
+
+- **Undo was unreachable for the three commonest actions.** Flagging a message and pressing Ctrl+Z
+  did nothing, and said nothing. `msg_toggle_flag`, `msg_toggle_read` and `msg_set_flags` never
+  recorded an undo step, while `msg_archive`, `msg_move` and `msg_delete` did — and the note above
+  `msg_archive` describes this exact bug being caught for archive during the Phase 10 gate and
+  fixed for three commands only. The other three were left.
+
+  It failed in total silence: an empty stack makes `undo_perform` return `None`, and `useUndo`
+  shows a toast only for `Some`. So the most-repeated actions in the app were the ones that could
+  not be taken back, with nothing on screen to say so.
+
+  `tests/undo_coverage.rs` now asserts every mutating command captures **and** records, because
+  capturing without recording fails identically. The Phase 8 gate did not catch this: it calls
+  `undo::capture` directly, proving the machinery works rather than that anything uses it.
+
+- **Search returned mail from the Bin.** 22 of the first 100 hits for "account" on a real account
+  were messages already deleted, shown exactly like live mail. Find one that way, reply to it, and
+  the reply goes from a copy that was thrown away. Junk was already excluded; the Bin had never
+  been considered.
+
+  Excluded now for an unscoped search only — searching the Bin deliberately still works — and
+  expressed as an uncorrelated subquery rather than a role check on a join, because the note above
+  `mailbox_join` measured that join at a hundred thousand index lookups on a broad term. A test
+  asserts the join stays out.
+
+- **Search showed the same message several times.** Gmail exposes a labelled message once per
+  label, so the store holds several rows with one `Message-ID` — 88 of 1,432 here. Deduplicated
+  after ranking and before the limit, so the best-ranked copy survives and the caller still gets
+  the number of results it asked for.
+
+- **A tracking URL in _text_ was being fetched.** `remote_urls` and `rewrite_images` searched the
+  whole document for `src="`, which matches inside escaped text. A message that merely displays
+  markup — a quoted example, a code snippet, a bounce report —
+
+      <pre>&lt;img src="https://tracker.example/beacon?id=42"&gt;</pre>
+
+  had that URL collected as a remote image and, with images allowed, **fetched**. A beacon firing
+  from text the reader can see is only text, which nothing on screen would ever explain.
+
+  It also rewrote what the sender wrote: the reader saw `src="data:image/png;base64,…"`, or
+  `src="blocked:remote"` with images off, in place of the URL in the snippet. Both functions now
+  only consider `src="` between a `<` and a `>`. Two tests: one that escaped text is left alone,
+  one that a genuine tracking pixel is still caught — fixing a false positive by finding nothing
+  would be worse than the bug.
+
+### Notes — how these were found
+
+By using the app, not by reading it. Each was invisible to a test suite that passes: the undo bug
+sits _between_ a gate that tests undo and the commands the UI calls; the search bugs need a real
+mailbox with real labels and a real Bin; the beacon needs a message that talks about HTML.
+
+The last one came out of an exploratory probe an analysis agent left behind in `render.rs` while
+investigating. The scaffolding was removed and replaced with proper tests, but the question it was
+asking turned out to be the best one anybody asked today.
+
+### Incidents
+
+- **A fix was nearly applied to dead code.** `db::query::search` looks like the search and is
+  reached only by the seed benchmark and its own tests; the UI calls `search_run`, backed by
+  `src/search/`. The Bin exclusion was written into the wrong one first and reverted. The
+  measurement that started it came from the running app, so the bug was real either way — but a
+  fix "verified" against a function nothing calls would have been reported as a fix.
+
+- **The shortcuts sheet advertises three shortcuts that cannot fire.** `Ctrl+1–9` (jump to
+  mailbox) and `Ctrl+↑`/`Ctrl+↓` (previous/next in thread) have no handler, and `parseChord`
+  returns `None` for ranges and arrows, so the dispatcher never even considers them.
+  `ShortcutSheet` renders `SHORTCUTS` unfiltered and its comment says it does so to stay in sync
+  with what the dispatcher binds — which is exactly what it is not. Left as a finding rather than
+  fixed: implementing two features or withdrawing three documented ones is not a decision to take
+  while bug-hunting.

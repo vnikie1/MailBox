@@ -191,6 +191,25 @@ pub fn compile(query: &Query, scope: &[i64], limit: u32, now: i64) -> Compiled {
         sql.push_str(" AND message.is_junk = 0");
     }
 
+    // Deleted mail is excluded for the same reason, and it was not until somebody searched a
+    // real account: 22 of the first 100 hits for "account" were messages already in the Bin,
+    // shown exactly like live mail with nothing to distinguish them. Finding a message that way
+    // and replying to it means replying from a copy that has been thrown away.
+    //
+    // Both clients this imitates do the same -- Mail excludes Trash from All Mailboxes unless
+    // the preference says otherwise, Gmail unless you ask for in:anywhere.
+    //
+    // Expressed as a subquery rather than a role check on a join, deliberately. The note above
+    // `mailbox_join` measured that joining per matching row costs a hundred thousand index
+    // lookups on a broad term; this subquery is uncorrelated, runs once, and reads a table with
+    // one row per mailbox. A scope that names mailboxes explicitly is left alone: choosing the
+    // Bin and searching it is a request for exactly those messages.
+    if scope.is_empty() {
+        sql.push_str(
+            " AND message.mailbox_id NOT IN (SELECT id FROM mailbox WHERE role = 'trash')",
+        );
+    }
+
     for (bound, comparison) in [(query.after, ">="), (query.before, "<")] {
         if let Some(at) = bound {
             params.push(Value::Integer(at));
@@ -303,6 +322,49 @@ mod tests {
             value,
             Value::Text(text) if text.contains("drop table")
         )));
+    }
+
+    #[test]
+    fn deleted_mail_is_excluded_from_an_unscoped_search() {
+        // Searching "All Mailboxes" on a real account returned 22 messages from the Bin in the
+        // first 100 hits for "account", shown exactly like live mail. Somebody finds one that
+        // way and replies from a copy they had already thrown away.
+        let compiled = compile(&parsed("account"), &[], 50, NOW);
+
+        assert!(
+            compiled.sql.contains("role = 'trash'"),
+            "an unscoped search does not exclude the Bin: {}",
+            compiled.sql
+        );
+    }
+
+    #[test]
+    fn a_search_scoped_to_a_mailbox_can_still_reach_the_bin() {
+        // Choosing the Bin in the sidebar and searching it is a request for exactly those
+        // messages. Excluding them there would make the Bin unsearchable.
+        let compiled = compile(&parsed("account"), &[7], 50, NOW);
+
+        assert!(
+            !compiled.sql.contains("role = 'trash'"),
+            "a scoped search should not also apply the unscoped exclusion: {}",
+            compiled.sql
+        );
+    }
+
+    #[test]
+    fn excluding_the_bin_does_not_force_the_per_row_mailbox_join() {
+        // The note above `mailbox_join` measured that joining the mailbox per matching row costs
+        // a hundred thousand index lookups on a broad term. The exclusion is a subquery for that
+        // reason, and a later change that turns it into a role check on a join would undo a
+        // deliberate performance decision without anyone noticing.
+        let compiled = compile(&parsed("the"), &[], 50, NOW);
+
+        assert!(
+            !compiled.sql.contains("JOIN mailbox"),
+            "a query that asks nothing about mailboxes should not join one: {}",
+            compiled.sql
+        );
+        assert!(compiled.sql.contains("NOT IN (SELECT id FROM mailbox"));
     }
 
     #[test]

@@ -184,8 +184,22 @@ pub fn any_unread(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, DbEr
 /// The same shape as `msg_toggle_read` and for the same reason: the direction is decided from
 /// the stored rows rather than passed in, so the window keeps no second copy of state the
 /// database already holds. A mixed selection becomes flagged.
+/// Recorded on the undo stack, for the same reason archive is — see `msg_archive`.
+///
+/// It was not, until an unflagged message was flagged from the toolbar and Ctrl+Z did nothing.
+/// The note above `msg_archive` says every command in this file used to miss the undo stack and
+/// that archive, move and delete were fixed; the three flag commands were not, so exactly the
+/// actions somebody performs dozens of times an hour were the ones that could not be taken back.
+///
+/// The Phase 8 gate did not catch it because it calls `undo::capture` directly rather than
+/// through these commands: it proves the undo machinery works, not that anything uses it.
 #[tauri::command]
-pub async fn msg_toggle_flag(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Response<bool> {
+pub async fn msg_toggle_flag(
+    app: AppHandle,
+    db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
+    ids: Vec<i64>,
+) -> Response<bool> {
     if ids.is_empty() {
         return Ok(false);
     }
@@ -200,8 +214,17 @@ pub async fn msg_toggle_flag(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -
 
     let affected = ids.clone();
 
-    let (_, mailboxes) = db
+    let (_, mailboxes, step) = db
         .write(move |tx| {
+            // Captured before the write, from the same rows, so undo restores what was actually
+            // there rather than re-running the toggle against whatever the state is later.
+            let step = crate::undo::capture(
+                tx,
+                if now_flagged { "Flag" } else { "Clear Flag" },
+                &affected,
+                &[crate::undo::Field::Flagged],
+            )?;
+
             for group in ops::locate(tx, &affected)? {
                 ops::enqueue(
                     tx,
@@ -217,10 +240,11 @@ pub async fn msg_toggle_flag(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -
 
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
-            Ok((changed, mailboxes))
+            Ok((changed, mailboxes, step))
         })
         .await?;
 
+    stack.record(step);
     announce(&app, &db, mailboxes, &ids);
     Ok(now_flagged)
 }
@@ -360,8 +384,14 @@ pub async fn msg_archive(
 ///
 /// A mixed selection becomes **read**. Someone who selects forty messages and presses Ctrl+U
 /// means "clear these"; marking the already-read half unread instead would be a mess to undo.
+/// Recorded on the undo stack — see `msg_toggle_flag`.
 #[tauri::command]
-pub async fn msg_toggle_read(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -> Response<bool> {
+pub async fn msg_toggle_read(
+    app: AppHandle,
+    db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
+    ids: Vec<i64>,
+) -> Response<bool> {
     if ids.is_empty() {
         return Ok(false);
     }
@@ -377,8 +407,15 @@ pub async fn msg_toggle_read(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -
 
     let affected = ids.clone();
 
-    let (_, mailboxes) = db
+    let (_, mailboxes, step) = db
         .write(move |tx| {
+            let step = crate::undo::capture(
+                tx,
+                if now_seen { "Mark Read" } else { "Mark Unread" },
+                &affected,
+                &[crate::undo::Field::Seen],
+            )?;
+
             // Queued inside the same transaction as the local write, so closing the lid between
             // them cannot lose the change. Same contract as `msg_set_flags`.
             for group in ops::locate(tx, &affected)? {
@@ -396,25 +433,40 @@ pub async fn msg_toggle_read(app: AppHandle, db: State<'_, Db>, ids: Vec<i64>) -
 
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
-            Ok((changed, mailboxes))
+            Ok((changed, mailboxes, step))
         })
         .await?;
 
+    stack.record(step);
     announce(&app, &db, mailboxes, &ids);
     Ok(now_seen)
 }
 
+/// Recorded on the undo stack — see `msg_toggle_flag`.
 #[tauri::command]
 pub async fn msg_set_flags(
     app: AppHandle,
     db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
     ids: Vec<i64>,
     patch: FlagPatch,
 ) -> Response<usize> {
     let affected = ids.clone();
 
-    let (changed, mailboxes) = db
+    // Which fields this patch actually touches. Capturing a field the caller did not change
+    // would make undo restore a value nothing had altered.
+    let mut fields = Vec::new();
+    if patch.seen.is_some() {
+        fields.push(crate::undo::Field::Seen);
+    }
+    if patch.flagged.is_some() {
+        fields.push(crate::undo::Field::Flagged);
+    }
+
+    let (changed, mailboxes, step) = db
         .write(move |tx| {
+            let step = crate::undo::capture(tx, "Change Flags", &affected, &fields)?;
+
             // Located before the write and queued inside the same transaction: the local
             // change and the obligation to tell the server are one unit, so closing the lid
             // between them cannot lose the change. See `sync::ops`.
@@ -433,10 +485,11 @@ pub async fn msg_set_flags(
 
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
-            Ok((changed, mailboxes))
+            Ok((changed, mailboxes, step))
         })
         .await?;
 
+    stack.record(step);
     announce(&app, &db, mailboxes, &ids);
     Ok(changed)
 }

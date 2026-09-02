@@ -60,6 +60,40 @@ fn vip_addresses(conn: &Connection) -> Result<HashSet<String>, DbError> {
     Ok(rows.into_iter().collect())
 }
 
+/// The `Message-ID` of each of these rows, for spotting the same message under two labels.
+///
+/// One query for the whole candidate set, for the same reason `participated_threads` is: asked
+/// per row it would be a round trip through the reader pool for one string, a couple of hundred
+/// times.
+fn message_identities(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<i64, String>, DbError> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let list = (0..ids.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut statement = conn.prepare(&format!(
+        "SELECT id, message_id FROM message WHERE id IN ({list}) AND message_id IS NOT NULL"
+    ))?;
+
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+    let rows = statement
+        .query_map(params.as_slice(), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(rows.into_iter().collect())
+}
+
 /// Which of these threads the user has sent a message in.
 ///
 /// One query for the whole candidate set. Asked per row it would be a join per result, which at
@@ -145,6 +179,9 @@ pub fn run_parsed(
 
     let vips = vip_addresses(conn)?;
 
+    let candidate_ids: Vec<i64> = candidates.iter().map(|(row, _)| row.id).collect();
+    let identities = message_identities(conn, &candidate_ids)?;
+
     let thread_ids: Vec<i64> = candidates
         .iter()
         .filter_map(|(row, _)| row.thread_id)
@@ -189,6 +226,23 @@ pub fn run_parsed(
             // than whatever SQLite happened to return.
             .then_with(|| b.row.date_received.cmp(&a.row.date_received))
             .then_with(|| a.row.id.cmp(&b.row.id))
+    });
+
+    // One row per message, applied after sorting and before the limit.
+    //
+    // After sorting, so the copy kept is the best-ranked one. Before the limit, so removing a
+    // duplicate cannot leave the caller with fewer results than it asked for -- the query
+    // already over-fetches for exactly this kind of pruning.
+    //
+    // Gmail exposes a labelled message once per label, so the store holds several rows with the
+    // same Message-ID: 88 of 1,432 on the account this was found on. Search showed the same
+    // email two and three times, which reads as separate emails rather than as one filed twice.
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|hit| match identities.get(&hit.row.id) {
+        // No Message-ID means nothing proves this is the same message as any other, and
+        // dropping mail on a guess is the worse mistake of the two.
+        Some(id) if !id.is_empty() => seen.insert(id.clone()),
+        _ => true,
     });
 
     hits.truncate(limit as usize);
