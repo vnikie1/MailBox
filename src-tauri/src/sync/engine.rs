@@ -193,6 +193,40 @@ impl SyncEngine {
     }
 }
 
+/// Whether a failed token refresh means the credential is bad or the provider is having a bad
+/// minute. The two need opposite handling, and only one of them should stop an account.
+///
+/// Split out so the decision is testable without a network or a provider, the same way
+/// `outbox::resolve_interrupted` is split from the IMAP lookup it depends on.
+///
+/// Every one of these used to become [`SyncError::Rejected`], which is not retryable, which
+/// stops the account and raises "The saved sign-in for this account was refused. Signing in
+/// again will fix it." So a dropped connection that happened to coincide with the access token
+/// expiring told the user their credential was bad, sent them through a sign-in that fixed
+/// nothing, and stopped their mail until they did it.
+///
+/// `session.rs` already draws this line for the IMAP login, and its comment records what
+/// conflating them cost: a soak run where the auth backend was down for ninety seconds and the
+/// client stopped checking mail "for the next six and a half hours" and said nothing. A token
+/// refresh is the same decision one layer up, and never got the same treatment — though
+/// `OAuthError` has distinguished the cases all along.
+fn oauth_failure(email: &str, error: &accounts::oauth::OAuthError) -> SyncError {
+    match error {
+        // The provider answered, and said no. `invalid_grant` is a revoked or expired refresh
+        // token, and no amount of retrying turns that into a yes.
+        accounts::oauth::OAuthError::Refused { .. } => SyncError::Rejected {
+            host: email.to_string(),
+            detail: error.to_string(),
+        },
+        // The provider did not answer, or not usefully. The stored credential may be perfectly
+        // good, so keep the account alive and try again rather than blaming the user for it.
+        _ => SyncError::AuthUnavailable {
+            host: email.to_string(),
+            detail: error.to_string(),
+        },
+    }
+}
+
 /// Turns a sync failure into a sentence for the UI.
 ///
 /// Never the underlying error's `Display`: those carry hostnames and protocol text, and
@@ -285,10 +319,7 @@ pub(crate) async fn credential_for(
 
             let (token, refreshed) = accounts::access_token(expiry, provider, &client, &reference)
                 .await
-                .map_err(|error| SyncError::Rejected {
-                    host: account.email.clone(),
-                    detail: error.to_string(),
-                })?;
+                .map_err(|error| oauth_failure(&account.email, &error))?;
 
             if let Some(expires_at) = refreshed {
                 let reference = reference.clone();
@@ -1249,6 +1280,60 @@ mod tests {
             assert!(described.ends_with('.'), "{described}");
             assert!(!described.contains("imap.gmail.com"), "{described}");
             assert!(!described.contains("AUTHENTICATIONFAILED"), "{described}");
+        }
+    }
+
+    #[test]
+    fn only_a_refusal_asks_the_user_to_sign_in_again() {
+        // The whole point of the split. A provider that says `invalid_grant` means the stored
+        // credential is dead; a provider that cannot be reached means nothing about it at all,
+        // and treating the second as the first stopped the account and blamed the user.
+        let refused = oauth_failure(
+            "me@gmail.com",
+            &accounts::oauth::OAuthError::Refused {
+                provider: "google".into(),
+                error: "invalid_grant".into(),
+                description: Some("token revoked".into()),
+            },
+        );
+
+        assert!(
+            matches!(refused, SyncError::Rejected { .. }),
+            "a refused grant must ask for a new sign-in"
+        );
+        assert!(describe(&refused).contains("Signing in again"));
+
+        // Everything that is not the provider saying no keeps the account alive. `TimedOut`
+        // stands in for the whole class here because a `reqwest::Error` cannot be constructed
+        // in a test, and the arm they share is the `_` fallthrough.
+        let unavailable = oauth_failure("me@gmail.com", &accounts::oauth::OAuthError::TimedOut);
+
+        assert!(
+            matches!(unavailable, SyncError::AuthUnavailable { .. }),
+            "a provider that did not answer must not be reported as a bad credential"
+        );
+
+        let described = describe(&unavailable);
+        assert!(!described.contains("Signing in again"), "{described}");
+        assert!(described.contains("keep trying"), "{described}");
+    }
+
+    #[test]
+    fn the_sign_in_banner_never_fires_for_a_provider_outage() {
+        // `needs_reauth` is what actually raises the banner and stops the account, so assert on
+        // it rather than only on the sentence.
+        for error in [
+            accounts::oauth::OAuthError::TimedOut,
+            accounts::oauth::OAuthError::StateMismatch,
+            accounts::oauth::OAuthError::NoClient {
+                provider: "google".into(),
+            },
+        ] {
+            let mapped = oauth_failure("me@gmail.com", &error);
+            assert!(
+                !matches!(mapped, SyncError::Rejected { .. }),
+                "{error} was mapped to a credential rejection"
+            );
         }
     }
 
