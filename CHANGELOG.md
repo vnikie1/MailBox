@@ -3872,3 +3872,200 @@ data-loss to high by a verifier whose reasoning was better than the finder's.
 
   **Existing messages stay wrong.** The column is filled when a message is fetched, so this
   corrects mail that arrives from now on, not what is already stored.
+
+---
+
+## 2026-09-03 — Working the bug-hunt leads: eleven real, one false
+
+Continues the hunt recorded in `docs/BUG-HUNT-2026-09-02.md`. Roughly sixty leads had been
+raised and not verified. This session verified twenty-two of them against the source and fixed
+every one that held up.
+
+**On the method, because it went wrong first.** An adjudication workflow was run over the
+twenty-nine most serious leads with instructions to argue both sides and judge. It returned
+**29 confirmed, 0 rejected** — a panel that rejects nothing is not judging, it is agreeing. A
+second workflow with explicitly adversarial refuters was launched to check its work, and that
+one hit the account's session limit: every refuter agent died while ten of the twelve
+derivations completed. Its result therefore read "12 rejected", which was an artefact of the
+failures rather than a verdict — `why_rejected` was empty for all twelve. **Neither number was
+trustworthy, and both looked authoritative.** Everything below was re-derived by hand from the
+source before being touched, and one lead was thrown out on that basis.
+
+### Fixed — data loss
+
+- **A failed send permanently disabled autosave, and Save as Draft then discarded the
+  message.** `send()` calls `autosave.abandon()` before `composeSend`, and nothing ever set the
+  flag back. Every failure inside `compose_send` happens _before_ the message reaches the
+  outbox — no account, an unreadable attachment, a build failure — so the compose window held
+  the only copy and could no longer save it. The close sheet still offered "Save as Draft",
+  which wrote nothing at all. Added `resume()`, called only when the send itself failed: past
+  the outbox the message exists and a draft of it would be a second message.
+- **Autosave recorded a draft as saved before the write succeeded.** `lastSaved.current` was
+  assigned two lines before `composeSaveDraft` was called, and the `.catch` never rolled it
+  back — so the "nothing has changed" guard suppressed every retry of a save that had failed.
+  One transient error killed the 30-second timer, the window-blur save and Save as Draft
+  together, for the life of the window, while the comment beside it promised "the next save
+  will try again". Now committed on success, with an in-flight guard doing the job the early
+  write had been doing.
+
+### Fixed — panics, both reproduced before being fixed
+
+- **`text_from_html` panicked on any multi-byte character inside a comment, script or style
+  block.** The skip walked one byte at a time, so `<!-- café -->` left the index inside the `é`
+  and the next slice panicked with "byte index 9 is not a char boundary". That took out the
+  preview _and_ the search text for the whole message. Marketing mail is full of comments
+  containing accented words and curly quotes. The neighbouring `!in_tag` branch already
+  advanced by character and says why in a comment; the skip branch never did.
+- **Search suggestions panicked on multi-byte whitespace.** `text.rfind(char::is_whitespace)`
+  returns a byte offset and the code added 1. `char::is_whitespace` is Unicode-aware, so NBSP,
+  the em and en spaces and the ideographic space all match, and the `+1` lands inside them.
+  Pasting a phrase copied from a web page or from Outlook is the ordinary way to get an NBSP
+  into a search field.
+
+### Fixed — things wired to nothing
+
+- **Smart Mailboxes, Flagged, all seven flag colours and VIPs were unclickable.** The sidebar
+  row handler returned early on an empty `mailboxIds`, and `buildSidebar` gives every predicate
+  row exactly that — `model.ts` says a row has "one or the other, never both". The guard meant
+  to skip inert headers was skipping half the sidebar. They rendered, showed counts and
+  highlighted on hover, which is what made it look like the click had missed.
+- **Threading was broken for every message except the oldest in each conversation.** The reader
+  has a message id and passed it straight into `thread_get`, which filters `WHERE thread_id =
+?1`. `persist::rethread` keys a thread on "the smallest message id in the thread", so those
+  two numbers agree for exactly one message per conversation. Every other message matched no
+  row, fell through to the single-message fallback, and opened as a conversation of one. Fixed
+  in the core as `thread_for_message`; the TypeScript and the browser mock had the identical
+  bug and now send and expect a message id.
+- **Undo, Mark as Junk and Run Rules never refreshed the list or the reader.** All three call
+  the core directly rather than through a mutation hook, and emit only `mailbox:changed` —
+  whose handler invalidated the sidebar counts alone. An undone move left the message sitting
+  in the folder it had been moved out of. The action had worked; only the screen disagreed.
+- **Ctrl+Z undid two operations per keypress.** `useUndo` kept its own `window` keydown
+  listener alongside the dispatcher's. Both fired; `preventDefault` does not stop a sibling. It
+  hid behind the shape of the stack — with one step the second call found nothing and did
+  nothing, which is the case anyone testing by hand tries first.
+- **Arrow keys moved the selection but never scrolled.** Nothing called `scrollToIndex`, so the
+  highlight walked out of the rendered window and the list sat still. It also stopped dead
+  partway down: the infinite-scroll prefetch keys off the last _visible_ index, which never
+  advanced, so the next page was never requested.
+- **Three shortcuts advertised in the Help sheet did nothing.** Ctrl+Enter to send (marked
+  `local`, and the compose window bound nothing); Ctrl+1–9 to jump to a mailbox (`parseChord`
+  returns null for a range, so the dispatcher skipped the row and no handler was ever written);
+  and Ctrl+Shift+E to redirect, which the new test found rather than a person.
+
+### Fixed — silent failures
+
+- **Deleting a selection spanning two accounts did nothing at all.** `trash_for` resolved one
+  Trash for the whole selection and returned `None` as soon as more than one account was in it;
+  the op loop then hit its `None => continue` and `write::delete` refuses without a Trash. No
+  server op, no local change, no error. **All Inboxes is the default view**, so a mixed
+  selection is the ordinary case. Its own doc comment had deferred this — "Phase 5 splits such
+  a selection per account; until there is a sync engine to do that against, refusing is the
+  honest behaviour" — and Phase 5 shipped without anyone coming back to it. `msg_archive` has
+  resolved its destination per message since it was written, which is why archiving a mixed
+  selection always worked and deleting one never did.
+- **Undo Send reported success when it had failed.** `compose_undo` returns `false` when the
+  message has left `holding`, and its doc comment says returning false is the point because
+  "reporting success there would be a lie the user would discover from the recipient". The
+  banner discarded that boolean, refreshed, and showed exactly what a successful undo shows.
+- **Saving an attachment ignored both its result and any rejection**, so a full disk or a
+  read-only folder looked identical to a save.
+- **A sync error was never cleared.** `setErrors` only ever added. One dropped connection and
+  the sidebar carried the failure for the rest of the session while mail arrived underneath it.
+  Now cleared when that account next reports progress, which the core emits only after a fetch
+  has come back and been written.
+- **A dropped connection told the user their sign-in had been refused.** Refreshing an OAuth
+  access token mapped _every_ failure to `SyncError::Rejected`, which is not retryable, which
+  stops the account and raises "Signing in again will fix it". `session.rs` already draws this
+  line for the IMAP login and records what conflating them cost: a soak run where the auth
+  backend was down for ninety seconds and the client stopped checking mail "for the next six
+  and a half hours" and said nothing. `OAuthError` had distinguished the cases all along.
+
+### Fixed — correctness
+
+- **Importing more than 5,000 messages hung the whole app.** `import::finish` looped calling
+  `rethread` with a 5,000 window until `unthreaded_count` reached zero, and `rethread` takes the
+  newest `limit` messages by date with no offset and no filter on what is already threaded. Past
+  5,000 it threaded the same messages every pass and returned 5,000 every time, so the
+  `done == 0` guard never fired and the count never moved. It runs inside `db.write`, so it held
+  the single writer and the app looked frozen rather than busy. The sync engine had already
+  learned this exact lesson and finishes with one `FULL_RETHREAD` pass; import never got the
+  same treatment, and now shares the constant.
+- **Redirect wrote all five `Resent-` headers with a bare LF.** A literal line break inside a
+  Rust string literal produces one, and the source looks exactly like the intended output. RFC
+  5322 §2.1 requires CRLF, and the block is prepended to an original whose headers already use
+  it — so the header section changed line ending partway down. The mangled headers are the ones
+  naming who the message is now going to.
+- **Remote image URLs were enumerated with their ampersands still escaped**, so `?w=600&h=400`
+  was fetched as `?w=600&amp;h=400` and the CDN saw a parameter named `amp;h`.
+- **The SMTP diagnostic showed the server's rejection raw** while the IMAP half had redacted it
+  since it was written. A server that echoes the rejected command back puts `AUTH PLAIN <base64
+of user and password>` on screen, and that base64 is trivially reversible.
+
+### Not a bug — one lead thrown out
+
+- **"A message stranded in `sending` is invisible, unrecoverable and never sent."** All three
+  parts are false. `outbox::pending` selects `state != 'sent'`, so a stranded row appears in the
+  outbox; `sender::recover` runs at the top of the sender loop before anything is sent; and
+  `resolve_interrupted` returns it to `queued` after checking Sent by `Message-ID`. The earlier
+  panel had "confirmed" this one. It is the reason none of the others were taken on trust.
+
+### Notes — verified, real, and deliberately not fixed
+
+- **Without CONDSTORE or QRESYNC, rules, junk filing, arrival notifications and expunge
+  handling never run.** Verified by hand: `incremental()` has exactly one call site, gated on
+  `caps.has_modseq()` and a `HIGHESTMODSEQ` that a plain `SELECT` never returns, and all four
+  behaviours live only inside it. So on such a server the app silently becomes one that does not
+  run rules, does not file junk, never notifies, and never removes mail deleted elsewhere.
+  **Not fixed here.** The full path cannot currently tell a genuinely new arrival from a
+  backfilled one, and the code's own comment explains why that matters: running rules over an
+  initial sync "would apply every rule to fifty thousand messages the user has already dealt
+  with, and a rule that files mail would empty their Inbox on first launch". Getting it right
+  means keying arrivals off `uid_next`, and it cannot be tested here — every account on this
+  machine (Gmail, Outlook, iCloud, Yahoo) advertises CONDSTORE. Shipping an unverified change of
+  that shape risks misfiling someone's whole mailbox, which is worse than the bug.
+- **Ctrl+↑/↓ (next and previous in thread)** are advertised and unimplemented. They move between
+  messages inside the open conversation, and the reader has no notion of a focused message
+  within a thread. That is a reader feature, not a binding. Recorded as an explicit known-gap
+  list in `tests/unit/shortcuts.test.ts` so an _accidental_ gap cannot hide among the deliberate
+  ones.
+- Still unverified from the original list: the draft-append duplication, the backfill completion
+  marker, the rethread window's effect on conversations older than it, transient credential
+  failures in the sender, and the PST header handling.
+
+### Added — tests
+
+- `tests/unit/shortcuts.test.ts`: every non-local shortcut must have a handler in the shell;
+  every row the table cannot parse must be special-cased in the dispatcher; the known-gap list
+  must not name a shortcut that has since been bound. `Handlers` is a `Partial<Record<...>>`, so
+  leaving one out is not a type error — which is how three of them stayed unbound.
+- The same file gained a scan for `addEventListener('keydown')` anywhere outside the dispatcher,
+  so the duplicate Ctrl+Z listener cannot come back quietly.
+- Rust regression tests for both panics, for the thread resolution (every message in a
+  conversation opens the whole conversation), for the cross-account delete grouping, for CRLF on
+  every `Resent-` header, for the OAuth failure classification, and for import termination past
+  the old rethread window.
+
+### Incidents
+
+- **The adjudication workflow rubber-stamped.** 29 of 29 leads "confirmed", none rejected. Its
+  findings were detailed, well-cited and included at least one claim that is plainly false on
+  inspection. Detailed prose is not evidence of judgement.
+- **The verification workflow's result was misleading in the opposite direction.** It hit the
+  account session limit; all twenty refuter agents failed, so every lead fell out as "rejected"
+  with an empty reason. Read carelessly it would have dismissed twelve real bugs. Worth
+  remembering that a workflow's summary can be an artefact of its failures.
+- **Three self-inflicted test bugs, all the same mistake.** A `\s` written inside a JavaScript
+  template literal collapses to `s`, so the handler scan matched nothing and reported all 23
+  shortcuts as unbound. Then the keydown scan reported ComposeWindow because a _comment_ there
+  mentions `addEventListener('keydown')` while explaining why it does not use one. This is the
+  third time this class has appeared in this project — the Rust `occurrences_in_code` helper
+  exists for the same reason. **Prose about a call is not a call**, and a test whose first result
+  is a false alarm teaches whoever sees the second one to ignore it.
+- **Shell escaping ate backslashes repeatedly** when writing files through `node -e` and
+  heredocs, twice producing source that compiled but was wrong. Switched to the editing tools for
+  anything containing an escape. This is almost certainly how the bare-LF `Resent-` headers got
+  there in the first place.
+- **A doctest failure blocked the gate for a while.** An indented block inside a `///` comment is
+  compiled as a Rust doctest. Third occurrence in this project; the fix is always to inline the
+  example rather than indent it.
