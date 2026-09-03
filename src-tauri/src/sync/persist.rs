@@ -153,7 +153,64 @@ pub fn write_batch(
         written.lowest_uid = 0;
     }
 
+    // The people this batch was from, for search suggestions.
+    record_contacts(tx, &written.inserted_ids)?;
+
     Ok(written)
+}
+
+/// Adds the senders of these messages to the contact index.
+///
+/// `search::suggest` reads the `contact` table to offer people for `from:` and `to:`, and
+/// **nothing had ever written it** -- the table was created in the first migration, the query
+/// selects from it, and its only `INSERT` in the whole repository was inside a test. So the
+/// People group of the suggestion list could not appear, ever, for anybody.
+///
+/// The comment beside that query records an earlier bug in the same feature: the column name
+/// was wrong and the error was swallowed, so "person suggestions silently never appeared while
+/// every test still passed". Fixing the name did not help, because there was nothing to select.
+///
+/// Written here rather than on a timer or per keystroke. Suggestions have a 30ms budget and
+/// scanning the message table per keystroke is what the index exists to avoid; doing it from the
+/// rows just inserted costs one grouped statement per batch and covers the initial sync, the
+/// backfill and every later arrival without any of them having to remember.
+fn record_contacts(tx: &Transaction<'_>, inserted: &[i64]) -> Result<(), DbError> {
+    if inserted.is_empty() {
+        return Ok(());
+    }
+
+    let placeholders = (0..inserted.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // `seen_count` accumulates rather than being replaced, because this only ever sees one
+    // batch and the total is what orders the suggestions.
+    let sql = format!(
+        "INSERT INTO contact (addr, name, seen_count, last_seen)
+         SELECT LOWER(TRIM(from_addr)),
+                NULLIF(TRIM(COALESCE(from_name, '')), ''),
+                COUNT(*),
+                MAX(date_received)
+           FROM message
+          WHERE id IN ({placeholders})
+            AND from_addr IS NOT NULL
+            AND TRIM(from_addr) <> ''
+          GROUP BY LOWER(TRIM(from_addr))
+         ON CONFLICT(addr) DO UPDATE SET
+                name = COALESCE(excluded.name, contact.name),
+                seen_count = contact.seen_count + excluded.seen_count,
+                last_seen = MAX(COALESCE(contact.last_seen, 0), excluded.last_seen)"
+    );
+
+    let params: Vec<&dyn rusqlite::ToSql> = inserted
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+
+    tx.execute(&sql, params.as_slice())?;
+
+    Ok(())
 }
 
 /// Serialises an address list for the `to_json` / `cc_json` columns.

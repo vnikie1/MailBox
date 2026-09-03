@@ -90,10 +90,36 @@ describe('parsing a chord', () => {
   })
 
   it('refuses what is not one literal key', () => {
-    // Reference-sheet entries, not bindings: a range, and arrows the list owns.
+    // Reference-sheet entries, not bindings: a range, and a bare arrow, which belongs to
+    // whichever list has focus.
     expect(parseChord('Ctrl+1–9')).toBeNull()
     expect(parseChord('↓')).toBeNull()
-    expect(parseChord('Ctrl+↑')).toBeNull()
+    expect(parseChord('→')).toBeNull()
+  })
+
+  it('reads a modified arrow as an ordinary chord', () => {
+    // A bare arrow is the focused control's. `Ctrl+↓` is not — it is a chord that happens to be
+    // drawn with a glyph, and refusing it along with the bare ones is why "next in thread" and
+    // "previous in thread" sat in the Help sheet for three phases with no handler behind them:
+    // the dispatcher skipped every row this returned null for.
+    expect(parseChord('Ctrl+↓')).toEqual({
+      ctrl: true,
+      shift: false,
+      alt: false,
+      key: 'arrowdown',
+    })
+    expect(parseChord('Ctrl+↑')).toEqual({ ctrl: true, shift: false, alt: false, key: 'arrowup' })
+  })
+
+  it('matches a modified arrow against the event a browser reports', () => {
+    // The glyph is for the Help sheet; `KeyboardEvent.key` says "ArrowDown". A chord that
+    // parses and then never matches is the same bug one layer along.
+    const chord = parseChord('Ctrl+↓')
+    if (chord === null) throw new Error('Ctrl+↓ should parse')
+
+    expect(matches(press('ArrowDown', { ctrl: true }), chord)).toBe(true)
+    expect(matches(press('ArrowDown'), chord)).toBe(false)
+    expect(matches(press('ArrowUp', { ctrl: true }), chord)).toBe(false)
   })
 })
 
@@ -246,17 +272,15 @@ describe('every advertised shortcut is bound', () => {
   /**
    * Rows that are listed and deliberately not implemented, with the reason.
    *
-   * Ctrl+↑/↓ move between messages *within the open conversation*. The reader has no notion of
-   * a focused message inside a thread — it expands the newest and lets the rest be toggled by
-   * clicking — so there is nothing for these to move. Implementing them is a reader feature,
-   * not a binding, and faking it with something that merely changes the list selection would
-   * do nothing visible.
+   * Empty, and worth keeping empty. It held Ctrl+↑ and Ctrl+↓ — "next and previous in the open
+   * conversation" — on the grounds that the reader had no notion of a position inside a thread
+   * and faking one would have done nothing visible. It has one now, so they are bound and the
+   * list is bare again.
    *
-   * They are listed here rather than removed from the table because docs/01 §14 specifies
-   * them. An entry here is a debt that is written down; the point of the test is that an
-   * accidental gap cannot hide among them.
+   * An entry here is a debt that is written down. The test below proves the list cannot quietly
+   * become a place where a working shortcut hides from the one above it.
    */
-  const KNOWN_GAPS: ShortcutId[] = ['nextInThread', 'previousInThread']
+  const KNOWN_GAPS: ShortcutId[] = []
 
   it('gives each non-local shortcut a handler in the shell', async () => {
     const files = await import('node:fs/promises')

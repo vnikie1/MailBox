@@ -127,7 +127,50 @@ fn configure(conn: &Connection) -> Result<(), rusqlite::Error> {
     // the number to reach for if this ever needs to come down on a smaller machine.
     conn.pragma_update(None, "cache_size", -8 * 1024)?;
 
+    unicode_lower(conn)?;
+
     Ok(())
+}
+
+/// Replaces SQLite's `lower()` with one that folds the whole of Unicode.
+///
+/// SQLite's built-in converts **A-Z and nothing else** — documented behaviour, not a bug in it —
+/// so `lower('JOSÉ')` is `'josÉ'`. Every case-insensitive comparison in this app pairs that
+/// against a needle lowercased in Rust by `to_lowercase`, which folds properly, and the two
+/// therefore stopped agreeing at the first accented capital.
+///
+/// It broke matching in two places that had no idea they were related:
+///
+/// * **Search.** `from:`, `to:`, `subject:` and `mailbox:` compile to `LOWER(column) LIKE ?`
+///   against a folded needle, so searching for a name written with any non-ASCII capital found
+///   nothing at all.
+/// * **Rules and smart mailboxes.** These are evaluated twice — in SQL when the mailbox is
+///   listed, and in memory when a message arrives. The in-memory half uses `to_lowercase`, and
+///   its comment says it does so deliberately, "or the two halves disagree on every capital
+///   letter". They agreed for ASCII and parted company on everything else, so a rule could file
+///   a message on arrival that its own smart mailbox then refused to list.
+///
+/// Overriding the built-in rather than adding a differently-named function, because the point is
+/// that every existing `LOWER(` becomes correct without each caller having to know. All of them
+/// here are case-insensitive *matches*; none wants ASCII-only folding.
+///
+/// Marked deterministic so SQLite may still use it in an index expression.
+fn unicode_lower(conn: &Connection) -> Result<(), rusqlite::Error> {
+    use rusqlite::functions::FunctionFlags;
+
+    conn.create_scalar_function(
+        "lower",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            // NULL in, NULL out, as the built-in does. Callers wrap in COALESCE where they
+            // care, and changing that here would alter what those comparisons mean.
+            match context.get_raw(0).as_str_or_null()? {
+                Some(text) => Ok(Some(text.to_lowercase())),
+                None => Ok(None),
+            }
+        },
+    )
 }
 
 impl Db {
@@ -304,5 +347,120 @@ mod tests {
 
         assert_eq!(journal.to_lowercase(), "wal");
         assert_eq!(foreign_keys, 1);
+    }
+
+    #[tokio::test]
+    async fn lower_folds_more_than_the_ascii_alphabet() {
+        // SQLite's built-in converts A-Z and nothing else, so `lower('JOSÉ')` came back as
+        // 'josÉ'. Every case-insensitive comparison in the app pairs that against a needle
+        // folded by Rust's `to_lowercase`, and the two therefore stopped agreeing at the first
+        // accented capital: searching `from:José` matched nothing, and a rule could file a
+        // message on arrival that its own smart mailbox then refused to list.
+        let (db, _dir) = temp_db();
+
+        let folded: Vec<String> = db
+            .read(|conn| {
+                let mut out = Vec::new();
+                for word in ["JOSÉ", "ÅNGSTRÖM", "ΣΊΣΥΦΟΣ", "ЖУРНАЛ", "PLAIN"] {
+                    out.push(
+                        conn.query_row("SELECT lower(?1)", [word], |row| row.get::<_, String>(0))?,
+                    );
+                }
+                Ok(out)
+            })
+            .await
+            .expect("read");
+
+        assert_eq!(
+            folded,
+            vec![
+                "josé".to_string(),
+                "ångström".to_string(),
+                // Final sigma, not the medial one. Greek lowercasing is context-sensitive and
+                // `to_lowercase` knows it — which is the sort of thing a hand-rolled A-Z fold
+                // is never going to get right, and the reason for borrowing Rust's.
+                "σίσυφος".to_string(),
+                "журнал".to_string(),
+                "plain".to_string(),
+            ],
+        );
+    }
+
+    #[tokio::test]
+    async fn lower_agrees_with_the_rust_side_it_is_compared_against() {
+        // The invariant that actually matters. The SQL half and the in-memory half of every
+        // rule are only equivalent if they fold identically, and `predicate.rs` says so in as
+        // many words: matching case-sensitively there "would make the two halves disagree on
+        // every capital letter".
+        let (db, _dir) = temp_db();
+
+        for word in [
+            "JOSÉ Álvarez",
+            "Straße",
+            "ÉCOLE",
+            "İstanbul",
+            "ordinary Text",
+        ] {
+            let sql: String = db
+                .read(move |conn| {
+                    Ok(conn.query_row("SELECT lower(?1)", [word], |row| row.get::<_, String>(0))?)
+                })
+                .await
+                .expect("read");
+
+            assert_eq!(
+                sql,
+                word.to_lowercase(),
+                "SQL and Rust disagree on {word:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lower_leaves_null_alone() {
+        // The built-in returns NULL for NULL, and callers wrap in COALESCE where they care.
+        // Returning an empty string instead would change what those comparisons mean.
+        let (db, _dir) = temp_db();
+
+        let null: Option<String> = db
+            .read(|conn| {
+                Ok(conn.query_row("SELECT lower(NULL)", [], |row| {
+                    row.get::<_, Option<String>>(0)
+                })?)
+            })
+            .await
+            .expect("read");
+
+        assert_eq!(null, None);
+    }
+
+    #[tokio::test]
+    async fn a_non_ascii_capital_is_found_by_a_like_comparison() {
+        // The shape every search field and every rule uses, end to end.
+        let (db, _dir) = temp_db();
+
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO setting (key, value) VALUES ('who', 'JOSÉ ÁLVAREZ')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("write");
+
+        let needle = format!("%{}%", "José".to_lowercase());
+        let found: i64 = db
+            .read(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM setting WHERE key = 'who' AND lower(value) LIKE ?1",
+                    [needle],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .expect("read");
+
+        assert_eq!(found, 1, "a non-ASCII capital was not matched");
     }
 }

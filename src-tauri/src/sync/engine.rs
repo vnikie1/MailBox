@@ -1063,7 +1063,9 @@ async fn incremental(
                 Err(error) => tracing::warn!(%error, path, "rules failed on arrival"),
             }
 
-            match crate::sync::upkeep::score_new_mail(db, mailbox_id).await {
+            match crate::sync::upkeep::score_new_mail(db, mailbox_id, written.inserted_ids.clone())
+                .await
+            {
                 Ok(filed) if filed > 0 => {
                     tracing::debug!(path, filed, "junk filed on arrival");
                 }

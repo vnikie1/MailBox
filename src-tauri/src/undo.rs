@@ -393,15 +393,27 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                 )?;
             }
             Prior::Junk { id, junk, by_user } => {
-                let current: Option<(i64, i64)> = tx
+                // The message's text as well as its flags, because undoing a junk judgement has
+                // to reach the corpus and the corpus is keyed on the words.
+                let current: Option<(i64, i64, String, String, String)> = tx
                     .query_row(
-                        "SELECT is_junk, junk_by_user FROM message WHERE id = ?1",
+                        "SELECT is_junk, junk_by_user, COALESCE(from_all, ''),
+                                COALESCE(subject, ''), COALESCE(body_text, '')
+                           FROM message WHERE id = ?1",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
                     )
                     .ok();
 
-                let Some((current_junk, current_by_user)) = current else {
+                let Some((current_junk, current_by_user, from, subject, body)) = current else {
                     continue;
                 };
 
@@ -410,6 +422,25 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     junk: current_junk != 0,
                     by_user: current_by_user != 0,
                 });
+
+                // The filter, not only the column.
+                //
+                // `junk_mark` trains the classifier on every judgement the user makes, and undo
+                // restored the flag while leaving the training example in place — so Ctrl+Z put
+                // the message back and the filter went on believing what the user had just
+                // taken back, and acting on it for every message that followed. `junk_mark`'s
+                // own comment says exactly this about the other direction: "their correction is
+                // only half applied and the filter keeps the belief that caused the mistake."
+                //
+                // Symmetric on purpose, so redo is this same arm run the other way: retract the
+                // judgement being undone, and reinstate the one being restored if there was one.
+                if current_by_user != 0 && (current_junk != 0) != *junk {
+                    crate::rules::junk::untrain(tx, &from, &subject, &body, current_junk != 0)?;
+                }
+
+                if *by_user && (current_junk != 0) != *junk {
+                    crate::rules::junk::train(tx, &from, &subject, &body, *junk)?;
+                }
 
                 tx.execute(
                     "UPDATE message SET is_junk = ?2, junk_by_user = ?3 WHERE id = ?1",
@@ -724,6 +755,81 @@ mod tests {
         assert_eq!(
             undo(&stack, &tx).expect("undo").as_deref(),
             Some("Move to Archive")
+        );
+    }
+
+    /// Undoing a junk judgement takes it back out of the classifier too.
+    ///
+    /// The flag was restored and the training example was not, so Ctrl+Z put the message back
+    /// while the filter went on believing what the user had just retracted -- and acting on it
+    /// for every message that arrived afterwards. `junk_mark` says the same thing about the
+    /// other direction: "their correction is only half applied and the filter keeps the belief
+    /// that caused the mistake."
+    #[test]
+    fn undoing_a_junk_judgement_untrains_the_filter() {
+        let mut conn = store();
+        let stack = Stack::new();
+
+        conn.execute(
+            "UPDATE message
+                SET from_all = 'spammer@example.test',
+                    subject = 'Cheap pills now',
+                    body_text = 'buy cheap pills today'
+              WHERE id = 1",
+            [],
+        )
+        .expect("text");
+
+        // Summed, not counted: `untrain` decrements each token to zero and leaves the row, which
+        // is what the corpus tests assert too.
+        let tokens = |tx: &Transaction<'_>| -> i64 {
+            tx.query_row(
+                "SELECT COALESCE(SUM(count), 0) FROM junk_token",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+        };
+
+        let tx = conn.transaction().expect("tx");
+        assert_eq!(tokens(&tx), 0, "the corpus starts empty");
+
+        // Marking as junk, in the order `junk_mark` does it: capture, train, write the flags.
+        let step = capture(&tx, "Mark as Junk", &[1], &[Field::Junk]).expect("capture");
+        crate::rules::junk::train(
+            &tx,
+            "spammer@example.test",
+            "Cheap pills now",
+            "buy cheap pills today",
+            true,
+        )
+        .expect("train");
+        tx.execute(
+            "UPDATE message SET is_junk = 1, junk_by_user = 1 WHERE id = 1",
+            [],
+        )
+        .expect("mark");
+        stack.record(step);
+
+        assert!(tokens(&tx) > 0, "marking as junk trains the filter");
+
+        let label = undo(&stack, &tx).expect("undo");
+        assert_eq!(label.as_deref(), Some("Mark as Junk"));
+
+        let (is_junk, by_user): (i64, i64) = tx
+            .query_row(
+                "SELECT is_junk, junk_by_user FROM message WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read");
+
+        assert_eq!(is_junk, 0, "the flag was not restored");
+        assert_eq!(by_user, 0, "the judgement was not withdrawn");
+        assert_eq!(
+            tokens(&tx),
+            0,
+            "the training example survived the undo, so the filter still believes it"
         );
     }
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
   ChevronDown,
@@ -76,7 +76,10 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
   const sender = message.fromName ?? message.fromAddr ?? 'Unknown sender'
 
   return (
-    <article className={cx(styles.message, !expanded && styles.collapsed)}>
+    <article
+      data-thread-message={message.id}
+      className={cx(styles.message, !expanded && styles.collapsed)}
+    >
       <header
         className={styles.messageHeader}
         {...(collapsible
@@ -325,6 +328,23 @@ export function Reader({ toolbar }: ReaderProps) {
 
   const newestId = messages[messages.length - 1]?.id
 
+  // Ctrl+↑ / Ctrl+↓, dispatched from the shell into the store. `null` means the newest, which
+  // is the one expanded by default, so the position only becomes explicit once somebody moves.
+  const focusedInThread = useMailStore((state) => state.focusedInThread)
+
+  // Expanded and brought into view when the position moves. A conversation is a stack of
+  // collapsed headers with one message open; moving to a collapsed one without opening it
+  // would look like nothing had happened.
+  useEffect(() => {
+    if (focusedInThread === null) return
+
+    const element = document.querySelector<HTMLElement>(
+      `[data-thread-message="${String(focusedInThread)}"]`,
+    )
+
+    element?.scrollIntoView({ block: 'nearest' })
+  }, [focusedInThread])
+
   return (
     <div className={styles.pane}>
       <header className={styles.header}>
@@ -353,7 +373,11 @@ export function Reader({ toolbar }: ReaderProps) {
                   key={message.id}
                   message={message}
                   now={now}
-                  expanded={message.id === newestId || expandedIds.includes(message.id)}
+                  expanded={
+                    message.id === focusedInThread ||
+                    (focusedInThread === null && message.id === newestId) ||
+                    expandedIds.includes(message.id)
+                  }
                   collapsible={message.id !== newestId}
                   onToggle={() => {
                     setExpandedIds((current) =>

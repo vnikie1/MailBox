@@ -200,25 +200,45 @@ export interface Chord {
   key: string
 }
 
+/** The glyphs the Help sheet shows, and the `KeyboardEvent.key` each one arrives as. */
+const ARROW_KEYS: Record<string, string> = {
+  '↓': 'arrowdown',
+  '↑': 'arrowup',
+  '→': 'arrowright',
+  '←': 'arrowleft',
+}
+
 /**
  * Parses `Ctrl+Shift+M` into something a key event can be compared against.
  *
- * Returns `null` for a row that is not a real chord — `Ctrl+1–9` is a range and `↓` is an arrow
- * the list owns. Those are reference-sheet entries, not bindings.
+ * Returns `null` for a row that is not one chord: `Ctrl+1–9` is a range, and a **bare** arrow
+ * belongs to whichever list has focus rather than to the application.
+ *
+ * A *modified* arrow is not either of those. `Ctrl+↓` is an ordinary chord that happens to be
+ * drawn with a glyph, and rejecting it along with the bare arrows is why "next in thread" and
+ * "previous in thread" appeared in the Help sheet for three phases while the dispatcher skipped
+ * their rows entirely and no handler was ever written for them.
  */
 export function parseChord(keys: string): Chord | null {
   const parts = keys.split('+').map((part) => part.trim())
-  const key = parts[parts.length - 1]?.toLowerCase() ?? ''
+  const last = parts[parts.length - 1] ?? ''
+  const key = last.toLowerCase()
 
-  // A range, an arrow, or anything else that is not one literal key.
-  if (key === '' || key.includes('–') || ['↓', '↑', '→', '←'].includes(key)) return null
+  // A range, or anything else that is not one literal key.
+  if (key === '' || key.includes('–')) return null
 
-  return {
-    ctrl: parts.includes('Ctrl'),
-    shift: parts.includes('Shift'),
-    alt: parts.includes('Alt'),
-    key,
+  const ctrl = parts.includes('Ctrl')
+  const shift = parts.includes('Shift')
+  const alt = parts.includes('Alt')
+
+  const arrow = ARROW_KEYS[last]
+  if (arrow !== undefined) {
+    // Unmodified, it is the focused control's key and not ours.
+    if (!ctrl && !shift && !alt) return null
+    return { ctrl, shift, alt, key: arrow }
   }
+
+  return { ctrl, shift, alt, key }
 }
 
 /** Whether a keyboard event is this chord. */

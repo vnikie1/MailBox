@@ -56,7 +56,44 @@ function SidebarRow({
   const Icon = node.icon
   const hasChildren = node.children.length > 0
 
+  /**
+   * Moves focus to the next or previous row of the tree.
+   *
+   * The rows use a roving `tabIndex` -- only the selected one is tabbable -- which is the right
+   * pattern for a tree and only half of it. The other half is arrow keys, and there were none:
+   * a keyboard user could Tab into the sidebar, land on whichever row happened to be selected,
+   * and had no way to reach any other. Tab moved straight past the tree to the message list.
+   *
+   * Focus moves; selection does not. Enter and Space select, which is what ARIA's tree pattern
+   * asks for and also avoids loading a different mailbox on every keypress while somebody is
+   * simply looking for one.
+   *
+   * Found in the DOM rather than threaded through props, because the rendered order *is* the
+   * answer -- it already accounts for collapsed sections, which a parallel index would have to
+   * recompute and could disagree with.
+   */
+  const moveFocus = (from: HTMLElement, delta: number) => {
+    const tree = from.closest('[role="tree"]')
+    if (tree === null) return
+
+    const rows = Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"]'))
+    const next = rows[rows.indexOf(from) + delta]
+    next?.focus()
+  }
+
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      moveFocus(event.currentTarget, 1)
+      return
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      moveFocus(event.currentTarget, -1)
+      return
+    }
+
     // docs/01 §14 — Right and Left expand and collapse, matching the message list's
     // thread expansion and every other tree on both platforms.
     if (event.key === 'ArrowRight' && hasChildren && collapsed) {

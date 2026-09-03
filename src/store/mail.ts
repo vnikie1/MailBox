@@ -44,6 +44,15 @@ interface MailState {
   selectedMessageIds: number[]
   /** Where a shift-range starts. Ordinary clicks move it; shift-clicks do not. */
   anchorMessageId: number | null
+  /**
+   * Which message inside the open conversation the reader is on, if not the newest.
+   *
+   * `null` means the newest, which is what the reader expands by default. Kept here rather
+   * than in the reader because Ctrl+↑ and Ctrl+↓ are dispatched from the shell, and a chord
+   * that reached into a component's private state would be a second way to move the same
+   * cursor.
+   */
+  focusedInThread: number | null
 
   selectMailbox: (selection: MailboxSelection) => void
   /** A plain click: replaces the selection and moves the anchor. */
@@ -60,6 +69,12 @@ interface MailState {
   extendSelection: (id: number, order: number[]) => void
   /** Arrow keys: moves by one through the visible order and replaces the selection. */
   moveSelection: (delta: number, order: number[]) => void
+  /**
+   * Ctrl+↓ and Ctrl+↑. docs/01 §14 — moves within the open conversation, not between rows.
+   *
+   * `order` is the thread's messages, oldest first, as the reader stacks them.
+   */
+  moveInThread: (delta: number, order: number[]) => void
 }
 
 /** Nothing is selected until the mailbox list has loaded and the shell picks a default. */
@@ -73,15 +88,16 @@ export const useMailStore = create<MailState>()((set, get) => ({
   selection: NO_SELECTION,
   selectedMessageIds: [],
   anchorMessageId: null,
+  focusedInThread: null,
 
   selectMailbox: (selection) => {
     // The list decides what to select once its first page arrives; clearing here avoids a
     // frame where the reader shows a message from the mailbox you just left.
-    set({ selection, selectedMessageIds: [], anchorMessageId: null })
+    set({ selection, selectedMessageIds: [], anchorMessageId: null, focusedInThread: null })
   },
 
   selectMessage: (id) => {
-    set({ selectedMessageIds: [id], anchorMessageId: id })
+    set({ selectedMessageIds: [id], anchorMessageId: id, focusedInThread: null })
   },
 
   toggleMessage: (id) => {
@@ -127,6 +143,23 @@ export const useMailStore = create<MailState>()((set, get) => ({
 
     const next = order[nextIndex]
     if (next === undefined) return
-    set({ selectedMessageIds: [next], anchorMessageId: next })
+    set({ selectedMessageIds: [next], anchorMessageId: next, focusedInThread: null })
+  },
+
+  moveInThread: (delta, order) => {
+    if (order.length === 0) return
+
+    const { focusedInThread } = get()
+
+    // No position yet means the reader is on the newest message, which is the one it expands
+    // by default — so the first Ctrl+↑ steps back from the end rather than from the start.
+    const current = focusedInThread === null ? order.length - 1 : order.indexOf(focusedInThread)
+    const from = current === -1 ? order.length - 1 : current
+
+    const nextIndex = Math.min(Math.max(from + delta, 0), order.length - 1)
+    const next = order[nextIndex]
+    if (next === undefined) return
+
+    set({ focusedInThread: next })
   },
 }))

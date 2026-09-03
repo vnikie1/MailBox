@@ -94,7 +94,18 @@ pub async fn tick(db: &Db, count: u64) -> Result<Ticked, DbError> {
 ///
 /// Never touches a message the user has judged. Overruling someone's own decision is the
 /// fastest way to make them stop trusting a filter and turn it off for good.
-pub async fn score_new_mail(db: &Db, mailbox_id: i64) -> Result<usize, DbError> {
+pub async fn score_new_mail(db: &Db, mailbox_id: i64, arrived: Vec<i64>) -> Result<usize, DbError> {
+    // Only what just arrived. The query below used to take every unscored message in the
+    // mailbox, which on the first pass after the classifier became ready meant the entire
+    // backlog -- so mail the user had read and dealt with weeks earlier was scored, and could
+    // be filed into Junk, long after the fact and with no arrival to explain it.
+    //
+    // That is the harm the training-mode note below is about, arriving through a different
+    // door. The caller knows exactly which rows it just inserted, and those are the arrivals.
+    if arrived.is_empty() {
+        return Ok(0);
+    }
+
     let classifier = db.read(Classifier::load).await?;
 
     // A fresh install has nothing to go on. Answering confidently from nothing would file real
@@ -126,16 +137,27 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64) -> Result<usize, DbError> 
 
     db.write(move |tx| {
         let candidates = {
-            let mut statement = tx.prepare(
+            let placeholders = (0..arrived.len())
+                .map(|index| format!("?{}", index + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let sql = format!(
                 "SELECT id, COALESCE(from_all, ''), COALESCE(subject, ''),
                         COALESCE(body_text, '')
                    FROM message
                   WHERE mailbox_id = ?1 AND junk_by_user = 0 AND is_junk = 0
-                    AND junk_score IS NULL",
-            )?;
+                    AND junk_score IS NULL
+                    AND id IN ({placeholders})"
+            );
+
+            let mut statement = tx.prepare(&sql)?;
+
+            let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&mailbox_id];
+            bound.extend(arrived.iter().map(|id| id as &dyn rusqlite::ToSql));
 
             let rows = statement
-                .query_map(rusqlite::params![mailbox_id], |row| {
+                .query_map(bound.as_slice(), |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,

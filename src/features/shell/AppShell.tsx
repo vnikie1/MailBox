@@ -79,6 +79,7 @@ export function AppShell() {
   const selectionMailboxIds = useMailStore((state) => state.selection.mailboxIds)
   const selectionLabel = useMailStore((state) => state.selection.label)
   const selectMailbox = useMailStore((state) => state.selectMailbox)
+  const moveInThread = useMailStore((state) => state.moveInThread)
 
   const { data: mailboxes = [] } = useMailboxes()
   const { data: accounts = [] } = useAccounts()
@@ -172,6 +173,11 @@ export function AppShell() {
   // Reply All, Forward, Archive, Delete, Junk, Move to, Flag -- rendered, showed the right
   // enabled state, showed a tooltip, and did nothing at all, because `ToolbarProps` carried no
   // action callbacks for them to call. See the note in Toolbar.tsx.
+  // Shares the reader's cache entry rather than issuing a second read: the reader mounts
+  // `useThread` with the same key, so this is the same query.
+  const { data: openThread = [] } = useThread(only ?? null)
+  const selectedMessage = openThread.find((message) => message.id === only)
+
   const actions = {
     newMessage: useCallback(() => {
       // `composeOpen` opens the window. `composeBlank` -- which this called until now --
@@ -267,6 +273,27 @@ export function AppShell() {
       [accounts, mailboxes, smart, flagNames, vips, selectMailbox],
     ),
 
+    // Ctrl+↓ and Ctrl+↑. docs/01 §14 — within the open conversation, not between rows, which
+    // is what the plain arrows already do in the list.
+    //
+    // Both were listed in the Help sheet and bound nowhere: `parseChord` rejected every arrow,
+    // including a modified one, so the dispatcher skipped their rows and no handler was ever
+    // written. The reader had no notion of a position inside a thread either; it has one now,
+    // in the store, so the chord and the pane agree on where "here" is.
+    nextInThread: useCallback(() => {
+      moveInThread(
+        1,
+        openThread.map((message) => message.id),
+      )
+    }, [moveInThread, openThread]),
+
+    previousInThread: useCallback(() => {
+      moveInThread(
+        -1,
+        openThread.map((message) => message.id),
+      )
+    }, [moveInThread, openThread]),
+
     search: focusSearch,
 
     getMail: useCallback(() => {
@@ -298,11 +325,6 @@ export function AppShell() {
       })
     }
   }, [selectedNodeId, firstInbox, selectMailbox])
-
-  // Shares the reader's cache entry rather than issuing a second read: the reader mounts
-  // `useThread` with the same key, so this is the same query.
-  const { data: openThread = [] } = useThread(only ?? null)
-  const selectedMessage = openThread.find((message) => message.id === only)
 
   const [level, setLevel] = useState<Level>('list')
 

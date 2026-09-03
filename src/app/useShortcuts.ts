@@ -43,6 +43,25 @@ function inTextField(target: EventTarget | null): boolean {
   )
 }
 
+/**
+ * Whether a modal sheet is open over the application.
+ *
+ * Every action in the table acts on the message list, and none of them should reach it from
+ * behind a sheet. Delete pressed while "Move message to…" was open deleted the selection the
+ * picker was about to move — the sheet stayed open over the result, so the only visible effect
+ * was that choosing a folder afterwards did nothing.
+ *
+ * Asked of the document rather than of the event's target. A sheet traps focus, but the target
+ * can still be the body — after clicking the overlay, say — and a destructive shortcut must not
+ * depend on exactly where focus landed.
+ *
+ * `Sheet` marks itself through Floating UI's `useRole({ role: 'dialog' })`, so this recognises
+ * every sheet in the app without any of them having to register.
+ */
+function modalIsOpen(): boolean {
+  return document.querySelector('[role="dialog"], [role="alertdialog"]') !== null
+}
+
 export function useShortcuts(handlers: Handlers, context: ShortcutContext): void {
   // Held in a ref so the listener is registered once. Handlers are new closures on every
   // render, and re-binding on each one would tear down and rebuild the listener continuously.
@@ -64,6 +83,10 @@ export function useShortcuts(handlers: Handlers, context: ShortcutContext): void
 
     const onKey = (event: KeyboardEvent) => {
       if (inTextField(event.target)) return
+
+      // Escape and the sheet's own keys belong to the sheet; everything in the table below
+      // belongs to the list behind it, and nothing in the table should fire while one is open.
+      if (modalIsOpen()) return
 
       // Ctrl+1 to Ctrl+9, dispatched here rather than from the table because one row stands
       // for nine chords and `parseChord` cannot express that. Handled before the loop so a
