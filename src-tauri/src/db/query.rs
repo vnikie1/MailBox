@@ -8,7 +8,7 @@
 //! output for the three the exit gate names is asserted in the tests at the bottom, so a
 //! plan that silently degrades to a scan fails the build rather than the budget.
 
-use rusqlite::{Connection, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 
 use super::model::{
     AccountRow, AttachmentRow, Cursor, ListQuery, MailboxCounts, MailboxRow, MessageFull,
@@ -323,6 +323,33 @@ pub fn message_get(conn: &Connection, id: i64) -> Result<Option<MessageFull>, Db
 ///
 /// Index: `ix_msg_thread (thread_id, date_sent)`, so this is an index range scan and the
 /// `ORDER BY` is free.
+/// The whole conversation a given **message** belongs to, oldest first.
+///
+/// The reader knows which message is selected; it does not know which thread that message is
+/// in, and it was passing the message id straight into `thread_get` -- which filters on
+/// `thread_id`. `persist::rethread` keys a thread on "the smallest message id in the thread",
+/// so those two numbers agreed for exactly one message per conversation: the oldest. Every
+/// other message matched no row, fell through to the single-message fallback, and opened as a
+/// conversation of one. Selecting the newest reply in a fifteen-message thread showed one
+/// message, which reads as "this app does not thread" rather than as a bug.
+pub fn thread_for_message(conn: &Connection, message_id: i64) -> Result<Vec<MessageFull>, DbError> {
+    let thread_id: Option<i64> = conn
+        .query_row(
+            "SELECT thread_id FROM message WHERE id = ?1",
+            [message_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+
+    // No thread yet -- threading is the sync engine's job and a store can hold messages it has
+    // never run over. Falling back to the message itself is standing rule 13: degrade visibly.
+    match thread_id {
+        Some(id) => thread_get(conn, id),
+        None => Ok(message_get(conn, message_id)?.into_iter().collect()),
+    }
+}
+
 pub fn thread_get(conn: &Connection, thread_id: i64) -> Result<Vec<MessageFull>, DbError> {
     let sql = format!(
         "SELECT {MESSAGE_FULL_COLUMNS}

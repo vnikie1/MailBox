@@ -17,7 +17,7 @@ import { Badge, Button, EmptyState, IconButton, ScrollArea, Tooltip } from '@/ui
 import { useSyncState } from '@/app/useSync'
 
 import { SyncStatus } from './SyncStatus'
-import { buildSidebar, visibleRows, type SidebarNode } from './model'
+import { buildSidebar, selectionForNode, visibleRows, type SidebarNode } from './model'
 
 import styles from './Sidebar.module.css'
 
@@ -199,23 +199,12 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const collapsed = useMemo(() => new Set(collapsedSections), [collapsedSections])
 
   const onSelect = (node: SidebarNode) => {
-    // A row is selectable if it names mailboxes **or** carries a predicate. The guard used to
-    // test only the first, and `buildSidebar` gives every predicate row `mailboxIds: []` — the
-    // type's own comment says a row has "one or the other, never both".
-    //
-    // So every predicate row was dead on click: Flagged, all seven flag colours, VIPs, and every
-    // Smart Mailbox the user had made. They rendered, they showed counts, they highlighted on
-    // hover, and selecting one did nothing at all. Clicking an ordinary mailbox beside them
-    // worked, which is what made it look like the click had simply missed.
-    if (node.mailboxIds.length === 0 && node.predicate === undefined) return
-    selectMailbox({
-      nodeId: node.id,
-      label: node.label,
-      mailboxIds: node.mailboxIds,
-      // Spread rather than set to `undefined`: with `exactOptionalPropertyTypes` an explicit
-      // undefined is not the same as an absent key, and the list branches on absence.
-      ...(node.predicate === undefined ? {} : { predicate: node.predicate }),
-    })
+    // Every predicate row was once dead on click: Flagged, all seven flag colours, VIPs, and
+    // every Smart Mailbox the user had made. They rendered, showed counts and highlighted on
+    // hover, and selecting one did nothing, because the guard tested only `mailboxIds`.
+    // `selectionForNode` is now the single definition of that rule, shared with Ctrl+1-9.
+    const selection = selectionForNode(node)
+    if (selection !== null) selectMailbox(selection)
   }
 
   return (

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Paperclip, Send, X } from 'lucide-react'
 
 import type { AccountRow } from '@/lib/generated/AccountRow'
@@ -340,8 +340,25 @@ export function ComposeWindow() {
     }
   }, [accountId, to, cc, bcc, buildMessage, autosave])
 
+  /**
+   * Ctrl+Enter sends. docs/01 §14, and `shortcuts.ts` lists it as `local: true`.
+   *
+   * "Local" means the focused control owns the chord and binds it itself — the dispatcher
+   * deliberately does not, because this window is a separate OS window with its own React
+   * tree. Nothing bound it, so the Help sheet advertised a shortcut that did nothing.
+   *
+   * A React handler on the root rather than a window listener: it reaches here by bubbling
+   * through the tree, it dies with the component, and it keeps the rule that the only
+   * `addEventListener('keydown')` in the app is the dispatcher's.
+   */
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Enter' || !event.ctrlKey || sending) return
+    event.preventDefault()
+    void send()
+  }
+
   return (
-    <div className={styles.window}>
+    <div className={styles.window} onKeyDown={onKeyDown}>
       <header className={styles.toolbar} data-tauri-drag-region>
         <IconButton
           icon={Paperclip}

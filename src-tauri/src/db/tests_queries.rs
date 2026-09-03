@@ -532,6 +532,57 @@ fn a_thread_comes_back_oldest_first() {
 }
 
 #[test]
+fn any_message_in_a_thread_opens_the_whole_thread() {
+    // The reader has a message id, never a thread id. It was passing that message id into a
+    // query that filters on `thread_id`, and `rethread` keys a thread on the smallest message
+    // id in it -- so the two numbers agreed for exactly one message per conversation. Opening
+    // any other message showed a conversation of one, which looks like threading not working.
+    //
+    // Every message in this fixture is in thread 7, and no message has id 7, so a caller that
+    // still treats the argument as a thread id gets one message back and fails here.
+    let conn = fixture();
+
+    for message_id in 1..=6 {
+        let ids: Vec<i64> = query::thread_for_message(&conn, message_id)
+            .expect("thread")
+            .into_iter()
+            .map(|message| message.id)
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec![5, 4, 2, 3, 6, 1],
+            "opening message {message_id} did not show the whole conversation"
+        );
+    }
+}
+
+#[test]
+fn a_message_with_no_thread_still_opens() {
+    // Threading is the sync engine's job, so a store can hold messages it has never run over.
+    // Standing rule 13: degrade visibly. One message is better than an empty reader.
+    let conn = fixture();
+    conn.execute("UPDATE message SET thread_id = NULL WHERE id = 3", [])
+        .expect("unthread");
+
+    let ids: Vec<i64> = query::thread_for_message(&conn, 3)
+        .expect("thread")
+        .into_iter()
+        .map(|message| message.id)
+        .collect();
+
+    assert_eq!(ids, vec![3]);
+}
+
+#[test]
+fn a_message_that_does_not_exist_is_an_empty_thread() {
+    let conn = fixture();
+    assert!(query::thread_for_message(&conn, 999)
+        .expect("thread")
+        .is_empty());
+}
+
+#[test]
 fn message_get_returns_none_for_an_id_that_is_not_there() -> Result<(), DbError> {
     let conn = fixture();
     assert!(query::message_get(&conn, 999)?.is_none());

@@ -17,7 +17,16 @@ import { SHORTCUTS, matches, parseChord, type ShortcutId } from './shortcuts'
  * marked `local` in the table and never bound here.
  */
 
-export type Handlers = Partial<Record<ShortcutId, () => void>>
+export type Handlers = Partial<Record<Exclude<ShortcutId, 'jumpToMailbox'>, () => void>> & {
+  /**
+   * Ctrl+1 to Ctrl+9, given the 1-based position in the Favourites list.
+   *
+   * Typed apart from the rest because it is the one row in the table that is a *range*. That
+   * is also why it was broken: `parseChord` returns null for `Ctrl+1-9`, so the table skipped
+   * it, no handler existed, and the Help sheet advertised a shortcut that could not fire.
+   */
+  jumpToMailbox?: (position: number) => void
+}
 
 export interface ShortcutContext {
   /** True when at least one message is selected. */
@@ -56,8 +65,24 @@ export function useShortcuts(handlers: Handlers, context: ShortcutContext): void
     const onKey = (event: KeyboardEvent) => {
       if (inTextField(event.target)) return
 
+      // Ctrl+1 to Ctrl+9, dispatched here rather than from the table because one row stands
+      // for nine chords and `parseChord` cannot express that. Handled before the loop so a
+      // digit never falls through to a chord that happens to match.
+      if (event.ctrlKey && !event.shiftKey && !event.altKey && /^[1-9]$/.test(event.key)) {
+        const jump = current.current.jumpToMailbox
+        if (jump === undefined) return
+
+        event.preventDefault()
+        jump(Number(event.key))
+        return
+      }
+
       for (const { shortcut, chord } of bound) {
         if (!matches(event, chord)) continue
+
+        // Handled above, as nine chords rather than one. Excluded here so the lookup below
+        // keeps the plain `() => void` handler type the rest of the table uses.
+        if (shortcut.id === 'jumpToMailbox') continue
 
         const handler = current.current[shortcut.id]
         if (handler === undefined) return

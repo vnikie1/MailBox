@@ -122,10 +122,12 @@ pub async fn message_get(db: State<'_, Db>, id: i64) -> Response<Option<MessageF
     Ok(db.read(move |conn| query::message_get(conn, id)).await?)
 }
 
+/// The conversation containing a message. Takes the **message** id, which is what the reader
+/// has; resolving it to a thread is `thread_for_message`'s job and used to be nobody's.
 #[tauri::command]
-pub async fn thread_get(db: State<'_, Db>, thread_id: i64) -> Response<Vec<MessageFull>> {
+pub async fn thread_get(db: State<'_, Db>, message_id: i64) -> Response<Vec<MessageFull>> {
     Ok(db
-        .read(move |conn| query::thread_get(conn, thread_id))
+        .read(move |conn| query::thread_for_message(conn, message_id))
         .await?)
 }
 

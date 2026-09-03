@@ -217,7 +217,14 @@ describe('one listener, one table', () => {
       if (file.includes('useShortcuts')) continue
 
       const source = await files.readFile(file, 'utf8')
-      if (/addEventListener\(\s*['"]keydown['"]/.test(source)) offenders.push(file)
+
+      // Comments stripped first. This reported ComposeWindow the moment a comment there
+      // explained *why* it uses a React handler rather than a window listener: prose about
+      // a call is not a call, and a test whose first result is a false alarm teaches whoever
+      // sees the second one to ignore it.
+      const code = source.replace(/^\s*(\/\/|\*).*$/gm, '')
+
+      if (/addEventListener\(\s*['"]keydown['"]/.test(code)) offenders.push(file)
     }
 
     expect(
@@ -225,5 +232,91 @@ describe('one listener, one table', () => {
       `these files bind keys outside the shortcut table, so the table, the Help sheet and the ` +
         `dispatcher no longer agree — and a chord bound in two places fires twice`,
     ).toEqual([])
+  })
+})
+
+/**
+ * Shortcuts the Help sheet lists that nothing binds.
+ *
+ * The sheet is rendered from the same table the dispatcher reads, so a row with no handler is
+ * a promise the app does not keep. `Handlers` is a `Partial<Record<...>>`, which is what let
+ * this happen quietly: omitting one is not a type error.
+ */
+describe('every advertised shortcut is bound', () => {
+  /**
+   * Rows that are listed and deliberately not implemented, with the reason.
+   *
+   * Ctrl+↑/↓ move between messages *within the open conversation*. The reader has no notion of
+   * a focused message inside a thread — it expands the newest and lets the rest be toggled by
+   * clicking — so there is nothing for these to move. Implementing them is a reader feature,
+   * not a binding, and faking it with something that merely changes the list selection would
+   * do nothing visible.
+   *
+   * They are listed here rather than removed from the table because docs/01 §14 specifies
+   * them. An entry here is a debt that is written down; the point of the test is that an
+   * accidental gap cannot hide among them.
+   */
+  const KNOWN_GAPS: ShortcutId[] = ['nextInThread', 'previousInThread']
+
+  it('gives each non-local shortcut a handler in the shell', async () => {
+    const files = await import('node:fs/promises')
+    const shell = await files.readFile('src/features/shell/AppShell.tsx', 'utf8')
+
+    // The handler object literal only, so a mention in a comment or an import does not count.
+    const start = shell.indexOf('const actions = {')
+    expect(start, 'the handler map in AppShell has been renamed').toBeGreaterThan(-1)
+    const actions = shell.slice(start, shell.indexOf('\n  useShortcuts(', start))
+
+    // Property names at the start of a line: `archive: useCallback(` and the `undo,` shorthand.
+    const bound = new Set(
+      actions
+        .split('\n')
+        .map((line) => /^\s*([a-zA-Z]+)\s*[:,]/.exec(line)?.[1])
+        .filter((name): name is string => name !== undefined),
+    )
+
+    const unbound = SHORTCUTS.filter((shortcut) => shortcut.local !== true)
+      .filter((shortcut) => !KNOWN_GAPS.includes(shortcut.id))
+      .filter((shortcut) => !bound.has(shortcut.id))
+      .map((shortcut) => `${shortcut.id} (${shortcut.keys}, ${shortcut.label})`)
+
+    expect(
+      unbound,
+      'these are listed in the Help sheet and have no handler, so pressing them does nothing',
+    ).toEqual([])
+  })
+
+  it('special-cases the chords the table cannot express', async () => {
+    // `parseChord` returns null for a range or an arrow, so those rows never reach the loop.
+    // That is deliberate, but it means the dispatcher has to handle them by hand — and a row
+    // that parses to null with nothing special-casing it is invisible in both places. Ctrl+1–9
+    // sat like that: skipped by the table, no handler written, listed in Help throughout.
+    const unparseable = SHORTCUTS.filter(
+      (shortcut) => shortcut.local !== true && parseChord(shortcut.keys) === null,
+    ).filter((shortcut) => !KNOWN_GAPS.includes(shortcut.id))
+
+    expect(unparseable.map((shortcut) => shortcut.id)).toEqual(['jumpToMailbox'])
+
+    const files = await import('node:fs/promises')
+    const dispatcher = await files.readFile('src/app/useShortcuts.ts', 'utf8')
+
+    for (const shortcut of unparseable) {
+      expect(
+        dispatcher.includes(shortcut.id),
+        `${shortcut.keys} cannot be parsed from the table and is not special-cased in the ` +
+          `dispatcher either, so it is advertised in Help and unreachable`,
+      ).toBe(true)
+    }
+  })
+
+  it('keeps the known gaps honest', () => {
+    // A gap that has since been filled should be removed from the list, or the list becomes a
+    // place where a working shortcut hides from the test above.
+    for (const id of KNOWN_GAPS) {
+      expect(
+        SHORTCUTS.some((shortcut) => shortcut.id === id),
+        `${id} is listed as a known gap but is no longer in the table`,
+      ).toBe(true)
+    }
   })
 })

@@ -18,6 +18,7 @@ import type { MailboxRow } from '@/lib/generated/MailboxRow'
 import type { Predicate } from '@/lib/generated/Predicate'
 import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
 import type { Vip } from '@/lib/generated/Vip'
+import type { MailboxSelection } from '@/store/mail'
 
 /**
  * The sidebar tree. docs/01 §3.
@@ -200,6 +201,27 @@ function flaggedNode(flagNames: FlagName[]): SidebarNode {
       depth: 1,
     })),
     depth: 0,
+  }
+}
+
+/**
+ * The store payload for selecting a row, or `null` when the row is not selectable.
+ *
+ * Extracted from the sidebar's own click handler so that Ctrl+1-9 cannot drift away from what
+ * clicking does. A row is selectable if it names mailboxes **or** carries a predicate -- the
+ * type's comment says a row has "one or the other, never both", and a guard that tested only
+ * the first left every predicate row dead on click.
+ */
+export function selectionForNode(node: SidebarNode): MailboxSelection | null {
+  if (node.mailboxIds.length === 0 && node.predicate === undefined) return null
+
+  return {
+    nodeId: node.id,
+    label: node.label,
+    mailboxIds: node.mailboxIds,
+    // Spread rather than set to `undefined`: with `exactOptionalPropertyTypes` an explicit
+    // undefined is not the same as an absent key, and the list branches on absence.
+    ...(node.predicate === undefined ? {} : { predicate: node.predicate }),
   }
 }
 

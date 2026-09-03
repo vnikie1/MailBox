@@ -7,16 +7,22 @@ import {
   useAccounts,
   useArchiveMessages,
   useDeleteMessages,
+  useFlagNames,
   useMailboxes,
   useMoveMessages,
+  useSmartMailboxes,
+  useThread,
   useToggleFlag,
   useToggleRead,
+  useVips,
 } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
 import { Button, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
 import { Reader } from '@/features/reader/Reader'
+import { RedirectSheet } from '@/features/reader/RedirectSheet'
 import { Sidebar } from '@/features/sidebar/Sidebar'
+import { buildSidebar, selectionForNode } from '@/features/sidebar/model'
 import { MailboxPicker, useUndo } from '@/features/organise'
 import { useShortcuts } from '@/app/useShortcuts'
 import { ShortcutSheet } from '@/features/help/ShortcutSheet'
@@ -76,6 +82,12 @@ export function AppShell() {
 
   const { data: mailboxes = [] } = useMailboxes()
   const { data: accounts = [] } = useAccounts()
+
+  // For Ctrl+1-9 only. The sidebar mounts these same queries, so this shares its cache
+  // entries rather than issuing a second set of reads.
+  const { data: smart = [] } = useSmartMailboxes()
+  const { data: flagNames = [] } = useFlagNames()
+  const { data: vips = [] } = useVips()
   const move = useMoveMessages()
   const remove = useDeleteMessages()
   const archive = useArchiveMessages()
@@ -84,6 +96,7 @@ export function AppShell() {
   const toast = useToast()
 
   const [movingTo, setMovingTo] = useState(false)
+  const [redirecting, setRedirecting] = useState(false)
   const [savingSearch, setSavingSearch] = useState(false)
   const [showingShortcuts, setShowingShortcuts] = useState(false)
 
@@ -210,6 +223,15 @@ export function AppShell() {
       setMovingTo(true)
     }, []),
 
+    // Ctrl+Shift+E. The feature existed and the shortcut did not reach it: the redirect sheet
+    // is owned by each message row inside the reader, opened by a per-message button, so
+    // there was nothing for a shell-level chord to call and no handler was written. The shell
+    // owns a second copy for the selected message, the same way it owns the mailbox picker
+    // for Move To.
+    redirect: useCallback(() => {
+      if (only !== undefined) setRedirecting(true)
+    }, [only]),
+
     runRules: useCallback(() => {
       void rulesRun(selectedMessageIds)
         .then((report) => {
@@ -225,6 +247,25 @@ export function AppShell() {
 
     undo,
     redo,
+
+    // Ctrl+1 to Ctrl+9. docs/01 §14. Jumps to the nth row of Favourites, which is the list
+    // Mail's own Cmd+1-9 walks, and it is built from the same `buildSidebar` the sidebar
+    // renders -- so the nth shortcut and the nth visible row cannot disagree.
+    //
+    // This was listed in the Help sheet and bound nowhere. `parseChord` returns null for the
+    // range `Ctrl+1-9`, so the table skipped the row and no handler was ever written for it;
+    // the dispatcher now special-cases the digits.
+    jumpToMailbox: useCallback(
+      (position: number) => {
+        const favourites = buildSidebar(accounts, mailboxes, smart, flagNames, vips)[0]
+        const node = favourites?.nodes[position - 1]
+        if (node === undefined) return
+
+        const selection = selectionForNode(node)
+        if (selection !== null) selectMailbox(selection)
+      },
+      [accounts, mailboxes, smart, flagNames, vips, selectMailbox],
+    ),
 
     search: focusSearch,
 
@@ -257,6 +298,11 @@ export function AppShell() {
       })
     }
   }, [selectedNodeId, firstInbox, selectMailbox])
+
+  // Shares the reader's cache entry rather than issuing a second read: the reader mounts
+  // `useThread` with the same key, so this is the same query.
+  const { data: openThread = [] } = useThread(only ?? null)
+  const selectedMessage = openThread.find((message) => message.id === only)
 
   const [level, setLevel] = useState<Level>('list')
 
@@ -391,6 +437,15 @@ export function AppShell() {
       <ShortcutSheet open={showingShortcuts} onOpenChange={setShowingShortcuts} />
 
       <SaveSearchSheet open={savingSearch} onOpenChange={setSavingSearch} text={search.text} />
+
+      {only !== undefined && (
+        <RedirectSheet
+          open={redirecting}
+          onOpenChange={setRedirecting}
+          messageId={only}
+          subject={selectedMessage?.subject ?? ''}
+        />
+      )}
 
       <MailboxPicker
         open={movingTo}

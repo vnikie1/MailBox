@@ -134,11 +134,12 @@ export function useFlagNames() {
   })
 }
 
-export function useThread(threadId: number | null) {
+/** The conversation containing `messageId`. Keyed by the message, which is what the reader has. */
+export function useThread(messageId: number | null) {
   return useQuery<MessageFull[]>({
-    queryKey: keys.thread(threadId ?? -1),
-    enabled: threadId !== null,
-    queryFn: () => ipc.threadGet(threadId ?? -1),
+    queryKey: keys.thread(messageId ?? -1),
+    enabled: messageId !== null,
+    queryFn: () => ipc.threadGet(messageId ?? -1),
   })
 }
 

@@ -318,8 +318,17 @@ export function messageGet(id: number): MessageFull | null {
   return current().messages.get(id) ?? null
 }
 
-export function threadGet(threadId: number): MessageFull[] {
-  return [...current().messages.values()]
+export function threadGet(messageId: number): MessageFull[] {
+  // Resolve the message to its thread first, exactly as the core does. Filtering on the
+  // message id directly matched only the conversation whose thread id happened to equal it.
+  const data = current()
+  const threadId = data.messages.get(messageId)?.threadId ?? null
+  if (threadId === null) {
+    const single = data.messages.get(messageId)
+    return single === undefined ? [] : [single]
+  }
+
+  return [...data.messages.values()]
     .filter((message) => message.threadId === threadId)
     .sort((a, b) => a.dateSent - b.dateSent || a.id - b.id)
 }

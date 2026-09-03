@@ -152,9 +152,15 @@ export async function messageGet(id: number): Promise<MessageFull | null> {
   return invoke<MessageFull | null>('message_get', { id })
 }
 
-export async function threadGet(threadId: number): Promise<MessageFull[]> {
-  if (!runningInTauri) return browser.threadGet(threadId)
-  return invoke<MessageFull[]>('thread_get', { threadId })
+/**
+ * Every message in the conversation the given message belongs to, oldest first.
+ *
+ * Takes a **message** id. It used to be called with one while both sides treated it as a
+ * thread id, so only the oldest message of any conversation opened as a conversation.
+ */
+export async function threadGet(messageId: number): Promise<MessageFull[]> {
+  if (!runningInTauri) return browser.threadGet(messageId)
+  return invoke<MessageFull[]>('thread_get', { messageId })
 }
 
 export async function searchMessages(query: SearchQuery): Promise<MessageRow[]> {
