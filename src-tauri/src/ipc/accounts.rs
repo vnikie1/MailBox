@@ -611,6 +611,97 @@ pub async fn account_remove(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
     Ok(())
 }
 
+/// Signs in again to an existing OAuth account, keeping its mail.
+///
+/// The thing the re-authenticate banner has been telling people to do since Phase 4, with no
+/// way to do it. `sync::engine` sets `needs_reauth` on a `Rejected` error and sends it to the
+/// UI; the UI never read the flag, the banner's only button re-ran the sync that had just
+/// failed, and the "Sign in again" line in Settings was a `<span>`. So an account whose refresh
+/// token had expired — which for a Google client in testing mode happens every seven days —
+/// could not be recovered at all except by removing the account and downloading everything
+/// again.
+///
+/// Deliberately **not** remove-and-re-add. Only the tokens are replaced: the account row, its
+/// mailboxes, its mail, its rules and its local flags all stay exactly where they are. Adding
+/// the account back would re-download the mailbox and lose anything local to this machine.
+///
+/// The email is not taken from the caller. It comes from the stored account and is passed to
+/// the provider as a login hint, so this cannot quietly re-point an account at a different
+/// mailbox — sign in as someone else and the verify step below rejects it.
+#[tauri::command]
+pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Response<()> {
+    let account = db
+        .read(move |conn| store::get(conn, id))
+        .await?
+        .ok_or_else(|| bad_request("That account no longer exists."))?;
+
+    if account.auth_kind != AuthKind::OAuth2 {
+        return Err(bad_request(
+            "This account signs in with a password. Update it in its settings instead.",
+        ));
+    }
+
+    let provider = resolve(&account.provider)?;
+    let email = account.email.clone();
+
+    let client = db
+        .read(move |conn| accounts::client_config(conn, provider))
+        .await?
+        .ok_or(oauth::OAuthError::NoClient {
+            provider: provider.id().to_string(),
+        })?;
+
+    let tokens = oauth::authorise(provider, &client, Some(&email), open_in_browser).await?;
+
+    // Checked before anything is stored. Signing in as a different person would otherwise
+    // overwrite this account's credential with one for a mailbox it has none of the mail from,
+    // and every later sync would then delete what is here as "missing from the server".
+    let (imap, smtp) = provider
+        .servers()
+        .ok_or_else(|| bad_request("This provider has no known servers."))?;
+
+    let report = verify::run(
+        &email,
+        provider,
+        &imap,
+        &smtp,
+        Attempt::OAuth {
+            access_token: tokens.access.clone(),
+        },
+    )
+    .await;
+
+    if !report.ok {
+        return Err(bad_request(
+            "That sign-in did not work for this account. Check you signed in as the same \
+             address.",
+        ));
+    }
+
+    let reference = credentials::reference_for(&email);
+    accounts::save_tokens(&reference, &tokens).map_err(|error| {
+        tracing::error!(%error, "could not store tokens on re-authentication");
+        AppError {
+            code: "credentialStore".into(),
+            message: "Windows would not save the sign-in to Credential Manager.".into(),
+        }
+    })?;
+
+    {
+        let reference = reference.clone();
+        let expires_at = tokens.expires_at;
+        db.write(move |tx| accounts::write_expiry(tx, &reference, expires_at))
+            .await?;
+    }
+
+    tracing::info!(account_id = id, "account re-authenticated");
+
+    // `accounts:changed` restarts the watcher, which is what actually gets mail flowing again;
+    // without it the new token sits unused until the next poll.
+    let _ = app.emit("accounts:changed", ());
+    Ok(())
+}
+
 /// Whether the Credential Manager still holds a usable sign-in for this account.
 ///
 /// Returns a boolean, never the secret. Used for the re-authenticate banner.

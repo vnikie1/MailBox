@@ -131,6 +131,7 @@ pub fn run() {
             ipc::accounts::account_update,
             ipc::accounts::accounts_reorder,
             ipc::accounts::account_remove,
+            ipc::accounts::account_reauth,
             ipc::accounts::account_credential_status,
             ipc::accounts::oauth_client_get,
             ipc::accounts::oauth_client_set,

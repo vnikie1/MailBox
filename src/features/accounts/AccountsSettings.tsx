@@ -2,7 +2,14 @@ import { useCallback, useMemo, useState } from 'react'
 import { AlertTriangle, ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react'
 
 import type { AccountDetail } from '@/lib/generated/AccountDetail'
-import { accountRemove, accountUpdate, accountsReorder, oauthClientSet, syncAll } from '@/lib/ipc'
+import {
+  accountReauth,
+  accountRemove,
+  accountUpdate,
+  accountsReorder,
+  oauthClientSet,
+  syncAll,
+} from '@/lib/ipc'
 import { cx } from '@/lib/cx'
 import { Avatar, Button, IconButton, Sheet, TextField, useToast } from '@/ui'
 
@@ -123,6 +130,10 @@ function AccountRow({
   onRemove: () => void
 }) {
   const [name, setName] = useState(account.displayName)
+  // The browser sign-in takes as long as the user takes, so the button has to say it is busy
+  // or it reads as not having worked.
+  const [signingIn, setSigningIn] = useState(false)
+  const toast = useToast()
   const accountsChanged = useAccountsChanged()
 
   const commit = useCallback(() => {
@@ -151,12 +162,39 @@ function AccountRow({
       </div>
 
       {/* docs/03 §7 — an account with no stored credential cannot connect, and saying so
-          here is the difference between "broken" and "sign in again". */}
-      {!account.hasCredential && (
-        <span className={styles.reauth}>
-          <AlertTriangle className={styles.reauthIcon} aria-hidden />
-          Sign in again
-        </span>
+          here is the difference between "broken" and "sign in again".
+
+          It said it and offered no way to do it: this was a `<span>`, and there was no command
+          behind it either. A stored credential that the *server* refuses does not clear
+          `hasCredential` at all, so for the common case — an expired refresh token — even the
+          words were absent. The button is offered for every OAuth account, and only wears the
+          warning colour when the credential is actually missing. */}
+      {account.authKind === 'oAuth2' && (
+        <Button
+          variant="bordered"
+          className={account.hasCredential ? undefined : styles.reauth}
+          disabled={signingIn}
+          onClick={() => {
+            setSigningIn(true)
+            accountReauth(account.id)
+              .then(() => {
+                toast.show({ title: `Signed in to ${account.email}` })
+                return syncAll()
+              })
+              .catch((cause: unknown) => {
+                toast.show({
+                  title: 'That sign-in did not complete',
+                  description: cause instanceof Error ? cause.message : String(cause),
+                })
+              })
+              .finally(() => {
+                setSigningIn(false)
+              })
+          }}
+        >
+          {!account.hasCredential && <AlertTriangle className={styles.reauthIcon} aria-hidden />}
+          {signingIn ? 'Signing in…' : 'Sign in again'}
+        </Button>
       )}
 
       <ColorPicker account={account} />

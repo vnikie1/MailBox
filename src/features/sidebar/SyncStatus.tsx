@@ -1,7 +1,8 @@
+import { useState } from 'react'
 import { AlertTriangle, CloudOff, RefreshCw } from 'lucide-react'
 
 import type { SyncAccountError } from '@/lib/ipc'
-import { syncAll } from '@/lib/ipc'
+import { accountReauth, syncAll } from '@/lib/ipc'
 
 import styles from './SyncStatus.module.css'
 
@@ -38,6 +39,10 @@ export interface SyncStatusProps {
  * looking at a full mailbox should not be left wondering whether it is about to empty.
  */
 export function SyncStatus({ errors, busy, online, accountNames }: SyncStatusProps) {
+  // The browser sign-in takes as long as the user takes, so the button has to say it is doing
+  // something or it reads as not having worked.
+  const [signingIn, setSigningIn] = useState(false)
+
   if (!online) {
     return (
       <div className={styles.strip} data-tone="warn" role="status" aria-live="polite">
@@ -71,16 +76,45 @@ export function SyncStatus({ errors, busy, online, accountNames }: SyncStatusPro
 
         {/* A way out, because a status with no action is a dead end — the gate's words. Retry
             rather than anything cleverer: the common causes (a dropped VPN, a server that was
-            briefly down, a laptop that just woke) are all fixed by asking again. */}
-        <button
-          type="button"
-          className={styles.retry}
-          onClick={() => {
-            void syncAll()
-          }}
-        >
-          Retry
-        </button>
+            briefly down, a laptop that just woke) are all fixed by asking again.
+
+            Except when they are not. The core sets `needsReauth` for a credential the server
+            refused, and asking again cannot fix one of those — the message says "Signing in
+            again will fix it" while the only button re-ran the sync that had just failed. The
+            flag was in the payload and read by nothing, so an account whose refresh token had
+            expired could not be recovered from anywhere in the app. */}
+        {error.needsReauth ? (
+          <button
+            type="button"
+            className={styles.retry}
+            disabled={signingIn}
+            onClick={() => {
+              setSigningIn(true)
+              accountReauth(accountId)
+                .then(() => syncAll())
+                .catch(() => {
+                  // The banner is already saying the account cannot connect, and it stays until
+                  // a sync succeeds. A second message about a sign-in the user just abandoned
+                  // would be telling them something they know.
+                })
+                .finally(() => {
+                  setSigningIn(false)
+                })
+            }}
+          >
+            {signingIn ? 'Signing in…' : 'Sign In'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={styles.retry}
+            onClick={() => {
+              void syncAll()
+            }}
+          >
+            Retry
+          </button>
+        )}
       </div>
     )
   }

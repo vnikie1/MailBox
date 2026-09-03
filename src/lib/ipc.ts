@@ -337,6 +337,18 @@ export async function accountAddPassword(
   return invoke<AddedAccount>('account_add_password', { input, password })
 }
 
+/**
+ * Signs in again to an existing OAuth account, keeping its mail.
+ *
+ * Opens the provider's page in the real browser and resolves once the tokens are stored, so it
+ * is slow by nature -- the user has to type a password and probably approve a second factor.
+ * Only the credential is replaced; the account and everything in it stay put.
+ */
+export async function accountReauth(id: number): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('account_reauth', { id })
+}
+
 export async function accountAddOauth(input: AccountInput): Promise<AddedAccount> {
   if (!runningInTauri) return browser.accountAdd()
   return invoke<AddedAccount>('account_add_oauth', { input })
