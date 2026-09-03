@@ -4069,3 +4069,66 @@ of user and password>` on screen, and that base64 is trivially reversible.
 - **A doctest failure blocked the gate for a while.** An indented block inside a `///` comment is
   compiled as a Rust doctest. Third occurrence in this project; the fix is always to inline the
   example rather than indent it.
+
+---
+
+## 2026-09-03 — Installed the app and used it, which found the next bug
+
+### Added
+
+- **`account_reauth`** — signs in again to an existing OAuth account, replacing only its
+  tokens. The account row, its mailboxes, its mail, its rules and its local flags all stay
+  where they are; the alternative was removing the account and downloading everything again.
+  The email comes from the stored account rather than the caller and is passed to the provider
+  as a login hint, and the new token is verified against the server **before** anything is
+  written — signing in as somebody else is refused rather than silently re-pointing an account
+  at a mailbox none of the local mail came from, which the next sync would then delete as
+  "missing from the server".
+
+### Fixed
+
+- **The re-authenticate banner told people to do something the app gave them no way to do.**
+  Found by installing the build and trying to use it. The Gmail account's refresh token had
+  expired, sync stopped, and the strip along the bottom of the sidebar said "The saved sign-in
+  for this account was refused. Signing in again will fix it." There was nowhere in the app to
+  sign in again. Four separate pieces, each individually reasonable:
+  - `sync::engine` sets `needs_reauth` on a `Rejected` error and puts it in the payload.
+    `needsReauth` occurs exactly once in `src/` — in the type definition. Nothing read it.
+  - The banner's only button calls `syncAll()`. Its comment reasons only about transient
+    causes: "a dropped VPN, a server that was briefly down, a laptop that just woke are all
+    fixed by asking again". A refused credential is not one of those, and the log shows the
+    retry failing again within 130 ms, over and over.
+  - Settings had the words "Sign in again" as a `<span>` with no command behind it — and only
+    when `hasCredential` is false. A stored credential that the _server_ refuses is still
+    stored, so in the common case even the words were absent.
+  - There was no `account_reauth` command to call in any event.
+
+  For a Google OAuth client in testing mode, where refresh tokens expire after seven days,
+  this made a weekly re-download of the entire mailbox the only way to keep using the app.
+
+### Notes
+
+- **Installed to `%LOCALAPPDATA%\Halcyon`** from the NSIS bundle, per-user, no elevation.
+  Cold start measured 405 ms against the 800 ms budget in docs/06 Phase 3. The app picked up
+  the existing store, so the account and its 240 messages were already there.
+- The updater signing key is still absent, so `tauri build` prints
+  "A public key has been found, but no private key" at the end. The bundle is produced and the
+  exit code is 0. Deliberate — signing stays parked until the Store submission is done.
+- The stale `Halcyon_1.0.0_x64-setup.exe.sig` beside the rebuilt installer is now the signature
+  of an older binary. Harmless until someone runs an updater test against that directory and
+  believes it.
+
+### Incidents
+
+- **`/S` was silently ignored when the installer was run from Git Bash**, so a silent install
+  put a GUI wizard on screen and the command hung until it was killed. MSYS rewrites an
+  argument beginning with `/` into a Windows path, so NSIS never saw the silent flag. Ran it
+  through PowerShell's `Start-Process -ArgumentList '/S' -Wait` instead. Worth remembering for
+  anything in `tools/` that shells out to a Windows program with slash-style flags.
+- **Diagnosing the refused sign-in took longer than it should have.** The log records
+  `error=vnikie1@gmail.com rejected the sign-in` and drops the provider's own error code, which
+  is the part that says whether the refresh token was revoked, expired, or the request was
+  malformed. Establishing it was a genuine refusal rather than the transient-error bug fixed
+  earlier today meant reading the stored token expiry out of the database by hand. The detail
+  belongs in the log line; `describe()` is what keeps protocol text away from the user, and the
+  log is not the user.
