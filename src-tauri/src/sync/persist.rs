@@ -286,6 +286,19 @@ pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<u
 /// mail was all there, and the sidebar and the list header both said zero. The rows are the
 /// truth; these columns are a cache, and a cache nobody refreshes is just a wrong number.
 pub fn recount(tx: &Transaction<'_>, mailbox_id: i64) -> Result<(), DbError> {
+    // Snoozed messages are excluded from the unread count, because they are excluded from the
+    // list -- `query::messages_page` filters on `snooze_until IS NULL OR snooze_until <= now`.
+    // Counting them here meant the sidebar showed unread mail that the list refused to show,
+    // and a badge that cannot be cleared by reading anything is worse than no badge: the only
+    // way to make it go away is to stop believing it.
+    //
+    // `upkeep::tick` recounts when a reminder wakes, or this number would stay behind until
+    // something else happened to that mailbox.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+
     tx.execute(
         "UPDATE mailbox
             SET total_count = (
@@ -293,10 +306,12 @@ pub fn recount(tx: &Transaction<'_>, mailbox_id: i64) -> Result<(), DbError> {
                 ),
                 unread_count = (
                     SELECT COUNT(*) FROM message
-                     WHERE message.mailbox_id = mailbox.id AND message.flag_seen = 0
+                     WHERE message.mailbox_id = mailbox.id
+                       AND message.flag_seen = 0
+                       AND (message.snooze_until IS NULL OR message.snooze_until <= ?2)
                 )
           WHERE id = ?1",
-        params![mailbox_id],
+        params![mailbox_id, stamp],
     )?;
 
     Ok(())

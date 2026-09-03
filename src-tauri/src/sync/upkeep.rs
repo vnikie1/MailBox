@@ -67,6 +67,15 @@ pub async fn tick(db: &Db, count: u64) -> Result<Ticked, DbError> {
         // either notify twice or not at all.
         let woken = vip::wake_due(tx, stamp)?;
 
+        // The unread badge is a cached count that excludes snoozed messages, so waking one
+        // changes a number nothing else recomputes. Without this the message reappears in the
+        // list while the sidebar goes on showing the count it had while the message was hidden.
+        if !woken.is_empty() {
+            for mailbox_id in crate::db::write::mailboxes_of(tx, &woken)? {
+                super::persist::recount(tx, mailbox_id)?;
+            }
+        }
+
         let followed_up = if follow_up_due {
             vip::detect_follow_ups(tx, stamp)?
         } else {

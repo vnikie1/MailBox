@@ -520,18 +520,58 @@ pub struct Redirect<'a> {
     pub resent_message_id: Option<String>,
 }
 
+/// A display name as a header value: quoted when it is ASCII, RFC 2047 encoded when it is not.
+///
+/// `mailbox()` hands names to lettre, which does this, and its comment says exactly why it
+/// matters: written by hand is "where names turn into mojibake, and the sender never finds
+/// out". The redirect block below *is* written by hand, and did not do it — so a redirect from
+/// or to anybody with an accent in their name put raw 8-bit bytes into a header RFC 5322
+/// requires to be ASCII. Strict servers reject that outright and lenient ones garble it.
+fn header_name(name: &str) -> String {
+    if name.is_ascii() {
+        // Quoted, and any quote or backslash inside escaped. A display name is arbitrary text
+        // from an arbitrary sender, and an unescaped one can close the quoting early and inject
+        // a second address into the header — which for a redirect would mean silently sending
+        // someone's mail somewhere they never named.
+        let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+        return format!("\"{escaped}\"");
+    }
+
+    // RFC 2047 §2 caps an encoded-word at 75 characters including its delimiters. `=?UTF-8?B?`
+    // and `?=` cost 12, and base64 turns three bytes into four characters, so 45 bytes of input
+    // per word stays inside the limit. Split on character boundaries, never mid-character, or
+    // the decoder is handed half a codepoint.
+    //
+    // Adjacent encoded-words separated by whitespace are rejoined by the decoder, so a long
+    // name arrives whole.
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD;
+
+    let mut words: Vec<String> = Vec::new();
+    let mut chunk = String::new();
+
+    for character in name.chars() {
+        if chunk.len() + character.len_utf8() > 45 {
+            words.push(format!("=?UTF-8?B?{}?=", engine.encode(&chunk)));
+            chunk.clear();
+        }
+        chunk.push(character);
+    }
+
+    if !chunk.is_empty() {
+        words.push(format!("=?UTF-8?B?{}?=", engine.encode(&chunk)));
+    }
+
+    words.join(" ")
+}
+
 /// Formats an address list for a header.
 fn header_list(addresses: &[Address]) -> String {
     addresses
         .iter()
         .map(|address| match address.name.as_deref().map(str::trim) {
-            // Quoted, and any quote or backslash inside escaped. A display name is arbitrary
-            // text from an arbitrary sender, and an unescaped one can close the quoting early
-            // and inject a second address into the header — which for a redirect would mean
-            // silently sending someone's mail somewhere they never named.
             Some(name) if !name.is_empty() => {
-                let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-                format!("\"{escaped}\" <{}>", address.email.trim())
+                format!("{} <{}>", header_name(name), address.email.trim())
             }
             _ => address.email.trim().to_string(),
         })
@@ -1227,6 +1267,80 @@ mod attachment_tests {
             output.ends_with(&String::from_utf8_lossy(&raw).to_string()),
             "the original was altered:\n{output}"
         );
+    }
+
+    #[test]
+    fn a_redirect_encodes_a_non_ascii_display_name() {
+        // The build path hands names to lettre, which encodes them, and
+        // `a_display_name_with_an_accent_survives` proves it. The redirect block is written by
+        // hand and was not: an accented name went into a `Resent-` header as raw 8-bit bytes,
+        // which RFC 5322 does not allow there. `mailbox()`'s own comment names the outcome —
+        // mojibake in the recipient's client, and the sender never finds out.
+        let raw = original();
+        let mut request = redirect_request(&raw);
+        request.from = address(Some("Zoë Naïve"), "zoe@halcyon.test");
+        request.to = vec![address(Some("José Álvarez"), "jose@example.test")];
+
+        let built = redirect(&request).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes).to_string();
+
+        // Only the `Resent-` block is ours; the original below it is kept byte for byte and may
+        // legitimately contain anything.
+        let block = &output[..output.find("Resent-Message-ID:").expect("id")];
+
+        assert!(
+            block.is_ascii(),
+            "the resent block carries raw 8-bit bytes:\n{block}"
+        );
+        assert!(
+            block.contains("=?UTF-8?B?"),
+            "nothing was encoded:\n{block}"
+        );
+        assert!(!block.contains("Zoë"), "a raw name survived:\n{block}");
+        assert!(!block.contains("Álvarez"), "a raw name survived:\n{block}");
+
+        // The addresses themselves are untouched — only the names are encoded.
+        assert!(block.contains("<zoe@halcyon.test>"));
+        assert!(block.contains("<jose@example.test>"));
+    }
+
+    #[test]
+    fn an_ascii_display_name_is_quoted_rather_than_encoded() {
+        // Encoding everything would be correct and unreadable. An ASCII name has no reason to
+        // arrive as base64 in somebody's mail client.
+        assert_eq!(header_name("Grace Hopper"), "\"Grace Hopper\"");
+    }
+
+    #[test]
+    fn a_display_name_cannot_close_its_own_quoting() {
+        // The injection guard, kept from the version this replaced: an unescaped quote would
+        // end the quoted string early and let the rest of the name be read as a second
+        // address — for a redirect, mail sent somewhere the user never named.
+        let encoded = header_name("Grace \" <evil@example.test>, x");
+
+        assert!(encoded.starts_with('"') && encoded.ends_with('"'));
+        assert!(
+            encoded.contains("\\\""),
+            "the quote was not escaped: {encoded}"
+        );
+    }
+
+    #[test]
+    fn a_long_non_ascii_name_is_split_into_encoded_words_within_the_limit() {
+        // RFC 2047 caps an encoded-word at 75 characters including its delimiters.
+        let long = "Ünnervärderad ".repeat(8);
+        let encoded = header_name(&long);
+
+        for word in encoded.split(' ') {
+            assert!(
+                word.len() <= 75,
+                "an encoded word exceeds the RFC 2047 limit at {} chars: {word}",
+                word.len()
+            );
+            assert!(word.starts_with("=?UTF-8?B?") && word.ends_with("?="));
+        }
+
+        assert!(encoded.is_ascii());
     }
 
     #[test]

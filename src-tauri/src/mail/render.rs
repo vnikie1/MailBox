@@ -581,7 +581,26 @@ fn split_plain_quote(text: &str) -> Option<(&str, String)> {
         return None;
     }
 
-    let visible_end: usize = lines[..cut].iter().map(|line| line.len() + 1).sum();
+    // Measured against the text rather than assumed from the line count.
+    //
+    // `str::lines` strips both `\n` and `\r\n`, so `line.len()` never includes a carriage
+    // return -- and adding a fixed 1 for the terminator therefore under-counted by one byte on
+    // every CRLF line. Mail is CRLF, so that was every line: a ten-line reply had its last ten
+    // bytes cut off the part the reader shows, and the only symptom was a message that ended
+    // mid-word above the quoted original.
+    let mut visible_end = 0usize;
+    for line in &lines[..cut] {
+        visible_end += line.len();
+
+        // Whatever actually ended this line, including nothing at the end of the text.
+        let rest = text.get(visible_end..).unwrap_or_default();
+        if rest.starts_with("\r\n") {
+            visible_end += 2;
+        } else if rest.starts_with('\n') {
+            visible_end += 1;
+        }
+    }
+
     let visible = text.get(..visible_end.min(text.len()))?;
 
     if visible.trim().is_empty() {
@@ -1283,5 +1302,64 @@ mod tests {
 
         let rendered = render_html(&huge);
         assert!(rendered.html.len() > 1000);
+    }
+
+    #[test]
+    fn a_crlf_reply_keeps_all_of_its_visible_text() {
+        // The offset of the quote used to be computed as `line.len() + 1` per line. `lines()`
+        // strips `\r\n`, so that under-counted by a byte on every line -- and mail is CRLF, so
+        // that was every line. The visible half lost one character per line from its end, which
+        // reads as a message that stops mid-word just above the quote.
+        let text = "First line here.\r\n\
+                    Second line here.\r\n\
+                    Third line here.\r\n\
+                    \r\n\
+                    On Tuesday, Ada wrote:\r\n\
+                    > the original\r\n";
+
+        let (visible, quoted) = split_plain_quote(text).expect("a quote was found");
+
+        assert!(
+            visible.contains("Third line here."),
+            "the last visible line was truncated: {visible:?}"
+        );
+        assert!(
+            !visible.contains("Ada wrote"),
+            "the attribution leaked into the visible half: {visible:?}"
+        );
+        assert!(quoted.contains("> the original"));
+    }
+
+    #[test]
+    fn an_lf_reply_still_splits_where_it_did() {
+        // The same message with Unix endings, which is the case the old arithmetic was right
+        // about. Both have to work: a plain part can arrive either way.
+        let text = "First line here.\n\
+                    Second line here.\n\
+                    \n\
+                    On Tuesday, Ada wrote:\n\
+                    > the original\n";
+
+        let (visible, quoted) = split_plain_quote(text).expect("a quote was found");
+
+        assert!(visible.contains("Second line here."), "{visible:?}");
+        assert!(!visible.contains("Ada wrote"), "{visible:?}");
+        assert!(quoted.contains("> the original"));
+    }
+
+    #[test]
+    fn a_crlf_reply_ending_in_a_multi_byte_character_is_not_cut_in_half() {
+        // The old arithmetic could also land mid-character, in which case `text.get` returned
+        // None and the quote was not folded at all -- a silent failure rather than a wrong one.
+        let text = "Thanks — café\r\n\
+                    Regards, Zoë\r\n\
+                    \r\n\
+                    On Tuesday, Ada wrote:\r\n\
+                    > the original\r\n";
+
+        let (visible, _) = split_plain_quote(text).expect("a quote was found");
+
+        assert!(visible.contains("Zoë"), "{visible:?}");
+        assert!(visible.contains("café"), "{visible:?}");
     }
 }
