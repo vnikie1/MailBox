@@ -31,6 +31,11 @@ pub struct Threadable {
     pub date: i64,
     /// Gmail's `X-GM-THRID`. When present it is authoritative.
     pub gm_thrid: Option<i64>,
+    /// The key this message already carries, when it has been threaded before.
+    ///
+    /// Read so that a pass over a *subset* of an account cannot invent a new key for a
+    /// conversation that already has one. See `thread_messages`.
+    pub thread_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,15 +236,29 @@ pub fn thread_messages(messages: &[Threadable]) -> Vec<Assignment> {
     // ---- resolve ------------------------------------------------------------------------
     // The key is the smallest message id in each set: stable across runs, and independent of
     // the order the rows came back from the database.
+    //
+    // "In each set" is the subtle part, because the set is whatever the caller passed in.
+    // `persist::rethread` normally passes a *window* -- the newest 5,000 messages of the
+    // account -- and a conversation older than that window is only partly in it. Keying on the
+    // smallest id present then produced a different, higher key than the full pass had, and
+    // the members inside the window were re-keyed to it while the older ones outside kept the
+    // original. A two-year-old thread that received a reply today was split in half by the act
+    // of receiving it, and nothing repaired that afterwards: every message still had *a*
+    // thread id, so `unthreaded_count` stayed zero and the full pass never ran again.
+    //
+    // So an id a message already carries outranks its own row id. The stored key came from a
+    // pass that could see the whole conversation, and preferring it keeps a windowed pass from
+    // overruling a better-informed one. New messages, which have no key yet, still contribute
+    // their row id, so a genuinely new conversation is keyed exactly as before.
     let mut key_for_root: HashMap<usize, i64> = HashMap::new();
     for (index, message) in messages.iter().enumerate() {
         let root = union.find(index);
-        let id = message.id;
+        let candidate = message.thread_id.unwrap_or(message.id);
 
         key_for_root
             .entry(root)
-            .and_modify(|current| *current = (*current).min(id))
-            .or_insert(id);
+            .and_modify(|current| *current = (*current).min(candidate))
+            .or_insert(candidate);
     }
 
     (0..messages.len())

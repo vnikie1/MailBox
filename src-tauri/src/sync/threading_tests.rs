@@ -25,6 +25,7 @@ fn message(id: i64, message_id: &str, subject: &str) -> Threadable {
         subject: subject.to_string(),
         date: id * 1000,
         gm_thrid: None,
+        thread_id: None,
     }
 }
 
@@ -261,6 +262,7 @@ fn gmail_thread_ids_win_over_the_algorithm() {
     // it means the same conversation looks different in two places.
     let with_thrid = |id: i64, thrid: i64, message_id: &str| Threadable {
         gm_thrid: Some(thrid),
+        thread_id: None,
         ..message(id, message_id, "unrelated subjects")
     };
 
@@ -280,10 +282,12 @@ fn a_mailbox_where_only_some_messages_have_gmail_ids_threads_both_ways() {
     let messages = vec![
         Threadable {
             gm_thrid: Some(900),
+            thread_id: None,
             ..message(1, "<a@x>", "gmail one")
         },
         Threadable {
             gm_thrid: Some(900),
+            thread_id: None,
             ..message(2, "<b@x>", "gmail two")
         },
         message(3, "<c@x>", "plain"),
@@ -323,6 +327,7 @@ fn every_message_is_assigned_exactly_once() {
         },
         Threadable {
             gm_thrid: Some(7),
+            thread_id: None,
             ..message(6, "<f@x>", "gmail")
         },
     ];
@@ -367,5 +372,96 @@ fn a_large_mailbox_threads_in_reasonable_time() {
     assert!(
         elapsed < std::time::Duration::from_secs(2),
         "threading 20k messages took {elapsed:?} — this is the quadratic trap"
+    );
+}
+
+/// A windowed pass must not re-key a conversation it can only half see.
+///
+/// `persist::rethread` normally runs over the newest 5,000 messages of an account, not the
+/// whole of it. A conversation older than that window is only partly in it, and keying on the
+/// smallest id *present* gave the visible half a new, higher key while the older half kept the
+/// original — splitting a correct thread in two at the moment it received a reply.
+///
+/// Nothing repaired it afterwards. Every message still had a thread id, so `unthreaded_count`
+/// stayed zero and the full pass that would have fixed it never ran again.
+#[test]
+fn a_window_does_not_re_key_a_conversation_it_cannot_fully_see() {
+    // The whole conversation: an old root and two recent replies.
+    let root = message(10, "<root@example.test>", "Budget");
+    let first = reply(
+        90_000,
+        "<a@example.test>",
+        "Re: Budget",
+        "<root@example.test>",
+    );
+    let second = reply(
+        90_001,
+        "<b@example.test>",
+        "Re: Budget",
+        "<root@example.test>",
+    );
+
+    // A full pass sees all three and keys them on the oldest.
+    let full = thread_messages(&[root, first.clone(), second.clone()]);
+    let key = full[0].thread_key;
+    assert_eq!(key, 10, "the full pass keys on the oldest message");
+    assert!(full.iter().all(|entry| entry.thread_key == key));
+
+    // Now a later windowed pass over only the recent half, each carrying the key it was given.
+    // The old root is outside the window and is not passed in at all.
+    let windowed = thread_messages(&[
+        Threadable {
+            thread_id: Some(key),
+            ..first
+        },
+        Threadable {
+            thread_id: Some(key),
+            ..second
+        },
+    ]);
+
+    for assignment in &windowed {
+        assert_eq!(
+            assignment.thread_key, key,
+            "message {} was re-keyed to {}, splitting it from the older half of its own
+             conversation, which still carries {key}",
+            assignment.message_id, assignment.thread_key,
+        );
+    }
+}
+
+#[test]
+fn a_new_conversation_in_a_window_is_still_keyed_on_its_oldest_message() {
+    // The stored key only outranks the row id when there *is* one. Messages that have never
+    // been threaded must key exactly as before, or the fix above would change every new
+    // conversation as well as the ones it is meant to protect.
+    let a = message(500, "<x@example.test>", "New");
+    let b = reply(501, "<y@example.test>", "Re: New", "<x@example.test>");
+
+    let assignments = thread_messages(&[a, b]);
+    assert!(assignments.iter().all(|entry| entry.thread_key == 500));
+}
+
+#[test]
+fn two_threads_bridged_in_a_window_merge_onto_the_older_key() {
+    // A merge must still happen, and must settle on the lower of the two established keys —
+    // not on the bridging message, which is newer than both.
+    let older = Threadable {
+        thread_id: Some(10),
+        ..message(3_000, "<p@example.test>", "Plans")
+    };
+    let newer = Threadable {
+        thread_id: Some(2_000),
+        ..message(3_001, "<q@example.test>", "Plans")
+    };
+    let bridging = Threadable {
+        references: vec!["<p@example.test>".into(), "<q@example.test>".into()],
+        ..message(3_002, "<r@example.test>", "Re: Plans")
+    };
+
+    let assignments = thread_messages(&[older, newer, bridging]);
+    assert!(
+        assignments.iter().all(|entry| entry.thread_key == 10),
+        "a merge should settle on the oldest established key: {assignments:?}"
     );
 }

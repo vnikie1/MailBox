@@ -739,10 +739,7 @@ async fn sync_mailbox(
 
     // Resume where the last run stopped; on a mailbox never backfilled, start below the page
     // just fetched.
-    let mut cursor = match backfilled_to {
-        Some(uid) => uid.min(written.lowest_uid.max(1)),
-        None => written.lowest_uid,
-    };
+    let mut cursor = backfill_start(backfilled_to, written.lowest_uid, &uids);
 
     // A checkpoint the loop can record without repeating itself, and the thing that makes an
     // interrupted backfill resumable rather than merely restartable.
@@ -811,6 +808,40 @@ async fn sync_mailbox(
     tracing::debug!(path, total, "backfill complete");
 
     Ok(total)
+}
+
+/// Where the backfill walk should start, given what is stored and what the newest page found.
+///
+/// `newest_lowest` is 0 when the newest page came back **empty**, and that is the case this
+/// function exists for. The newest page is a numeric UID *range* — the 500 slots below
+/// `uid_next` — and on a mailbox archived from for years those slots are mostly empty: the real
+/// Gmail Inbox described above holds 214 messages spread across 106,287 UIDs, so 500 consecutive
+/// slots holding nothing live is unremarkable rather than exotic.
+///
+/// The arithmetic this replaced was `stored.min(newest_lowest.max(1))`, which turned that 0 into
+/// a floor of 1 — or 0 outright on a first sync. `backfill_window` keeps only UIDs strictly
+/// below the cursor, so it returned `None` immediately, the walk never ran a single batch, and
+/// control fell through to the line that records the backfill as **complete**. A mailbox could
+/// therefore be marked fully downloaded having fetched nothing at all, and the marker only ever
+/// moves downwards — `record_backfill_progress` uses `MIN(...)` — so nothing short of a
+/// UIDVALIDITY change would ever revisit it. Every older message in that mailbox was gone for
+/// good, with no error anywhere.
+///
+/// An empty page now simply carries no information, which is what it is: the walk falls back to
+/// the stored progress, or to the whole UID list when there is none.
+fn backfill_start(backfilled_to: Option<u32>, newest_lowest: u32, uids: &[u32]) -> u32 {
+    // Zero is "the page told us nothing", not "start at the bottom".
+    let newest = (newest_lowest > 0).then_some(newest_lowest);
+
+    match (backfilled_to, newest) {
+        (Some(stored), Some(bottom)) => stored.min(bottom),
+        (Some(stored), None) => stored,
+        (None, Some(bottom)) => bottom,
+        // Nothing stored and nothing on the newest page: walk everything the server listed.
+        // One above the highest known UID, because the window filter is strictly less-than.
+        // An empty list leaves this 0, and a mailbox with no messages is correctly complete.
+        (None, None) => uids.first().map_or(0, |highest| highest.saturating_add(1)),
+    }
 }
 
 /// What the last sync recorded about a mailbox.
@@ -1402,5 +1433,54 @@ mod tests {
         });
 
         assert!(described.contains("Signing in again"), "{described}");
+    }
+
+    #[test]
+    fn an_empty_newest_page_does_not_end_the_backfill() {
+        // The bug, in one assertion. The newest page is a numeric UID range, and on a mailbox
+        // archived from for years it can hold nothing live -- 214 messages across 106,287
+        // UIDs means 500 consecutive slots are usually empty. That produced `lowest_uid == 0`,
+        // the old arithmetic turned it into a cursor of 0 or 1, `backfill_window` found
+        // nothing below that, the loop never ran and the mailbox was recorded as fully
+        // backfilled having fetched not one message.
+        let uids = vec![106_287u32, 90_000, 40_000, 12, 3];
+
+        let cursor = backfill_start(None, 0, &uids);
+        assert!(
+            cursor > 106_287,
+            "an empty newest page must leave the whole UID list still to walk, got {cursor}"
+        );
+        assert!(
+            crate::sync::fetch::backfill_window(&uids, cursor, 500).is_some(),
+            "the walk must have something to do"
+        );
+    }
+
+    #[test]
+    fn an_empty_newest_page_does_not_discard_stored_progress() {
+        // A resumed sync. The old code took `stored.min(0.max(1))`, which is 1 for every
+        // stored value -- so an interrupted backfill that resumed on a day the newest page
+        // happened to be empty jumped straight to the bottom and declared itself finished.
+        let uids = vec![900u32, 500, 100, 5];
+        assert_eq!(backfill_start(Some(400), 0, &uids), 400);
+    }
+
+    #[test]
+    fn the_walk_still_resumes_from_the_lower_of_the_two() {
+        // The ordinary case, unchanged: whichever of stored progress and the newest page
+        // reaches further down is where there is still work to do.
+        let uids = vec![900u32, 500, 100, 5];
+        assert_eq!(backfill_start(Some(400), 700, &uids), 400);
+        assert_eq!(backfill_start(Some(800), 700, &uids), 700);
+        assert_eq!(backfill_start(None, 700, &uids), 700);
+    }
+
+    #[test]
+    fn a_mailbox_the_server_lists_as_empty_is_finished() {
+        // No stored progress, no newest page and no UIDs at all. There is genuinely nothing
+        // to fetch, so a cursor that ends the walk immediately is the right answer here --
+        // this is the one case where recording the backfill complete is honest.
+        assert_eq!(backfill_start(None, 0, &[]), 0);
+        assert!(crate::sync::fetch::backfill_window(&[], 0, 500).is_none());
     }
 }

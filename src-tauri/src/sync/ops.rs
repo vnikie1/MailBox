@@ -329,6 +329,11 @@ async fn store_flags(
 pub struct Applied {
     /// Set when the server held a copy of this draft that we did not put there.
     pub conflicting_draft: Option<String>,
+    /// The `Message-ID` and UID of a draft just appended, so the next save can replace it.
+    ///
+    /// Returned rather than written here because `apply` has a session and no database. The
+    /// caller records it, in the same place it records a conflict.
+    pub appended_draft: Option<(String, u32)>,
 }
 
 async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<Applied, SyncError> {
@@ -439,6 +444,38 @@ async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<App
                 expunge(session, &set).await?;
             }
 
+            // Which UID the append landed on, so the *next* save can delete this copy.
+            //
+            // `draft.remote_uid` is what `replaces` is read from, and nothing anywhere wrote
+            // it -- the column existed, the schema comment explained exactly what it was for
+            // ("without it, thirty seconds of typing produces one draft per save in every
+            // other client the user owns"), and the value was never stored. So `replaces` was
+            // always None, the branch above never ran, and every autosave left another copy
+            // on the server. A ten-minute message wrote twenty of them.
+            //
+            // It also broke the conflict check: `other_copies` excludes only `ours`, so with
+            // `replaces` None every copy this app had appended looked like another device's
+            // work, and from the second save onwards the draft was flagged as edited in two
+            // places. The warning was about copies it had made itself.
+            //
+            // Found by search rather than APPENDUID: async-imap does not surface the UIDPLUS
+            // response, and a search for the draft's own `Message-ID` needs no extension. The
+            // new copy is whatever carries that id and was not there a moment ago.
+            let appended = match other_copies(session, mailbox, message_id, None).await {
+                Ok(found) => found
+                    .into_iter()
+                    .filter(|uid| !theirs.contains(uid))
+                    .max()
+                    .map(|uid| (message_id.clone(), uid)),
+                Err(error) => {
+                    // Not a failure of the append, which has already happened. The next save
+                    // appends again without replacing, which is the old behaviour for one
+                    // round rather than for ever.
+                    tracing::debug!(%error, message_id, "could not learn the appended draft UID");
+                    None
+                }
+            };
+
             if !theirs.is_empty() {
                 tracing::info!(
                     message_id,
@@ -448,8 +485,14 @@ async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<App
 
                 return Ok(Applied {
                     conflicting_draft: Some(message_id.clone()),
+                    appended_draft: appended,
                 });
             }
+
+            return Ok(Applied {
+                conflicting_draft: None,
+                appended_draft: appended,
+            });
         }
     }
 
@@ -561,6 +604,13 @@ pub async fn drain(
                         .await?;
                 }
 
+                // Likewise before forgetting the op. Losing this leaves a copy on the server
+                // that the next save will not replace, which is the bug this fixes.
+                if let Some((message_id, uid)) = applied.appended_draft {
+                    db.write(move |tx| record_draft_uid(tx, &message_id, uid))
+                        .await?;
+                }
+
                 db.write(move |tx| forget(tx, id)).await?;
                 sent += 1;
             }
@@ -598,6 +648,24 @@ pub async fn drain(
 /// A timestamp rather than a boolean: the compose window shows the banner only for a conflict
 /// newer than the copy it is holding, so an old conflict the user already dealt with does not
 /// reappear every time they reopen the draft.
+/// Remembers which UID a draft's last APPEND landed on.
+///
+/// Keyed on `message_id` rather than the row id because that is what the queued operation
+/// carries, and `ix_draft_message_id` makes it unique. A draft deleted while its append was in
+/// flight updates nothing, which is correct: there is no next save to replace anything.
+fn record_draft_uid(
+    tx: &rusqlite::Transaction<'_>,
+    message_id: &str,
+    uid: u32,
+) -> Result<(), DbError> {
+    tx.execute(
+        "UPDATE draft SET remote_uid = ?2 WHERE message_id = ?1",
+        rusqlite::params![message_id, i64::from(uid)],
+    )?;
+
+    Ok(())
+}
+
 fn mark_draft_conflict(tx: &rusqlite::Transaction<'_>, message_id: &str) -> Result<(), DbError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -758,5 +826,58 @@ mod tests {
 
         assert!(queued(&tx, 1).expect("queued").is_empty());
         assert_eq!(pending_count(&tx, 1).expect("count"), 0);
+    }
+
+    /// The draft its UID belongs to, so the next save can replace rather than add.
+    ///
+    /// `remote_uid` existed from the first drafts migration, was read in exactly one place
+    /// to build `Op::AppendDraft { replaces }`, and was written nowhere. So `replaces` was
+    /// always None, the delete-the-old-copy branch never ran, and every autosave left one
+    /// more copy on the server -- one per thirty seconds of typing, in every client the
+    /// user owns. The schema comment beside the column described that exact outcome.
+    #[test]
+    fn a_draft_remembers_the_uid_its_append_landed_on() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        tx.execute(
+            "INSERT INTO draft (id, account_id, message_id, updated_at)
+             VALUES (1, 1, ?1, 0)",
+            rusqlite::params!["<draft-1@halcyon.test>"],
+        )
+        .expect("draft");
+
+        let before: Option<i64> = tx
+            .query_row("SELECT remote_uid FROM draft WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("read");
+        assert_eq!(before, None, "a draft starts with no server copy");
+
+        record_draft_uid(&tx, "<draft-1@halcyon.test>", 4321).expect("record");
+
+        // Read back with the same query `compose_save_draft` uses to build `replaces`.
+        let after: Option<i64> = tx
+            .query_row("SELECT remote_uid FROM draft WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("read");
+
+        assert_eq!(
+            after,
+            Some(4321),
+            "the next save cannot replace a copy it does not know the UID of"
+        );
+    }
+
+    #[test]
+    fn recording_a_uid_for_a_draft_that_has_gone_is_not_an_error() {
+        // The draft was sent or discarded while its append was in flight. There is no next
+        // save to replace anything, so updating nothing is the right outcome -- and failing
+        // here would leave the operation queued and retried for ever.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        record_draft_uid(&tx, "<gone@halcyon.test>", 7).expect("record");
     }
 }

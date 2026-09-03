@@ -44,6 +44,19 @@ pub enum SendError {
 
     #[error("the message has no usable envelope: {detail}")]
     Envelope { detail: String },
+
+    /// The account's sign-in could not be obtained or used.
+    ///
+    /// Its own variant because it is the one failure here that is sometimes worth retrying and
+    /// sometimes not, and the answer comes from the layer below: `SyncError` already separates
+    /// a credential the provider **refused** from a provider that merely did not answer.
+    ///
+    /// It used to be reported as [`Envelope`], which is never retryable, so a dropped
+    /// connection while an OAuth token happened to be refreshing failed the message outright on
+    /// the first attempt and told the user their mail was not sent. It had not been refused —
+    /// it had not been offered to anybody.
+    #[error("the sign-in for this account could not be used: {detail}")]
+    Credential { detail: String, retryable: bool },
 }
 
 impl SendError {
@@ -52,10 +65,12 @@ impl SendError {
     /// A 5xx is the server's final answer. Retrying it wastes the user's time and, repeated
     /// often enough, is the behaviour that gets a sender rate-limited.
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            SendError::Temporary { .. } | SendError::Transport { .. }
-        )
+        match self {
+            SendError::Temporary { .. } | SendError::Transport { .. } => true,
+            // Decided where the credential came from, not here.
+            SendError::Credential { retryable, .. } => *retryable,
+            _ => false,
+        }
     }
 }
 

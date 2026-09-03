@@ -299,6 +299,18 @@ fn describe(error: &smtp::SendError) -> String {
             format!("{host}:{port} is not an encrypted submission port.")
         }
         smtp::SendError::Envelope { detail } => format!("A recipient is not usable: {detail}"),
+
+        // The same two sentences the sidebar uses for the same two situations, because they
+        // are the same two situations and a user meeting both should not have to work out
+        // whether they mean the same thing.
+        smtp::SendError::Credential {
+            retryable: false, ..
+        } => "The saved sign-in for this account was refused. Signing in again will fix it."
+            .to_string(),
+        smtp::SendError::Credential { .. } => {
+            "The account's sign-in could not be checked. Halcyon will try again.".to_string()
+        }
+
         other => other.to_string(),
     }
 }
@@ -354,8 +366,15 @@ async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<(), smtp::SendE
     // half of Phase 7 unreachable, and it stayed that way until somebody tried to send a message.
     let credential = super::engine::credential_for(db, &account)
         .await
-        .map_err(|error| smtp::SendError::Envelope {
+        .map_err(|error| smtp::SendError::Credential {
             detail: error.to_string(),
+            // Whether waiting could help is the sign-in layer's decision, and it already makes
+            // it: a refused credential is not retryable, a provider that did not answer is.
+            // This used to report every one of them as a malformed envelope, which is never
+            // retryable, so the loop below set `attempts` to the maximum and the message went
+            // straight to "was not sent" -- for a network blip, on the first attempt, having
+            // never reached a mail server at all.
+            retryable: error.is_retryable(),
         })?;
 
     smtp::send(&server, &account.email, &credential, &envelope, &raw).await?;
@@ -414,5 +433,64 @@ mod tests {
         let described = describe(&insecure);
         assert!(described.contains("smtp.example.test:25"), "{described}");
         assert!(described.contains("encrypted"), "{described}");
+    }
+
+    #[test]
+    fn a_credential_that_could_not_be_checked_is_retried() {
+        // The failure this exists for. Refreshing an OAuth token needs the network, and losing
+        // it for a moment says nothing about whether the credential is good. This used to be
+        // reported as `Envelope` — "the message has no usable envelope" — which is never
+        // retryable, so the loop set `attempts` to the maximum and the message went straight to
+        // "was not sent" on the first attempt, having never reached a mail server.
+        let transient = smtp::SendError::Credential {
+            detail: "network error talking to google".into(),
+            retryable: true,
+        };
+
+        assert!(
+            transient.is_retryable(),
+            "a sign-in that could not be checked must be tried again"
+        );
+
+        let described = describe(&transient);
+        assert!(described.ends_with('.'), "{described}");
+        assert!(
+            !described.contains("Signing in again"),
+            "a transient failure must not send the user through a sign-in: {described}"
+        );
+    }
+
+    #[test]
+    fn a_refused_credential_is_not_retried() {
+        // The other half. Hammering a credential the provider has refused is how an account
+        // gets locked out, and the user has something to do about it.
+        let refused = smtp::SendError::Credential {
+            detail: "google refused the request: invalid_grant".into(),
+            retryable: false,
+        };
+
+        assert!(!refused.is_retryable());
+        assert!(describe(&refused).contains("Signing in again"));
+    }
+
+    #[test]
+    fn a_credential_failure_never_reads_as_a_bad_recipient() {
+        // What the old classification told the user. The envelope was fine; nobody had looked
+        // at it yet.
+        for retryable in [true, false] {
+            let described = describe(&smtp::SendError::Credential {
+                detail: "whatever went wrong".into(),
+                retryable,
+            });
+
+            assert!(
+                !described.contains("recipient"),
+                "a sign-in problem was described as a recipient problem: {described}"
+            );
+            assert!(
+                !described.contains("whatever went wrong"),
+                "protocol detail reached the user: {described}"
+            );
+        }
     }
 }

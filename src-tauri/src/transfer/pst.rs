@@ -168,8 +168,22 @@ fn synthesise(
 
     if let Some(headers) = string(properties, prop::TRANSPORT_HEADERS) {
         if headers.contains(':') {
-            let mut raw = headers.trim_end().to_string();
-            raw.push_str("\r\n\r\n");
+            let mut raw = without_content_headers(&headers);
+
+            // Describing the body that is actually being attached. These are the same two lines
+            // the synthesised path below writes, for the same reason: what follows is `PR_BODY`,
+            // plain text MAPI has already decoded.
+            //
+            // The original headers were previously kept whole, including the ones describing
+            // how the *original* body was encoded. A message that arrived as base64, or as
+            // `multipart/alternative` with a boundary, was imported with those headers over a
+            // plain-text body -- so a parser base64-decoded ordinary prose, or searched for a
+            // boundary that was not there, and the message imported with no readable body at
+            // all. The headers were right about everything except the thing they were attached
+            // to.
+            raw.push_str("MIME-Version: 1.0\r\n");
+            raw.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+            raw.push_str("\r\n");
             raw.push_str(&body);
             return raw.into_bytes();
         }
@@ -218,6 +232,55 @@ fn synthesise(
     raw.push_str(&body);
 
     raw.into_bytes()
+}
+
+/// The transport headers, minus everything that describes how a body was encoded.
+///
+/// `PR_TRANSPORT_MESSAGE_HEADERS` is worth keeping for what it says about the *message*: the
+/// real `Message-ID`, `References` and `Date` are what let an imported reply thread against an
+/// original that was synced rather than imported. What it must not keep is what it says about
+/// the *body*, because the body it is being attached to is a different one.
+///
+/// Folded continuations follow the header they belong to, so dropping a header drops its
+/// continuation lines with it — otherwise a wrapped `Content-Type` would leave its boundary
+/// parameter behind as a line of its own, which is a malformed header block rather than a
+/// missing one.
+fn without_content_headers(headers: &str) -> String {
+    let mut kept = String::with_capacity(headers.len());
+    let mut dropping = false;
+
+    for line in headers.lines() {
+        // A blank line ends the header block. Anything after it is not a header, and treating
+        // it as one would put a second body separator in the middle of the message.
+        if line.trim().is_empty() {
+            break;
+        }
+
+        // Continuations belong to whatever header they follow, kept or dropped.
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !dropping {
+                kept.push_str(line);
+                kept.push_str("\r\n");
+            }
+            continue;
+        }
+
+        let name = line
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+
+        dropping = name == "mime-version" || name.starts_with("content-");
+
+        if !dropping {
+            kept.push_str(line.trim_end());
+            kept.push_str("\r\n");
+        }
+    }
+
+    kept
 }
 
 /// Wraps a message id in angle brackets if it has none.
@@ -453,5 +516,69 @@ mod tests {
         // Standing rule 13. A message with an absurd timestamp is still a message.
         assert!(rfc2822(i64::MAX).contains("1970"));
         assert!(rfc2822(1_787_304_840).contains("2026"));
+    }
+
+    #[test]
+    fn the_originals_encoding_headers_do_not_survive_onto_a_decoded_body() {
+        // The bug. `PR_TRANSPORT_MESSAGE_HEADERS` describes the message as it arrived; the body
+        // glued underneath is `PR_BODY`, which MAPI has already decoded to plain text. Keeping
+        // the original `Content-Transfer-Encoding: base64` meant a parser base64-decoded
+        // ordinary prose, and keeping a `multipart/alternative` boundary meant it looked for a
+        // separator that was not there. Either way the message imported with no readable body.
+        let headers = "Message-ID: <real@example.test>\r\n\
+                       From: Ada <ada@example.test>\r\n\
+                       References: <root@example.test>\r\n\
+                       MIME-Version: 1.0\r\n\
+                       Content-Type: multipart/alternative;\r\n\
+                       \tboundary=\"----=_Part_1_2\"\r\n\
+                       Content-Transfer-Encoding: base64\r\n\
+                       Subject: Quarterly\r\n";
+
+        let kept = without_content_headers(headers);
+
+        // What the message says about itself survives -- this is why the transport headers are
+        // used at all.
+        assert!(kept.contains("Message-ID: <real@example.test>"));
+        assert!(kept.contains("References: <root@example.test>"));
+        assert!(kept.contains("Subject: Quarterly"));
+        assert!(kept.contains("From: Ada <ada@example.test>"));
+
+        // What it says about a body it no longer has does not.
+        assert!(!kept.to_ascii_lowercase().contains("content-type"));
+        assert!(!kept
+            .to_ascii_lowercase()
+            .contains("content-transfer-encoding"));
+        assert!(!kept.to_ascii_lowercase().contains("mime-version"));
+
+        // Including the folded continuation, which would otherwise be left behind as a line of
+        // its own and make the whole header block malformed.
+        assert!(!kept.contains("boundary"));
+        assert!(!kept.contains("----=_Part_1_2"));
+    }
+
+    #[test]
+    fn a_blank_line_ends_the_header_block() {
+        // Some PSTs store the headers with the blank separator still attached. Treating what
+        // follows as headers would put a second body separator into the message.
+        let headers = "Subject: Hello\r\n\r\nThis is body text, not a header.\r\n";
+        let kept = without_content_headers(headers);
+
+        assert!(kept.contains("Subject: Hello"));
+        assert!(!kept.contains("body text"));
+    }
+
+    #[test]
+    fn a_folded_header_that_is_kept_keeps_its_continuation() {
+        // The other half of the folding rule: dropping continuations wholesale would truncate
+        // a long References chain, which is exactly what threading needs.
+        let headers = "References: <a@example.test>\r\n\t<b@example.test>\r\nSubject: Re: Hi\r\n";
+        let kept = without_content_headers(headers);
+
+        assert!(kept.contains("<a@example.test>"));
+        assert!(
+            kept.contains("<b@example.test>"),
+            "a kept header lost its continuation: {kept}"
+        );
+        assert!(kept.contains("Subject: Re: Hi"));
     }
 }

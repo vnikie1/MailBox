@@ -174,7 +174,8 @@ fn addresses_json(addresses: &[super::envelope::Address]) -> String {
 /// not hold the writer for a minute.
 pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<usize, DbError> {
     let mut statement = tx.prepare(
-        "SELECT id, message_id, in_reply_to, references_, subject, date_received, gm_thrid
+        "SELECT id, message_id, in_reply_to, references_, subject, date_received, gm_thrid,
+                thread_id
            FROM message
           WHERE account_id = ?1
           ORDER BY date_received DESC
@@ -203,6 +204,9 @@ pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<u
             // the reference chain entirely, that gave every message a thread of its own and
             // turned threading off for Gmail accounts without failing anything.
             gm_thrid: row.get(6)?,
+            // The key this message already has, so a windowed pass cannot re-key a
+            // conversation whose older half it cannot see.
+            thread_id: row.get(7)?,
         })
     })?;
 
