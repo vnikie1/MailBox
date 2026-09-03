@@ -267,9 +267,21 @@ pub fn arrivals_range(stored_uid_next: u32, uid_next: u32) -> Option<String> {
 ///
 /// Returns `None` only when there is no UID, which makes the row unstorable — everything
 /// else degrades to a default rather than dropping the message. Standing rule 13.
+/// One FETCH response, or `None` when it is not an answer to what was asked.
+///
+/// An envelope is required, and that is the whole point rather than a formality. A server may
+/// send an **unsolicited** FETCH in the middle of a `UID FETCH` -- another client marking a
+/// message read is the ordinary cause -- and such a response carries a UID and FLAGS and
+/// nothing else. Building a message from it produced a row with an empty envelope, no subject,
+/// no sender and `date_received = 0`, sorted to the bottom of the mailbox for ever: later syncs
+/// find the UID already present and update only its flags, by design, so nothing ever fills the
+/// envelope in.
+///
+/// `fetch_items` always asks for ENVELOPE, so its presence is exactly the difference between a
+/// reply to this command and an aside about something else.
 fn from_attributes(attributes: &[AttributeValue<'_>]) -> Option<Fetched> {
     let mut uid = None;
-    let mut envelope = Envelope::default();
+    let mut envelope: Option<Envelope> = None;
     let mut flag_names: Vec<String> = Vec::new();
     let mut size = 0u32;
     let mut internal_date = 0i64;
@@ -291,7 +303,7 @@ fn from_attributes(attributes: &[AttributeValue<'_>]) -> Option<Fetched> {
             }
 
             AttributeValue::Envelope(parsed) => {
-                envelope = envelope::from_imap(parsed);
+                envelope = Some(envelope::from_imap(parsed));
             }
 
             AttributeValue::InternalDate(raw) => {
@@ -313,7 +325,7 @@ fn from_attributes(attributes: &[AttributeValue<'_>]) -> Option<Fetched> {
 
     Some(Fetched {
         uid: uid?,
-        envelope,
+        envelope: envelope?,
         flags: Flags::read(&flag_names),
         size,
         internal_date,

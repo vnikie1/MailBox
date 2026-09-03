@@ -21,6 +21,7 @@ import { formatFileSize as formatSize } from '@/lib/date'
 
 import type { OutgoingMessage } from '@/lib/generated/OutgoingMessage'
 
+import { looksLikeAddress } from './address'
 import { Editor } from './Editor'
 import { RecipientField } from './RecipientField'
 import { useAutosave } from './useAutosave'
@@ -40,12 +41,6 @@ import styles from './ComposeWindow.module.css'
  * must never be wrong is that a `Bcc` recipient is never carried into a reply, which is
  * enforced where the envelope is read rather than here where it is displayed.
  */
-
-/** A very loose check. The core validates properly; this only colours the chip. */
-function looksLikeAddress(value: string): boolean {
-  const at = value.indexOf('@')
-  return at > 0 && at < value.length - 1 && !/\s/.test(value)
-}
 
 /** Turns a chip back into an address the core understands. */
 function toAddress(token: Token): ComposeAddress {

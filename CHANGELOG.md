@@ -4216,3 +4216,164 @@ because its agents had died. None of the five is a false alarm.
   apart.
 - Both remaining known gaps are unchanged and still recorded: rules and junk filing on servers
   without CONDSTORE, and Ctrl+↑/↓.
+
+---
+
+## 2026-09-03 — The last 31 leads, and the batch everyone assumed was noise
+
+The medium and low severity findings in `docs/BUG-HUNT-2026-09-02.md`, which had never been
+adjudicated. **Thirteen were real**; three were not. Every lead in that document now carries an
+outcome: 51 fixed, 4 that were not bugs or were already fixed, 14 confirmed and left, 2 unsettled.
+
+The hit rate is the part worth carrying forward. This was the batch nobody had looked at because
+the severities were low, and it held data loss, a permanently blank message row, an outbox row
+transmitted before its bytes existed, a search field that could never match, an attachment class
+that could never be opened, and every message-list mutation swallowing its errors in silence.
+
+### Fixed — data loss
+
+- **`msg_move` accepted a destination in another account.** IMAP cannot move a message between
+  servers, so it only ever happened locally: the row kept its `account_id` and took the other
+  account's `mailbox_id`, and the queued operation asked the _source_ server to move mail into a
+  path that exists on a different one. That op failed its five attempts and was dropped, so the
+  two sides never reconciled — and on the next sync of the destination mailbox
+  `reconcile_expunged` found a local row the server had never listed and deleted it. The message
+  was gone, from a menu entry that looks like every other folder. `transfer/import`'s module
+  header describes the same mechanism destroying an imported archive, which is why local mail is
+  kept in an account that never syncs. Refused now, before the write, so the refusal reaches the
+  user as a sentence rather than a rolled-back transaction.
+
+- **`claim_due` could transmit an outbox row before its bytes existed.** `enqueue` inserts the
+  row, writes the file, then records the path — it needs the row id to name the file — and its
+  comment justified that order by saying `holding` is never transmitted. `claim_due` selects
+  `holding`, and with Undo Send switched off `send_after` is already in the past the moment the
+  row appears. A tick landing in the few milliseconds between the insert and the path update read
+  `""`, and `SendError::Unreadable` is not retryable, so the loop set `attempts` to the maximum
+  and reported the message as never sent — while its bytes were on disk and perfectly good.
+  Claiming now requires a non-empty path, which is the invariant that was actually holding this
+  together, and `sweep_unwritten` resolves rows from a crashed `enqueue` at the next start rather
+  than leaving them in the outbox for ever.
+
+### Fixed — things that could never work
+
+- **`message.attachment_names` was never written.** The FTS table has carried the column since
+  the first migration and `Field::AttachmentName` reads the same one, but only the seeder and the
+  tests ever populated it. So searching for a document somebody sent you matched nothing, and a
+  rule conditioned on an attachment name could not fire. Both failed by returning no results,
+  which is indistinguishable from having none. Written now when the body is parsed, non-inline
+  names only — for the same reason the paperclip is non-inline, since every newsletter carries a
+  tracking pixel.
+
+- **A single-part attachment could never be opened.** `bodies::walk` starts with an empty path and
+  only extends it when descending into subparts, so a message whose _whole body_ is the
+  attachment — a bare PDF, a scanner's output — records `part_id = ""`. `part_at` split that into
+  one empty segment, failed to parse it as an index, and returned `None`. The attachment appeared
+  in the list with its name and size and could be neither previewed nor saved.
+
+- **Every recipient picked from the autocomplete rendered as an invalid red chip.**
+  `RecipientField` commits suggestions as `Ada Lovelace <ada@example.test>` on purpose, so the
+  message carries the name the mailbox already knows — and `looksLikeAddress` tested the whole
+  token, rejecting anything containing whitespace. So did every address pasted in the
+  `Name <addr>` form, which `toAddress` exists to accept. The check now looks at the address
+  inside the brackets, and is exported with a unit test of its own.
+
+### Fixed — silent failures
+
+- **Every message-list mutation swallowed its errors.** `useSetFlags`, `useToggleRead`,
+  `useToggleFlag`, `useArchiveMessages`, `useMoveMessages` and `useDeleteMessages` each had an
+  `onSuccess` and nothing else, so a rejected command was caught by TanStack Query, stored in a
+  state nothing read, and vanished. Pressing Delete on a selection the core refuses left the
+  messages exactly where they were with no error anywhere. Without this the cross-account move
+  refusal above would have been invisible — the user picks a folder and nothing happens at all.
+  A rejected Tauri command arrives as `{ code, message }` rather than an `Error`, so the shared
+  reporter extracts the sentence instead of rendering "[object Object]".
+
+- **An unsolicited FETCH was stored as a permanent blank message row.** A server may send a FETCH
+  in the middle of a `UID FETCH` — another client marking a message read is the ordinary cause —
+  and such a response carries a UID and FLAGS and nothing else. `from_attributes` required only
+  the UID, so it built a message with an empty envelope, no subject, no sender and
+  `date_received = 0`, which sorted to the bottom of the mailbox and stayed there: later syncs
+  find the UID present and update only its flags, by design, so nothing ever filled it in.
+  `fetch_items` always asks for ENVELOPE, so requiring one is exactly the difference between a
+  reply to the command and an aside about something else.
+
+- **A failed thread fetch claimed "No Message Selected"** while a message plainly was selected —
+  the same confusion as the message list's, in the pane next to it. And **deleting or moving the
+  open message left the reader rendering it in full**, because `invalidateAfterMutation` never
+  touched the thread key.
+
+### Fixed — correctness
+
+- **`split_plain_quote` truncated the visible half of every CRLF reply.** The offset of the quote
+  was computed as `line.len() + 1` per line, but `str::lines` strips `\r\n` as well as `\n`, so it
+  under-counted by a byte on every line — and mail is CRLF. A ten-line reply lost its last ten
+  bytes from the part the reader shows, which reads as a message stopping mid-word just above the
+  quote. It could also land mid-character, in which case `text.get` returned `None` and the quote
+  was not folded at all. Measured against the text now, rather than assumed from the line count.
+
+- **Redirect wrote display names as raw bytes.** `mailbox()` hands names to lettre, which RFC 2047
+  encodes them, and its comment says exactly why that matters: written by hand is "where names
+  turn into mojibake, and the sender never finds out". The `Resent-` block is written by hand.
+  Encoded now, split into encoded-words inside the 75-character limit, with the injection guard on
+  quotes and backslashes kept for the ASCII path.
+
+- **The unread badge counted snoozed messages the list refuses to show.** `messages_page` filters
+  on `snooze_until IS NULL OR snooze_until <= now` and `recount` did not, so the sidebar showed
+  unread mail that could not be found anywhere — a badge reading cannot clear, which teaches the
+  user to stop believing the number. `upkeep::tick` now recounts when a reminder wakes, or the
+  badge would stay behind until something else happened to touch that mailbox.
+
+### Not bugs
+
+- **"Search results never refresh after a mutation; the `['search']` invalidation is dead."**
+  `invalidateQueries({ queryKey: ['search'] })` is a _prefix_ match in TanStack Query, so it does
+  match `['search', text, mailboxIds]`. The invalidation works.
+- **"A search that matches nothing shows a blank pane."** There is a "No messages match that
+  search" empty state, with its own icon and advice about widening the scope.
+- **"A failed IMAP XOAUTH2 sign-in hangs 10s."** Already fixed, with a test named after the
+  deadlock: Gmail answers a failed XOAUTH2 with a second continuation and waits for an empty line,
+  and replying with the credential again left both ends waiting. The `sent` flag resolves it.
+
+### Notes — confirmed and deliberately left
+
+Fourteen findings are real and recorded rather than fixed. Two need a decision that is not the
+implementer's to make:
+
+- **The SQL and in-memory predicate engines disagree on any non-ASCII letter.** The in-memory side
+  uses `to_lowercase`, which is Unicode-aware; SQLite's `LIKE` folds ASCII only. The comment
+  beside the Rust code says it matches the SQL side deliberately — it does, for ASCII, and the two
+  part company on every accented capital. Making them agree means _weakening_ the in-memory side
+  to ASCII folding, which is worse for anyone whose mail is not in English, and the alternative is
+  registering a Unicode-aware collation in SQLite and re-testing every query that uses `LIKE`.
+- **PST `String8` properties are decoded as UTF-8.** They are code-page text in an ANSI store, so
+  every non-ASCII character becomes a replacement character. Decoding as Windows-1252 would be
+  right for Western European archives and wrong for Cyrillic or Greek ones, and the store records
+  its code page — using it is the correct fix and needs a real ANSI `.pst` to verify against.
+
+The rest are contained enough to schedule: the `contact` table nothing writes (so the People group
+in search suggestions can never populate), undo restoring a junk flag while leaving the classifier
+trained on it, `bodies_ensure` spawning an unbounded number of IMAP connections, mailboxes that
+vanish from the server never leaving the sidebar, keyboard users being unable to move between
+sidebar rows, destructive shortcuts firing while a modal has focus, and the first junk scan
+sweeping the whole backlog rather than what just arrived.
+
+Two could not be settled either way and are marked as such: whether a mailbox emptied on the
+server is left populated locally (the CONDSTORE path reconciles it correctly, so this may be
+subsumed by the CONDSTORE gap already recorded), and whether muting survives re-threading (largely
+mitigated by today's key-stability fix, but a genuine merge still moves the conversation onto the
+older thread's mute state).
+
+### Incidents
+
+- **Giving the mutations an error toast took the whole window down to a blank page**, and every
+  e2e test with it. `ToastProvider` was rendered _by_ `Shell`, which cannot cover `Shell`'s own
+  hooks — a component's hooks run before anything it returns exists — and `useSystemEvents` is one
+  of them. It had never mattered because nothing up there needed a toast. The provider now wraps
+  `Shell` from outside. Caught by the gate rather than by review, which is the argument for
+  running it before every commit rather than at the end.
+- **A regex written to add `onError` to six hooks matched fifteen places.** Reverted and redone by
+  locating each hook by its own `mutationFn` instead. A pattern that is nearly right across a file
+  is worse than one that fails outright.
+- **Bash ate the backticks** in a `node -e` writing markdown, so `` `msg_move` `` reached the
+  document as nothing at all. Same class as the earlier backslash mangling; the editing tools do
+  not have this problem and should have been used.
