@@ -73,6 +73,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "gmail_thread_id",
         sql: include_str!("../../migrations/0010_gmail_thread_id.sql"),
     },
+    Migration {
+        version: 11,
+        name: "backfill_contacts",
+        sql: include_str!("../../migrations/0011_backfill_contacts.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.

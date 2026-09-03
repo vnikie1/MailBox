@@ -463,4 +463,85 @@ mod tests {
 
         assert_eq!(found, 1, "a non-ASCII capital was not matched");
     }
+
+    #[tokio::test]
+    async fn the_contact_index_is_filled_from_mail_already_here() {
+        // `persist::write_batch` records senders as messages arrive, which covers everything
+        // from now on and nothing from before. An install with a mailbox already downloaded
+        // would have an empty People group for weeks, until enough new mail arrived — and the
+        // people worth suggesting are the ones already in the mailbox. Migration 0011 is the
+        // one-time pass that fixes that, so this asserts it against a store seeded the way a
+        // real one is: rows written before the migration ran.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("test.db");
+
+        {
+            // A store at the schema *before* the backfill, with mail in it.
+            let mut conn = rusqlite::Connection::open(&path).expect("open");
+            crate::db::migrate::run(&mut conn).expect("migrate");
+            conn.execute("DELETE FROM contact", []).expect("clear");
+
+            conn.execute(
+                "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+                 VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+                [],
+            )
+            .expect("account");
+            conn.execute(
+                "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+                 VALUES (1, 1, 'INBOX', 'Inbox', 'inbox')",
+                [],
+            )
+            .expect("mailbox");
+
+            let people = [
+                (1, "Ada Lovelace", "ada@example.test", 100),
+                (2, "A. Lovelace", "ADA@example.test", 200),
+                (3, "Grace Hopper", "grace@example.test", 150),
+            ];
+
+            for (id, name, addr, received) in people {
+                conn.execute(
+                    "INSERT INTO message (
+                         id, account_id, mailbox_id, uid, subject, date_sent, date_received,
+                         size, from_name, from_addr, from_all, to_all, body_text,
+                         has_attachment, flag_seen, flag_flagged, is_junk
+                     ) VALUES (?1, 1, 1, ?1, 'S', 0, ?4, 10, ?2, ?3, ?3, '', '', 0, 0, 0, 0)",
+                    rusqlite::params![id, name, addr, received],
+                )
+                .expect("message");
+            }
+
+            // Re-run the backfill by hand, as the migration does on an existing store.
+            conn.execute_batch(include_str!("../../migrations/0011_backfill_contacts.sql"))
+                .expect("backfill");
+        }
+
+        let db = Db::open(&path).expect("open");
+
+        let people: Vec<(String, Option<String>, i64)> = db
+            .read(|conn| {
+                Ok(conn
+                    .prepare("SELECT addr, name, seen_count FROM contact ORDER BY addr")?
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await
+            .expect("read");
+
+        assert_eq!(
+            people.len(),
+            2,
+            "addresses were not folded to one contact each"
+        );
+
+        let ada = &people[0];
+        assert_eq!(ada.0, "ada@example.test", "the key is not case-folded");
+        assert_eq!(ada.2, 2, "both messages from Ada should be counted");
+        assert_eq!(
+            ada.1.as_deref(),
+            Some("A. Lovelace"),
+            "the most recent name is the one worth offering"
+        );
+    }
 }
