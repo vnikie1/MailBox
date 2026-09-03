@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import {
   useInfiniteQuery,
   useMutation,
@@ -18,6 +18,7 @@ import type { FlagName } from '@/lib/generated/FlagName'
 import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
 import type { Vip } from '@/lib/generated/Vip'
 import { flagNames, smartList, smartMessages, vipsList } from '@/lib/organise'
+import { useToast } from '@/ui'
 import * as ipc from '@/lib/ipc'
 
 /**
@@ -164,10 +165,52 @@ function invalidateAfterMutation(client: QueryClient): void {
   void client.invalidateQueries({ queryKey: ['messages'] })
   void client.invalidateQueries({ queryKey: keys.mailboxes })
   void client.invalidateQueries({ queryKey: ['search'] })
+  // The reader reads a *thread*, and deleting or moving the open message changes one. Without
+  // this the row left the list while the reader went on rendering the message in full --
+  // headers, body, attachments -- as though nothing had happened.
+  void client.invalidateQueries({ queryKey: ['thread'] })
+}
+
+/**
+ * The sentence out of whatever the core rejected a command with.
+ *
+ * A rejected Tauri command arrives as `{ code, message }`, which is not an `Error` -- so the
+ * usual `instanceof Error ? message : String(cause)` renders it as "[object Object]".
+ */
+function reasonFor(cause: unknown): string {
+  if (cause instanceof Error) return cause.message
+  // `'message' in cause` already narrows the type, so no assertion is needed here.
+  if (typeof cause === 'object' && cause !== null && 'message' in cause) {
+    return String(cause.message)
+  }
+  return String(cause)
+}
+
+/**
+ * Reports a mutation that did not happen.
+ *
+ * Every mutation below had an `onSuccess` and nothing else, so a rejected command was caught
+ * by TanStack Query, stored in a state nothing read, and vanished. Pressing Delete on a
+ * selection the core refuses left the messages exactly where they were, with no error anywhere
+ * -- the failure this app keeps producing, and the one hardest to trust your own eyes about.
+ */
+function useMutationProblem(): (cause: unknown) => void {
+  const toast = useToast()
+
+  return useCallback(
+    (cause: unknown) => {
+      toast.show({
+        title: 'That change could not be made',
+        description: reasonFor(cause),
+      })
+    },
+    [toast],
+  )
 }
 
 export function useSetFlags() {
   const client = useQueryClient()
+  const problem = useMutationProblem()
 
   return useMutation({
     mutationFn: ({ ids, patch }: { ids: number[]; patch: FlagPatch }) =>
@@ -181,11 +224,13 @@ export function useSetFlags() {
         void client.invalidateQueries({ queryKey: keys.message(id) })
       }
     },
+    onError: problem,
   })
 }
 
 export function useToggleRead() {
   const client = useQueryClient()
+  const problem = useMutationProblem()
 
   return useMutation({
     mutationFn: (ids: number[]) => ipc.msgToggleRead(ids),
@@ -199,11 +244,13 @@ export function useToggleRead() {
       // changes in the list while the open message stays bold.
       void client.invalidateQueries({ queryKey: ['thread'] })
     },
+    onError: problem,
   })
 }
 
 export function useToggleFlag() {
   const client = useQueryClient()
+  const problem = useMutationProblem()
 
   return useMutation({
     mutationFn: (ids: number[]) => ipc.msgToggleFlag(ids),
@@ -215,11 +262,13 @@ export function useToggleFlag() {
       }
       void client.invalidateQueries({ queryKey: ['thread'] })
     },
+    onError: problem,
   })
 }
 
 export function useArchiveMessages() {
   const client = useQueryClient()
+  const problem = useMutationProblem()
 
   return useMutation({
     mutationFn: (ids: number[]) => ipc.msgArchive(ids),
@@ -227,11 +276,13 @@ export function useArchiveMessages() {
       ipc.notifyBrowserMailboxChange([])
       invalidateAfterMutation(client)
     },
+    onError: problem,
   })
 }
 
 export function useMoveMessages() {
   const client = useQueryClient()
+  const problem = useMutationProblem()
 
   return useMutation({
     mutationFn: ({ ids, mailboxId }: { ids: number[]; mailboxId: number }) =>
@@ -239,11 +290,13 @@ export function useMoveMessages() {
     onSuccess: () => {
       invalidateAfterMutation(client)
     },
+    onError: problem,
   })
 }
 
 export function useDeleteMessages() {
   const client = useQueryClient()
+  const problem = useMutationProblem()
 
   return useMutation({
     mutationFn: ({ ids, permanent }: { ids: number[]; permanent: boolean }) =>
@@ -251,6 +304,7 @@ export function useDeleteMessages() {
     onSuccess: () => {
       invalidateAfterMutation(client)
     },
+    onError: problem,
   })
 }
 

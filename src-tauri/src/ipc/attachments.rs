@@ -122,6 +122,18 @@ fn part_at<'a>(
     root: &'a mailparse::ParsedMail<'a>,
     part_id: &str,
 ) -> Option<&'a mailparse::ParsedMail<'a>> {
+    // An empty id is the message itself, and that is a real case rather than a defensive one.
+    // `bodies::walk` starts with an empty path and only extends it when descending into
+    // subparts, so a message whose *whole body* is the attachment -- a bare PDF, a scanner's
+    // output, anything sent with no multipart wrapper -- records `part_id = ""`.
+    //
+    // Without this the loop below runs once on the empty segment, `"".parse::<usize>()` fails,
+    // and the whole function returns None: the attachment showed in the list, with its name and
+    // size, and could be neither previewed nor saved.
+    if part_id.is_empty() {
+        return Some(root);
+    }
+
     let mut current = root;
 
     for step in part_id.split('.') {

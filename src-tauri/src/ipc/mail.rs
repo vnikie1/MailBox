@@ -498,6 +498,18 @@ pub async fn msg_set_flags(
 
 /// Recorded on the undo stack, for the same reason archive is — see `msg_archive`. Moving mail
 /// to the wrong folder is the mistake undo exists for.
+///
+/// **The destination has to belong to the same account as the messages**, and that is a
+/// data-loss guard rather than tidiness. IMAP has no notion of moving a message between two
+/// servers, so such a move only ever happened locally: the row kept its `account_id` and took
+/// the other account's `mailbox_id`, and the queued operation asked the *source* server to move
+/// mail into a path that exists on a different one. The op then failed its five attempts and
+/// was dropped, so the two sides never reconciled — and on the next sync of the destination
+/// mailbox, `reconcile_expunged` found a local row the server had never listed and deleted it.
+/// The message was gone, from a menu entry that looked like every other folder.
+///
+/// `transfer/import`'s module header describes the same mechanism destroying an imported
+/// archive, which is why local rows are kept in an account that never syncs.
 #[tauri::command]
 pub async fn msg_move(
     app: AppHandle,
@@ -507,6 +519,61 @@ pub async fn msg_move(
     mailbox_id: i64,
 ) -> Response<usize> {
     let affected = ids.clone();
+
+    // Checked before the write rather than inside it, so the refusal reaches the user as a
+    // message instead of a rolled-back transaction.
+    {
+        let affected = affected.clone();
+        let crossing = db
+            .read(move |conn| {
+                let destination: Option<i64> = conn
+                    .query_row(
+                        "SELECT account_id FROM mailbox WHERE id = ?1",
+                        rusqlite::params![mailbox_id],
+                        |row| row.get(0),
+                    )
+                    .ok();
+
+                let Some(destination) = destination else {
+                    return Ok(true);
+                };
+
+                let placeholders = (0..affected.len())
+                    .map(|index| format!("?{}", index + 2))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                if placeholders.is_empty() {
+                    return Ok(false);
+                }
+
+                let sql = format!(
+                    "SELECT COUNT(*) FROM message
+                      WHERE id IN ({placeholders}) AND account_id <> ?1"
+                );
+
+                let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(destination)];
+                params.extend(
+                    affected
+                        .iter()
+                        .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>),
+                );
+
+                let refs: Vec<&dyn rusqlite::ToSql> =
+                    params.iter().map(std::convert::AsRef::as_ref).collect();
+
+                let elsewhere: i64 = conn.query_row(&sql, refs.as_slice(), |row| row.get(0))?;
+                Ok(elsewhere > 0)
+            })
+            .await?;
+
+        if crossing {
+            return Err(AppError {
+                code: "crossAccount".into(),
+                message: "A message can only be moved to a folder in its own account.".into(),
+            });
+        }
+    }
 
     let (changed, mut mailboxes, step) = db
         .write(move |tx| {

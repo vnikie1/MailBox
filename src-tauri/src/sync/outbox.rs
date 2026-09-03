@@ -138,9 +138,17 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
 
 /// Puts a built message into the outbox, in `holding`.
 ///
-/// The bytes are written **before** the row is inserted. A crash between the two leaves an
-/// orphan file, which costs disk; the other order leaves a row pointing at nothing, which
-/// costs the message.
+/// The row is inserted **first**, because the file is named after the row id, and its path is
+/// filled in once the bytes are on disk. This comment used to claim the opposite order and
+/// explain why that was safer, which made the actual ordering look considered when it was not.
+///
+/// A row with an empty `eml_path` is therefore a message whose bytes are not written yet, and
+/// `claim_due` refuses to transmit one. That is the invariant holding this together — not the
+/// `holding` state, which is claimable the moment `send_after` passes and is immediately in the
+/// past when Undo Send is switched off.
+///
+/// A crash between the two steps leaves a row with no path and no file. `sweep_unwritten`
+/// resolves those at the next start rather than leaving them in the outbox for ever.
 pub async fn enqueue(
     db: &Db,
     root: &Path,
@@ -242,11 +250,22 @@ pub async fn claim_due(db: &Db, account_id: Option<i64>) -> Result<Vec<Entry>, D
     let at = now();
 
     db.write(move |tx| {
+        // `eml_path <> ''` is load-bearing, not tidiness. `enqueue` inserts the row before it
+        // writes the file — it needs the row id to name the file — and fills the path in
+        // afterwards. Its comment justifies that order by saying `holding` is never
+        // transmitted, and this query is where that was untrue: it selects `holding` too, and
+        // with Undo Send off `send_after` is already in the past the moment the row exists.
+        //
+        // So a tick landing in the few milliseconds between the insert and the path update
+        // claimed a row with no path, `std::fs::read("")` failed, and `SendError::Unreadable`
+        // is not retryable — so the loop jumped `attempts` to the maximum and reported the
+        // message as never sent, while its bytes were on disk and perfectly good.
         let mut statement = tx.prepare(
             "SELECT * FROM outbox
               WHERE state IN ('holding', 'queued', 'failed')
                 AND send_after <= ?1
                 AND attempts < ?2
+                AND eml_path <> ''
                 AND (?3 IS NULL OR account_id = ?3)
               ORDER BY created_at ASC",
         )?;
@@ -313,6 +332,35 @@ pub fn mark_attempt_failed(
     )?;
 
     Ok(state)
+}
+
+/// Resolves rows whose bytes were never written, from an `enqueue` that did not finish.
+///
+/// `enqueue` inserts the row, writes the file, then records the path, so a crash in the middle
+/// leaves a row with an empty `eml_path` and no file behind it. `claim_due` refuses to transmit
+/// those — correctly, since there is nothing to send — but that alone would leave them sitting
+/// in the outbox for ever, shown to the user as a message perpetually about to go.
+///
+/// Marked failed rather than deleted. The message really was lost, and docs/06 Phase 7 says
+/// never to drop one silently; a row saying so is the only trace the user will ever get that
+/// something they wrote did not survive.
+///
+/// Returns how many were resolved.
+pub async fn sweep_unwritten(db: &Db) -> Result<usize, DbError> {
+    db.write(move |tx| {
+        let changed = tx.execute(
+            "UPDATE outbox
+                SET state = 'failed',
+                    attempts = ?1,
+                    last_error = 'The message was not fully saved before Halcyon closed, so it
+                                  could not be sent.'
+              WHERE eml_path = '' AND state <> 'sent'",
+            params![MAX_ATTEMPTS],
+        )?;
+
+        Ok(changed)
+    })
+    .await
 }
 
 /// Rows left in `sending` by a process that died. See the module header.

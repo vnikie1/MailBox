@@ -130,6 +130,15 @@ fn announce(events: &dyn Events, entry: &Entry, state: State, error: Option<&str
 
 /// Resolves sends that a previous process left in flight. See `outbox`'s module header.
 pub async fn recover(events: &dyn Events, db: &Db) -> Result<(), SyncError> {
+    // First: rows from an `enqueue` that never finished writing its bytes. They can never be
+    // sent, and `claim_due` will not pick them up, so without this they sit in the outbox
+    // looking like a message still on its way.
+    match outbox::sweep_unwritten(db).await {
+        Ok(0) => {}
+        Ok(count) => tracing::warn!(count, "outbox rows had no message bytes; marked failed"),
+        Err(error) => tracing::warn!(%error, "could not sweep unwritten outbox rows"),
+    }
+
     let stranded = outbox::interrupted(db).await?;
     if stranded.is_empty() {
         return Ok(());

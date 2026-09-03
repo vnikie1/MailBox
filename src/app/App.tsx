@@ -44,7 +44,7 @@ function Shell() {
   const { firstRun } = useAccountsGate()
 
   return (
-    <ToastProvider>
+    <>
       <SyncContext.Provider value={sync}>
         <AppShell />
       </SyncContext.Provider>
@@ -53,9 +53,8 @@ function Shell() {
           message is still held, so the banner has to be visible from wherever the user is. */}
       <OutboxBanner />
 
-      {/* Inside the provider, because the assistant reports what it did with a toast. */}
       <FirstRun firstRun={firstRun} />
-    </ToastProvider>
+    </>
   )
 }
 
@@ -64,7 +63,15 @@ export function App() {
 
   return (
     <QueryClientProvider client={client}>
-      <Shell />
+      {/* Outside `Shell` rather than inside it, so the hooks in `Shell`'s own body are within
+          the provider too. It used to be rendered *by* `Shell`, which cannot cover them: a
+          component's hooks run before anything it returns exists. That went unnoticed until a
+          hook up there needed a toast — `useSystemEvents` calls the archive and mark-read
+          mutations, and giving those an error toast made `useToast` throw during render and
+          took the whole window down to a blank page. */}
+      <ToastProvider>
+        <Shell />
+      </ToastProvider>
     </QueryClientProvider>
   )
 }

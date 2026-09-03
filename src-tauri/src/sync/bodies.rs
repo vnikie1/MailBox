@@ -515,6 +515,25 @@ pub fn persist(
     // mailbox where the paperclip means nothing.
     let has_attachment = body.attachments.iter().any(|a| !a.is_inline);
 
+    // The filenames, for search and for rules.
+    //
+    // `message_fts` has carried an `attachment_names` column since the first migration and
+    // `Field::AttachmentName` reads the same column, but nothing outside the seeder and the
+    // tests had ever written it. So searching for a document somebody sent you matched
+    // nothing, and a rule conditioned on an attachment name could not fire — both failing by
+    // returning no results, which is indistinguishable from having none.
+    //
+    // Non-inline only, for the same reason the paperclip above is: every HTML newsletter
+    // carries an inline tracking pixel, and a rule about attachment names should not be
+    // matching those.
+    let attachment_names = body
+        .attachments
+        .iter()
+        .filter(|attachment| !attachment.is_inline)
+        .filter_map(|attachment| attachment.filename.as_deref())
+        .collect::<Vec<_>>()
+        .join(" ");
+
     tx.execute(
         "UPDATE message
             SET body_text = ?2,
@@ -522,7 +541,8 @@ pub fn persist(
                 preview = ?4,
                 body_state = 'full',
                 raw_path = ?5,
-                has_attachment = ?6
+                has_attachment = ?6,
+                attachment_names = ?7
           WHERE id = ?1",
         params![
             message_id,
@@ -531,6 +551,7 @@ pub fn persist(
             body.preview,
             raw_path.map(|path| path.to_string_lossy().to_string()),
             i64::from(has_attachment),
+            attachment_names,
         ],
     )?;
 

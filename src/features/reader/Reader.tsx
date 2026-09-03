@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import {
+  AlertTriangle,
   ChevronDown,
   CornerUpRight,
   Forward,
@@ -311,7 +312,7 @@ export function Reader({ toolbar }: ReaderProps) {
   // Threading is populated by the sync engine in Phase 5; until then a thread is the one
   // message, and thread_get returns exactly that. The reader is written for the general
   // case either way, so nothing here changes when real threads arrive.
-  const { data: messages = [] } = useThread(only ?? null)
+  const { data: messages = [], isError: threadFailed } = useThread(only ?? null)
 
   // Whatever the reader shows must be what gets fetched. The list prefetch cannot cover this:
   // a thread reaches across mailboxes, so a message in the conversation may never appear as a
@@ -375,12 +376,18 @@ export function Reader({ toolbar }: ReaderProps) {
         <EmptyState
           className={styles.empty}
           variant="hero"
-          icon={Mail}
+          icon={threadFailed ? AlertTriangle : Mail}
           title={
-            selectedMessageIds.length > 1
-              ? `${String(selectedMessageIds.length)} Messages Selected`
-              : 'No Message Selected'
+            // A failed read is not an empty selection. Saying "No Message Selected" while a
+            // message plainly is selected tells the user they clicked wrong, and sends them
+            // clicking again at something that will fail the same way.
+            threadFailed
+              ? 'This conversation could not be loaded'
+              : selectedMessageIds.length > 1
+                ? `${String(selectedMessageIds.length)} Messages Selected`
+                : 'No Message Selected'
           }
+          description={threadFailed ? 'The mail store could not be read.' : undefined}
         />
       )}
     </div>
