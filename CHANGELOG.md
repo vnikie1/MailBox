@@ -4132,3 +4132,87 @@ of user and password>` on screen, and that base64 is trivially reversible.
   earlier today meant reading the stored token expiry out of the database by hand. The detail
   belongs in the log line; `describe()` is what keeps protocol text away from the user, and the
   log is not the user.
+
+---
+
+## 2026-09-03 — The five leads left over, and all five were real
+
+The remainder of `docs/BUG-HUNT-2026-09-02.md`. Each was re-derived from the source before
+anything was changed, because the two automated passes over these same leads had already proved
+untrustworthy in opposite directions — one confirmed everything, the other rejected everything
+because its agents had died. None of the five is a false alarm.
+
+### Fixed — data correctness
+
+- **Every draft autosave appended another copy to the server, and never replaced one.**
+  `draft.remote_uid` is what `Op::AppendDraft { replaces }` is read from. It was declared in the
+  first drafts migration, read in exactly one place, and **written nowhere** — so `replaces` was
+  always `None`, the delete-the-old-copy branch never ran, and ten minutes of typing left twenty
+  copies in Drafts on every device the user owns. The comment beside the column in
+  `0006_drafts.sql` had described that exact outcome from the beginning: _"without it, thirty
+  seconds of typing produces one draft per save in every other client the user owns."_
+
+  It broke the conflict check as well. `other_copies` excludes only `ours`, so with `replaces`
+  absent every copy this app had appended itself counted as another device's work: from the
+  second save onward the draft was flagged as edited in two places, and the warning was about
+  copies it had made. The UID is now found by searching for the draft's own `Message-ID` after
+  the append — async-imap does not surface the UIDPLUS `APPENDUID`, and a search needs no
+  extension.
+
+- **An empty newest page marked the entire mailbox as backfilled.** The newest page is a numeric
+  UID _range_ — the 500 slots below `uid_next` — and on a mailbox archived from for years those
+  slots are mostly empty. The engine's own notes record the shape: the Gmail Inbox it was built
+  against holds 214 messages spread across 106,287 UIDs, so 500 consecutive slots holding nothing
+  live is unremarkable. An empty page yields `lowest_uid == 0`, and `stored.min(0.max(1))` turned
+  that into a cursor of 0 or 1. `backfill_window` keeps only UIDs strictly below the cursor, so it
+  returned `None` immediately, the walk never ran a single batch, and control fell straight
+  through to the line recording the backfill **complete**. `record_backfill_progress` only ever
+  moves the marker downwards, so nothing short of a UIDVALIDITY change would revisit it — every
+  older message in that mailbox unreachable for good, with no error anywhere. Extracted as
+  `backfill_start` so the decision is testable without a server.
+
+- **The rethread window split conversations rather than merely failing to merge them.** This is
+  the one worth being precise about, because the window itself is a documented, deliberate
+  approximation and the damage was not. `thread_key` is the smallest id **in the slice passed
+  in**, and `persist::rethread` normally passes a window of the newest 5,000 messages of an
+  account. A conversation older than the window is only partly inside it, so the visible half was
+  re-keyed to a new, higher key while the older half kept the original — a two-year-old thread
+  split in half by the act of receiving a reply. Nothing repaired it afterwards: every message
+  still had _a_ thread id, so `unthreaded_count` stayed zero and the full pass that would have
+  fixed it never ran again. `Assignment`'s own doc comment states the invariant the window broke:
+  the key is stable _"as long as the membership does not"_ change. A stored key now outranks a
+  row id, because it came from a pass that could see the whole conversation.
+
+- **PST import glued the original encoding headers onto an already-decoded body.**
+  `PR_TRANSPORT_MESSAGE_HEADERS` is worth keeping for what it says about the _message_ — the real
+  `Message-ID`, `References` and `Date` are what let an imported reply thread against mail that
+  was synced rather than imported. It was being kept whole, including what it says about the
+  _body_: `Content-Transfer-Encoding: base64`, or a `multipart/alternative` boundary. The body
+  attached underneath is `PR_BODY`, plain text MAPI has already decoded. So a parser
+  base64-decoded ordinary prose, or hunted for a boundary that was not there, and the message
+  imported with no readable body at all. The content headers are now dropped — with their folded
+  continuations, or a wrapped `Content-Type` would leave its boundary parameter behind as a line
+  of its own — and replaced with ones describing what is actually there, which is exactly what the
+  synthesised path fifteen lines below had always done.
+
+### Fixed — false failures
+
+- **A transient credential failure permanently failed an outgoing message.** Everything
+  `credential_for` could return became `SendError::Envelope`, which `is_retryable` does not cover,
+  so the loop set `attempts` to `MAX_ATTEMPTS - 1` and the message went straight to "was not sent"
+  on the first attempt — for a network blip while an OAuth token happened to be refreshing, having
+  never reached a mail server. `SyncError` already separates a credential the provider refused
+  from a provider that did not answer, and the send path now uses that answer through a dedicated
+  `SendError::Credential { retryable }`. The banner's wording for the two cases is now the same
+  wording the sidebar uses, because they are the same two situations.
+
+### Notes
+
+- The rethread fix deliberately does **not** attempt to propagate a merge across the window
+  boundary. Two established threads bridged by a new message settle on the older key, but members
+  of the higher-keyed thread that sit outside the window keep their old id until a full pass runs.
+  That is the pre-existing "incomplete merge" limitation the window's comment already accepts.
+  What is fixed is the _destructive_ half: a windowed pass can no longer take a correct thread
+  apart.
+- Both remaining known gaps are unchanged and still recorded: rules and junk filing on servers
+  without CONDSTORE, and Ctrl+↑/↓.
