@@ -582,45 +582,62 @@ pub async fn msg_delete(
             };
 
             let mut mailboxes = write::mailboxes_of(tx, &affected)?;
+            let mut changed = 0usize;
 
-            // Which mailbox is Trash depends on the account the messages are in, so it is
-            // resolved here rather than passed in — a UI that had to know would get it
-            // wrong the moment a selection spans two accounts.
-            let trash = trash_for(tx, &affected)?;
-            if let Some(trash_id) = trash {
-                if !mailboxes.contains(&trash_id) {
-                    mailboxes.push(trash_id);
+            // One account at a time, because "which mailbox is Trash" has a different answer
+            // for each of them.
+            //
+            // This used to resolve a single Trash for the whole selection, and `trash_for`
+            // returned None as soon as the selection spanned two accounts. Everything below
+            // then declined: the op loop hit its `None => continue`, and `write::delete`
+            // refuses without a Trash. So Delete did nothing at all, reported nothing, and
+            // left the messages where they were — in All Inboxes, the default view, where a
+            // selection spanning two accounts is the ordinary case rather than the odd one.
+            //
+            // `trash_for`'s own comment deferred this: "Phase 5 splits such a selection per
+            // account; until there is a sync engine to do that against, refusing is the
+            // honest behaviour." The sync engine arrived in Phase 5 and this never followed.
+            // `msg_archive` has resolved its destination per message since it was written.
+            for (account_id, ids_here) in accounts_of(tx, &affected)? {
+                let trash = trash_of_account(tx, account_id)?;
+
+                if let Some(trash_id) = trash {
+                    if !mailboxes.contains(&trash_id) {
+                        mailboxes.push(trash_id);
+                    }
                 }
-            }
 
-            // A non-permanent delete is a move to Trash, and is queued as one — the server
-            // must not be told to expunge mail the user expects to be recoverable.
-            let destination = match trash {
-                Some(trash_id) if !permanent => ops::mailbox_path(tx, trash_id)?,
-                _ => None,
-            };
-
-            for group in ops::locate(tx, &affected)? {
-                let op = match &destination {
-                    Some(to) if group.mailbox != *to => ops::Op::Move {
-                        from: group.mailbox,
-                        to: to.clone(),
-                        uids: group.uids,
-                    },
-                    Some(_) => continue,
-                    None if permanent => ops::Op::Delete {
-                        mailbox: group.mailbox,
-                        uids: group.uids,
-                    },
-                    // No Trash and not permanent: `write::delete` refuses too, so there is
-                    // nothing local to mirror.
-                    None => continue,
+                // A non-permanent delete is a move to Trash, and is queued as one — the server
+                // must not be told to expunge mail the user expects to be recoverable.
+                let destination = match trash {
+                    Some(trash_id) if !permanent => ops::mailbox_path(tx, trash_id)?,
+                    _ => None,
                 };
 
-                ops::enqueue(tx, group.account_id, &op)?;
+                for group in ops::locate(tx, &ids_here)? {
+                    let op = match &destination {
+                        Some(to) if group.mailbox != *to => ops::Op::Move {
+                            from: group.mailbox,
+                            to: to.clone(),
+                            uids: group.uids,
+                        },
+                        Some(_) => continue,
+                        None if permanent => ops::Op::Delete {
+                            mailbox: group.mailbox,
+                            uids: group.uids,
+                        },
+                        // No Trash and not permanent: `write::delete` refuses too, so there is
+                        // nothing local to mirror. This is now per account, so one account
+                        // without a Trash mailbox no longer silences the others.
+                        None => continue,
+                    };
+
+                    ops::enqueue(tx, group.account_id, &op)?;
+                }
+
+                changed += write::delete(tx, &ids_here, permanent, trash)?;
             }
 
-            let changed = write::delete(tx, &affected, permanent, trash)?;
             Ok((changed, mailboxes, step))
         })
         .await?;
@@ -633,15 +650,20 @@ pub async fn msg_delete(
     Ok(changed)
 }
 
-/// The Trash mailbox of the account these messages belong to.
+/// The given messages grouped by the account that owns them, each group in the input order.
 ///
-/// Returns `None` when the selection spans more than one account, because there is no
-/// single answer — the caller then refuses rather than moving mail somewhere arbitrary.
-/// Phase 5 splits such a selection per account; until there is a sync engine to do that
-/// against, refusing is the honest behaviour.
-fn trash_for(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Result<Option<i64>, DbError> {
+/// Deleting has to be done per account, because Trash is per account. This replaced a helper
+/// that resolved one Trash for the whole selection and gave up when there was more than one
+/// account in it -- which made Delete a silent no-op in All Inboxes.
+///
+/// Ordered rather than a `HashMap` so a delete of the same selection twice queues its
+/// operations in the same order, which makes a failure reproducible.
+fn accounts_of(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[i64],
+) -> Result<Vec<(i64, Vec<i64>)>, DbError> {
     if ids.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
     let placeholders = (0..ids.len())
@@ -649,29 +671,49 @@ fn trash_for(tx: &rusqlite::Transaction<'_>, ids: &[i64]) -> Result<Option<i64>,
         .collect::<Vec<_>>()
         .join(", ");
 
-    let sql = format!("SELECT DISTINCT account_id FROM message WHERE id IN ({placeholders})");
+    let sql = format!("SELECT id, account_id FROM message WHERE id IN ({placeholders})");
     let params: Vec<&dyn rusqlite::ToSql> =
         ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
 
-    let accounts: Vec<i64> = tx
+    let owned: std::collections::HashMap<i64, i64> = tx
         .prepare(&sql)?
-        .query_map(params.as_slice(), |row| row.get(0))?
-        .collect::<Result<Vec<_>, _>>()?;
+        .query_map(params.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
 
-    if accounts.len() != 1 {
-        return Ok(None);
+    let mut groups: Vec<(i64, Vec<i64>)> = Vec::new();
+
+    for id in ids {
+        // A message id with no row is one that has already gone -- a second delete of the same
+        // selection, or a message expunged elsewhere between the click and the write. Skipped
+        // rather than failing the whole batch.
+        let Some(account_id) = owned.get(id).copied() else {
+            continue;
+        };
+
+        match groups
+            .iter_mut()
+            .find(|(account, _)| *account == account_id)
+        {
+            Some((_, group)) => group.push(*id),
+            None => groups.push((account_id, vec![*id])),
+        }
     }
 
-    let account_id = accounts[0];
-    let trash = tx
+    Ok(groups)
+}
+
+/// The Trash mailbox of one account, if it has one.
+fn trash_of_account(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: i64,
+) -> Result<Option<i64>, DbError> {
+    Ok(tx
         .query_row(
             "SELECT id FROM mailbox WHERE account_id = ?1 AND role = 'trash' LIMIT 1",
             [account_id],
             |row| row.get(0),
         )
-        .ok();
-
-    Ok(trash)
+        .ok())
 }
 
 #[cfg(test)]
@@ -834,5 +876,81 @@ mod tests {
         add(&conn, 1, true);
 
         assert!(!any_unread(&conn, &[1, 999]).expect("query"));
+    }
+
+    /// A second account with its own Inbox and Trash, for the cross-account delete tests.
+    fn add_second_account(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (2, 'U', 'me@u.test', 'other', 'password', 'halcyon:u')",
+            [],
+        )
+        .expect("account");
+
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (10, 2, 'INBOX', 'Inbox', 'inbox'),
+                    (11, 2, 'Trash', 'Trash', 'trash')",
+            [],
+        )
+        .expect("mailboxes");
+
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                 from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+             ) VALUES (50, 2, 10, 50, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+            [],
+        )
+        .expect("message");
+    }
+
+    #[test]
+    fn a_selection_spanning_two_accounts_is_grouped_rather_than_refused() {
+        // Delete resolved one Trash for the whole selection and gave up when the selection
+        // held more than one account: no server op was queued and `write::delete` declined,
+        // so Delete did nothing and said nothing. All Inboxes is the default view, and a
+        // selection there routinely spans accounts.
+        let mut conn = store();
+        add(&conn, 1, false);
+        add(&conn, 2, false);
+        add_second_account(&conn);
+
+        let tx = conn.transaction().expect("tx");
+        let groups = accounts_of(&tx, &[1, 50, 2]).expect("grouped");
+
+        assert_eq!(
+            groups,
+            vec![(1, vec![1, 2]), (2, vec![50])],
+            "a mixed selection must split per account, in the order it was given"
+        );
+    }
+
+    #[test]
+    fn each_account_resolves_its_own_trash() {
+        let mut conn = store();
+        add(&conn, 1, false);
+        add_second_account(&conn);
+
+        let tx = conn.transaction().expect("tx");
+
+        // Account 1 has no Trash mailbox in this fixture; account 2 does.
+        assert_eq!(trash_of_account(&tx, 1).expect("trash"), None);
+        assert_eq!(trash_of_account(&tx, 2).expect("trash"), Some(11));
+    }
+
+    #[test]
+    fn grouping_skips_ids_that_no_longer_exist() {
+        // A second delete of the same selection, or a message expunged elsewhere between the
+        // click and the write. Skipping beats failing the whole batch over one missing row.
+        let mut conn = store();
+        add(&conn, 1, false);
+
+        let tx = conn.transaction().expect("tx");
+        assert_eq!(
+            accounts_of(&tx, &[1, 999]).expect("grouped"),
+            vec![(1, vec![1])]
+        );
+        assert!(accounts_of(&tx, &[]).expect("grouped").is_empty());
     }
 }

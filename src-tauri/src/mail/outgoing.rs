@@ -578,37 +578,31 @@ pub fn redirect(request: &Redirect<'_>) -> Result<Built, BuildError> {
         _ => generate_message_id(&request.from),
     };
 
+    // CRLF, not LF. Every one of these five lines used to end with a bare newline, which is
+    // what a literal line break inside a Rust string literal produces -- easy to write and
+    // invisible on screen, because the source looks exactly like the intended output.
+    //
+    // RFC 5322 §2.1 makes CRLF the line separator, and this block is *prepended* to the
+    // original message, whose own headers are already CRLF. The result was a header section
+    // that changed line ending partway down: strict servers reject it outright, and a parser
+    // that resynchronises on CRLF can run the Resent- block together with the first original
+    // header. For a redirect that is the worst possible place for it, because the headers that
+    // got mangled are the ones naming who the message is now going to.
     let mut block = String::new();
     block.push_str(&format!(
-        "Resent-From: {}
-",
+        "Resent-From: {}\r\n",
         header_list(std::slice::from_ref(&request.from))
     ));
 
     if !request.to.is_empty() {
-        block.push_str(&format!(
-            "Resent-To: {}
-",
-            header_list(&request.to)
-        ));
+        block.push_str(&format!("Resent-To: {}\r\n", header_list(&request.to)));
     }
     if !request.cc.is_empty() {
-        block.push_str(&format!(
-            "Resent-Cc: {}
-",
-            header_list(&request.cc)
-        ));
+        block.push_str(&format!("Resent-Cc: {}\r\n", header_list(&request.cc)));
     }
 
-    block.push_str(&format!(
-        "Resent-Date: {}
-",
-        request.date.trim()
-    ));
-    block.push_str(&format!(
-        "Resent-Message-ID: {resent_id}
-"
-    ));
+    block.push_str(&format!("Resent-Date: {}\r\n", request.date.trim()));
+    block.push_str(&format!("Resent-Message-ID: {resent_id}\r\n"));
 
     let mut bytes = Vec::with_capacity(block.len() + request.original.len());
     bytes.extend_from_slice(block.as_bytes());
@@ -695,16 +689,11 @@ mod threading_header_tests {
         let built = build(&draft).expect("build");
         let raw = String::from_utf8_lossy(&built.bytes).to_string();
 
-        // Headers fold across lines; unfold before matching, or a long References looks truncated.
-        let unfolded = raw
-            .replace(
-                "
- ", " ",
-            )
-            .replace(
-                "
-	", " ",
-            );
+        // Headers fold across lines; unfold before matching, or a long References looks
+        // truncated. CRLF, because that is what the builder emits -- unfolding on a bare LF
+        // leaves the carriage return sitting inside the header value, so a folded header still
+        // fails to match and the test reports the wrong thing about why.
+        let unfolded = raw.replace("\r\n ", " ").replace("\r\n\t", " ");
 
         assert!(
             unfolded.contains("In-Reply-To: <parent@example.test>"),
@@ -1237,6 +1226,45 @@ mod attachment_tests {
         assert!(
             output.ends_with(&String::from_utf8_lossy(&raw).to_string()),
             "the original was altered:\n{output}"
+        );
+    }
+
+    #[test]
+    fn every_resent_header_ends_with_crlf() {
+        // All five of these once ended with a bare LF, because a literal line break inside a
+        // Rust string literal produces one and the source looks exactly like the wanted output.
+        // RFC 5322 §2.1 requires CRLF, and this block is prepended to an original whose own
+        // headers already use it -- so the header section changed line ending partway down.
+        let raw = original();
+        let mut request = redirect_request(&raw);
+        request.cc = vec![address(None, "cc@example.test")];
+
+        let built = redirect(&request).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes).to_string();
+
+        for header in [
+            "Resent-From:",
+            "Resent-To:",
+            "Resent-Cc:",
+            "Resent-Date:",
+            "Resent-Message-ID:",
+        ] {
+            let start = output.find(header).unwrap_or_else(|| panic!("no {header}"));
+            let line_end = output[start..]
+                .find('\n')
+                .unwrap_or_else(|| panic!("{header} has no line ending"));
+
+            assert!(
+                output[start..start + line_end].ends_with('\r'),
+                "{header} ends with a bare LF:\n{output}"
+            );
+        }
+
+        // And nowhere in the block a lone LF that is not part of a CRLF.
+        let block = &output[..output.find("Resent-Message-ID:").expect("id") + 40];
+        assert!(
+            !block.replace("\r\n", "").contains('\n'),
+            "the resent block contains a bare newline:\n{block}"
         );
     }
 
