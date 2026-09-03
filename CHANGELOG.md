@@ -4377,3 +4377,117 @@ older thread's mute state).
 - **Bash ate the backticks** in a `node -e` writing markdown, so `` `msg_move` `` reached the
   document as nothing at all. Same class as the earlier backslash mangling; the editing tools do
   not have this problem and should have been used.
+
+---
+
+## 2026-09-03 — The fourteen that were left, including four features that were off
+
+Closes `docs/BUG-HUNT-2026-09-02.md`. All 71 findings now carry an outcome: 67 fixed, 4 that were
+not bugs or were already fixed, none open.
+
+Two of these had been written up as needing a judgement call. Both turned out to have a right
+answer rather than a trade-off, which is worth recording — "this needs a decision" was itself a
+failure to look hard enough.
+
+### Fixed — features that were silently absent
+
+- **Without CONDSTORE, rules, junk filing, arrival notifications and expunge handling never ran.**
+  All four live inside `incremental`, whose own comment said they run "here and nowhere else" —
+  true, and the bug. `incremental` requires a `HIGHESTMODSEQ`, which a server advertising neither
+  CONDSTORE nor QRESYNC never sends, so on those accounts the app quietly became one without
+  rules, without junk filtering, without notifications, and which never removed mail deleted on
+  another device. Nothing failed and no log line said so.
+
+  The arrival handling is now shared, and the guard its comment insists on became the caller's
+  responsibility: **only genuinely new messages are passed**. "New" means a UID at or above the
+  `uid_next` the previous sync recorded — the same question CONDSTORE answers with a modseq,
+  asked the only other way IMAP offers. A mailbox with no previous `uid_next` has never been
+  synced, so nothing counts, which is what stops rules running over an initial sync and, as that
+  comment warns, "empty[ing] their Inbox on first launch". Keyed on having a baseline rather than
+  on what the server advertises, so mail arriving during a long backfill gets its rules too.
+
+  Expunge reconciliation runs on the same path and is cheap when nothing has gone: it counts
+  local rows first and never touches the network unless there are more here than the server
+  admits to, which also makes it safe during an initial sync when this side is behind.
+
+- **Nothing ever wrote the `contact` table**, so the People group of the search suggestions could
+  not appear for anybody. The comment beside that query records an earlier bug in the same
+  feature — a wrong column name, swallowed by an `if let Ok` — and fixing the name did not help,
+  because there was nothing to select. Senders are recorded as messages are written, which covers
+  the initial sync, the backfill and every later arrival without any of them having to remember.
+
+- **Mailboxes that vanished from the server were never removed.** `persist` promised exactly this
+  and named the condition: a vanished mailbox is "left in place here and removed by the caller
+  only once it is sure". No caller ever was, so a folder deleted in webmail stayed in the sidebar
+  for the life of the install, with its messages in it and its unread count in the badge. Pruning
+  deletes mail through the cascade, so it runs only after a `LIST` that both completed — a
+  mid-stream error surfaces as `Err` rather than a short list — and returned something.
+
+### Fixed — the two that looked like judgement calls
+
+- **The SQL and in-memory predicate engines disagreed on every non-ASCII letter**, and so did
+  every search field. SQLite's `lower()` converts A-Z and nothing else; the needle is folded by
+  Rust's `to_lowercase`, which folds properly. This was written up as a choice between weakening
+  the Rust half to ASCII or registering a collation and re-testing every `LIKE`. It is neither:
+  SQLite accepts a replacement `lower()` through `create_scalar_function`, so one registration
+  makes every existing `LOWER(` in the codebase Unicode-aware. Both halves are now correct rather
+  than merely consistent, and searching `from:José` finds José.
+
+- **PST `String8` properties were decoded as UTF-8**, turning every non-ASCII character in an ANSI
+  archive into a replacement character — in subjects and bodies alike, silently, with the
+  original `.pst` often the only other copy. This was written up as a guess between Windows-1252
+  and being wrong for Cyrillic. The message declares its code page: `PR_INTERNET_CPID`, falling
+  back to `PR_MESSAGE_CODEPAGE`. Windows-1252 is now only the last resort, and even then it is
+  strictly better than UTF-8, which is wrong for every ANSI store rather than only the
+  non-Western ones.
+
+### Fixed — junk, keyboard, and the rest
+
+- **Undoing "Mark as Junk" left the training example in the corpus.** Ctrl+Z restored the flag
+  while the filter went on believing what the user had just retracted, and acting on it for every
+  message afterwards. `junk_mark` says the same thing about the opposite direction: "their
+  correction is only half applied and the filter keeps the belief that caused the mistake". The
+  undo arm is symmetric, so redo is the same code run the other way.
+- **The first junk scan swept the whole mailbox.** It scored every message with no score yet,
+  which on the first pass after the classifier became ready meant the entire backlog — mail read
+  and dealt with weeks earlier could be filed into Junk long after the fact, with no arrival to
+  explain it. It now scores what the caller just inserted, which it already knew.
+- **Keyboard users could not move between sidebar rows.** The rows use a roving `tabIndex`, which
+  is the right pattern for a tree and is only half of it; the other half is arrow keys, and there
+  were none. Tab reached whichever row was selected and then left the tree entirely. Focus moves
+  on the arrows now; Enter and Space still select, which is what ARIA asks for and also avoids
+  loading a different mailbox on every keypress.
+- **Destructive shortcuts fired behind an open sheet.** Delete pressed while "Move message to…"
+  was open deleted the selection the picker was about to move, and the sheet stayed over the
+  result — so the only visible effect was that choosing a folder afterwards did nothing.
+- **Ctrl+↑ and Ctrl+↓ are bound at last.** `parseChord` rejected every arrow, modified or not, so
+  the dispatcher skipped both rows and no handler was ever written; they had been in the Help
+  sheet since Phase 10. A bare arrow still belongs to the focused control, but a modified arrow
+  is an ordinary chord that happens to be drawn with a glyph. The reader had no notion of a
+  position inside a thread either, so it has one now — in the store, where the chord can reach it.
+- **Muting did not survive re-threading.** Mute is a property of the `thread` row and a merge
+  moves messages onto a different thread id, so a muted conversation stopped being muted by
+  absorbing a message. The user had said "not now" and the app resumed announcing it.
+- **`bodies_ensure` spawned an unbounded number of IMAP connections.** It opens one per call, and
+  the reader asks on every selection change with three rows of prefetch — so holding an arrow key
+  down asked for a fresh connection per keypress, which is how an address gets rate-limited.
+  Bounded at two, inside the per-account budget in docs/03 §5.
+- **A maildir Thunderbird profile reported "no mail found".** One file per message produces an
+  empty folder list, and an empty list is the same answer as "Thunderbird is not installed" —
+  which is what somebody with a perfectly good archive was told. The count of skipped folders is
+  carried through, and the message now says what is actually the matter and how to change it.
+
+### Incidents
+
+- **An inserted function landed between `#[allow(clippy::too_many_arguments)]` and the function it
+  belonged to**, so the attribute silently attached itself to the new helper and `incremental`
+  lost both its exemption and its doc comment. Clippy caught it; a reader would not have. Inserting
+  before a `fn` is not the same as inserting before its attributes.
+- **Two test expectations were wrong rather than the code**: `untrain` decrements token counts and
+  leaves the rows, so counting rows rather than summing counts read as a failure; and Rust's
+  `to_lowercase` produces Greek _final_ sigma at word end, which is correct and was not what the
+  assertion said. Both were fixed in the test, and both are the kind of wrong assertion that would
+  have been "fixed" in the code by anyone in a hurry.
+- **Backticks in a `node -e` were eaten by bash again**, this time inside a Rust doc comment.
+  Switched to the editing tools for that file. Third occurrence in two days; the rule is now simply
+  not to write prose through the shell.
