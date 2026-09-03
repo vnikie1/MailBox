@@ -47,7 +47,7 @@ const RETHREAD_WINDOW: usize = 5_000;
 /// cannot turn the last step of a sync into an unbounded scan. The pass is affordable because
 /// `ix_msg_account_recent` and `ix_msg_thread_recent` exist — before those indexes it would
 /// have taken minutes rather than seconds, which is presumably why it was never written.
-const FULL_RETHREAD: usize = 1_000_000;
+pub(crate) const FULL_RETHREAD: usize = 1_000_000;
 
 /// What the UI is told while a sync runs. docs/03 §4's `sync:progress`.
 #[derive(Debug, Clone, serde::Serialize)]

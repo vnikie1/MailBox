@@ -30,6 +30,7 @@ use rusqlite::{params, Transaction};
 
 use crate::db::DbError;
 use crate::sync::bodies;
+use crate::sync::engine::FULL_RETHREAD;
 use crate::sync::envelope;
 use crate::sync::fetch::{Fetched, Flags};
 use crate::sync::persist;
@@ -233,14 +234,26 @@ pub fn write_message(
 /// Running per message would thread each one against a partial mailbox and leave conversations
 /// split in ways nothing later repairs.
 pub fn finish(tx: &Transaction<'_>, account_id: i64, mailboxes: &[i64]) -> Result<(), DbError> {
-    // Generous, because an import is the one moment the whole account is unthreaded.
-    let mut remaining = persist::unthreaded_count(tx, account_id)?;
-    while remaining > 0 {
-        let done = persist::rethread(tx, account_id, 5_000)?;
-        if done == 0 {
-            break;
-        }
-        remaining = persist::unthreaded_count(tx, account_id)?;
+    // One pass over the whole account, not a loop over a window.
+    //
+    // This used to call `rethread` with a 5,000 window until `unthreaded_count` reached zero.
+    // `rethread` takes the newest `limit` messages by date -- no offset, and no filter on what
+    // is already threaded -- so an account holding more than 5,000 messages threaded the *same*
+    // newest 5,000 on every pass. It returned 5,000 each time, which is not zero, so the
+    // `done == 0` guard never fired, and the unthreaded count never moved. The loop did not
+    // terminate.
+    //
+    // Importing a 6,000-message mbox therefore hung, and hung hard: `finish` runs inside
+    // `db.write`, so it held the single writer and every other read and write queued behind it
+    // for ever. The app looked frozen rather than busy.
+    //
+    // The sync engine already learned this. Its own note says a cold sync of 50,000 messages
+    // "left 45,000 without a thread, because only the newest 5,000 were ever threaded", and it
+    // now finishes with a single `FULL_RETHREAD` pass. An import is the same situation --
+    // the whole account is unthreaded at once -- and it never got the same treatment.
+    let outstanding = persist::unthreaded_count(tx, account_id)?;
+    if outstanding > 0 {
+        persist::rethread(tx, account_id, FULL_RETHREAD)?;
     }
 
     for mailbox_id in mailboxes {
@@ -495,5 +508,54 @@ mod tests {
         assert_eq!(count, 3);
 
         let _ = std::fs::remove_dir_all(&cache);
+    }
+
+    #[test]
+    fn an_import_larger_than_the_rethread_window_terminates() {
+        // This used to hang, not fail. `finish` looped calling `rethread` with a 5,000
+        // window until `unthreaded_count` reached zero, and `rethread` always takes the
+        // newest 5,000 by date -- so past that size it threaded the same messages every pass,
+        // returned a non-zero count every time, and the loop never ended. It runs inside
+        // `db.write`, so it held the only writer and the whole app stopped with it.
+        //
+        // 5,001 messages: one more than the old window, which is all it took.
+        let mut conn = store();
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, (?1), (?2), (?3), (?4), (?5))",
+            rusqlite::params!["L", "me@l.test", "other", "password", "halcyon:l"],
+        )
+        .expect("account");
+
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (1, 1, (?1), (?2), (?3))",
+            rusqlite::params!["Imported", "Imported", "archive"],
+        )
+        .expect("mailbox");
+
+        let tx = conn.transaction().expect("tx");
+
+        for id in 1..=5_001i64 {
+            tx.execute(
+                "INSERT INTO message (
+                     id, account_id, mailbox_id, uid, message_id, subject, date_sent,
+                     date_received, size, from_all, to_all, body_text, has_attachment,
+                     flag_seen, flag_flagged, is_junk
+                 ) VALUES (?1, 1, 1, ?1, ?2, (?3), ?1, ?1, 10, (?4), (?5), (?5), 0, 0, 0, 0)",
+                rusqlite::params![id, format!("<m{id}@l.test>"), "S", "a@b.test", ""],
+            )
+            .expect("message");
+        }
+
+        finish(&tx, 1, &[1]).expect("finish");
+
+        // Every message threaded, including the 1 beyond the old window.
+        let unthreaded = persist::unthreaded_count(&tx, 1).expect("count");
+        assert_eq!(
+            unthreaded, 0,
+            "messages past the window were left unthreaded"
+        );
     }
 }
