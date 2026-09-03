@@ -106,6 +106,13 @@ export function TransferSettings() {
     [sources],
   )
 
+  // Folders that exist and cannot be read, so "nothing found" and "nothing readable" can be
+  // told apart in the message below.
+  const maildirFolders = useMemo(
+    () => (sources ?? []).reduce((total, source) => total + source.maildirFolders, 0),
+    [sources],
+  )
+
   const toggle = useCallback((file: string) => {
     setChosen((current) => {
       const next = new Set(current)
@@ -167,6 +174,18 @@ export function TransferSettings() {
         <p className={styles.hint}>Importing reads files from this machine, so it needs the app.</p>
       ) : sources === null ? (
         <p className={styles.hint}>Looking for mail from other programs…</p>
+      ) : folders.length === 0 && maildirFolders > 0 ? (
+        // Not the same thing as finding nothing, and the user was being told it was. A profile
+        // stored as maildir — one file per message rather than one per folder — produced an
+        // empty folder list, which reads as "you have no mail" to somebody looking at a perfectly
+        // good archive.
+        <p className={styles.hint}>
+          Thunderbird was found, but its mail is stored one file per message
+          {maildirFolders === 1 ? ' in 1 folder' : ` in ${String(maildirFolders)} folders`}, which
+          Halcyon cannot read yet. In Thunderbird, Account Settings → Server Settings → Message
+          Store Type can be switched to &ldquo;File per folder (mbox)&rdquo;, or you can choose an
+          exported mbox file below.
+        </p>
       ) : folders.length === 0 ? (
         <p className={styles.hint}>
           No Thunderbird mail was found on this machine. You can still choose files yourself — an

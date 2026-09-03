@@ -130,9 +130,32 @@ fn looks_like_mailbox(path: &Path) -> bool {
     path.is_file() && path.extension().is_none()
 }
 
+/// Whether a directory is a **maildir** folder rather than an mbox one.
+///
+/// Thunderbird can be configured to store one file per message instead of one file per folder,
+/// and a maildir folder is a directory holding `cur`, `new` and `tmp`. This reader handles
+/// mbox only.
+///
+/// Recognising it is the whole point. The walk skipped these directories in silence, so a
+/// profile stored this way produced an empty folder list — and an empty list is the same answer
+/// as "Thunderbird is not installed", which is what the user was then told. Somebody with a
+/// perfectly good archive was informed they had no mail.
+pub fn is_maildir(path: &Path) -> bool {
+    path.join("cur").is_dir() && path.join("new").is_dir()
+}
+
 /// Walks one profile and lists its folders, deepest paths included.
 pub fn folders(profile: &Path) -> Vec<Folder> {
+    scan(profile).0
+}
+
+/// The folders of a profile, and how many maildir folders were passed over.
+///
+/// The count exists so the UI can tell "nothing here" apart from "everything here is in a
+/// format this cannot read yet", which look identical from a folder list alone.
+pub fn scan(profile: &Path) -> (Vec<Folder>, usize) {
     let mut found = Vec::new();
+    let mut maildirs = 0usize;
 
     for store in ["Mail", "ImapMail"] {
         let root = profile.join(store);
@@ -149,14 +172,14 @@ pub fn folders(profile: &Path) -> Vec<Folder> {
                         || store.to_string(),
                         |name| name.to_string_lossy().to_string(),
                     );
-                    walk(&path, &label, &mut found, 0);
+                    walk(&path, &label, &mut found, &mut maildirs, 0);
                 }
             }
         }
     }
 
     found.sort_by(|a, b| a.path.cmp(&b.path));
-    found
+    (found, maildirs)
 }
 
 /// How deep the folder walk will go.
@@ -166,7 +189,13 @@ pub fn folders(profile: &Path) -> Vec<Folder> {
 /// anybody will meet.
 const MAX_DEPTH: usize = 24;
 
-fn walk(directory: &Path, prefix: &str, into: &mut Vec<Folder>, depth: usize) {
+fn walk(
+    directory: &Path,
+    prefix: &str,
+    into: &mut Vec<Folder>,
+    maildirs: &mut usize,
+    depth: usize,
+) {
     if depth > MAX_DEPTH {
         tracing::warn!(
             ?directory,
@@ -187,9 +216,17 @@ fn walk(directory: &Path, prefix: &str, into: &mut Vec<Folder>, depth: usize) {
 
         if path.is_dir() {
             // Subfolders. A directory that is not `.sbd` is Thunderbird's own storage — or a
-            // maildir folder, which this does not read.
+            // maildir folder, which this does not read but does now count.
             if let Some(stem) = name.strip_suffix(".sbd") {
-                walk(&path, &format!("{prefix}/{stem}"), into, depth + 1);
+                walk(
+                    &path,
+                    &format!("{prefix}/{stem}"),
+                    into,
+                    maildirs,
+                    depth + 1,
+                );
+            } else if is_maildir(&path) {
+                *maildirs += 1;
             }
             continue;
         }

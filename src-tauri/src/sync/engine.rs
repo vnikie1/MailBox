@@ -383,6 +383,30 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
             .await?
     };
 
+    // Folders the server no longer has. `discover` returns an error rather than a short list
+    // if the LIST breaks off, so an Ok result of non-zero length is the whole tree — which is
+    // the condition `prune` requires before it deletes anything, because deleting a mailbox
+    // takes its messages with it.
+    if !selectable.is_empty() {
+        let keep: Vec<String> = selectable
+            .iter()
+            .map(|mailbox| mailbox.remote_path.clone())
+            .collect();
+
+        let removed = db
+            .write(move |tx| mailboxes::prune(tx, account_id, &keep))
+            .await?;
+
+        if !removed.is_empty() {
+            tracing::info!(
+                account_id,
+                removed = removed.len(),
+                paths = ?removed,
+                "mailboxes gone from the server were removed"
+            );
+        }
+    }
+
     app.emit("mailboxes:changed", payload(&account_id));
 
     // ---- 2. the Inbox, newest page first ------------------------------------------------
@@ -701,6 +725,45 @@ async fn sync_mailbox(
         "newest page stored"
     );
 
+    // ---- arrivals and departures, for a server that cannot tell us ----------------------
+    //
+    // `incremental` does this and is unreachable without CONDSTORE or QRESYNC: it needs a
+    // HIGHESTMODSEQ that such a server never sends. So on those accounts rules never ran, junk
+    // was never filed, no new-mail notification ever appeared, and mail deleted on another
+    // device was never removed here. All four features simply did not happen, and nothing said
+    // so — the sync looked entirely healthy.
+    //
+    // What counts as an arrival is a UID at or above the `uid_next` recorded by the previous
+    // sync. That is the same question CONDSTORE answers with a modseq, asked the only other way
+    // IMAP offers. A mailbox with no previous `uid_next` has never been synced, so nothing
+    // counts — which is exactly the guard `on_arrival` insists on, and the reason its comment
+    // warns that running rules over an initial sync would "empty their Inbox on first launch".
+    // Keyed on having a baseline rather than on what the server advertises. A CONDSTORE
+    // server also takes this path while its backfill is outstanding, and mail arriving during a
+    // long backfill deserves its rules and its notification just as much.
+    if let Some(previous_uid_next) = stored_uid_next.filter(|next| *next > 0) {
+        let arrived = {
+            let ids = written.inserted_ids.clone();
+            db.read(move |conn| new_since(conn, mailbox_id, previous_uid_next, &ids))
+                .await?
+        };
+
+        on_arrival(app, db, account_id, mailbox_id, path, &arrived).await;
+    }
+
+    // And what left. Without this a message deleted in webmail stayed here for ever on a
+    // server without CONDSTORE, because the only other caller is on the path it cannot reach.
+    //
+    // Cheap when nothing has gone: `reconcile_expunged` counts the local rows first and returns
+    // before touching the network unless there are more here than the server says it has. That
+    // also makes it safe during an initial sync or a backfill, when this side is behind rather
+    // than ahead.
+    let expunged = reconcile_expunged(db, session, mailbox_id, path, selected.exists).await?;
+    if expunged > 0 {
+        db.write(move |tx| persist::recount(tx, mailbox_id)).await?;
+        app.emit("mailbox:changed", payload(&mailbox_id));
+    }
+
     let mut total = written.inserted;
 
     if !backfill {
@@ -981,6 +1044,102 @@ struct Arrived {
     message_ids: Vec<i64>,
 }
 
+/// Which of these rows are new since the last sync, by UID.
+///
+/// The stand-in for a modseq on a server that has none. `uid_next` is the UID the server will
+/// hand to the next message it receives, so anything at or above the value recorded last time is
+/// something that arrived since — and anything below it was already there and must not be
+/// treated as an arrival, whatever this pass happened to insert.
+fn new_since(
+    conn: &rusqlite::Connection,
+    mailbox_id: i64,
+    previous_uid_next: u32,
+    inserted: &[i64],
+) -> Result<Vec<i64>, crate::db::DbError> {
+    if inserted.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let placeholders = (0..inserted.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "SELECT id FROM message
+          WHERE mailbox_id = ?1 AND uid >= ?2 AND id IN ({placeholders})
+          ORDER BY uid"
+    );
+
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![&mailbox_id, &previous_uid_next];
+    bound.extend(inserted.iter().map(|id| id as &dyn rusqlite::ToSql));
+
+    let rows = conn
+        .prepare(&sql)?
+        .query_map(bound.as_slice(), |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<i64>>>()?;
+
+    Ok(rows)
+}
+
+/// Everything that happens because mail **arrived**: rules, the junk filter, the toast.
+///
+/// Extracted because it used to live inside `incremental` and its comment said it ran "here and
+/// nowhere else" — which was true, and was the bug. `incremental` is reachable only on a server
+/// advertising CONDSTORE or QRESYNC, so on any other server the app quietly became one that does
+/// not run rules, does not file junk and never announces new mail. Nothing failed; those
+/// features simply did not happen, and no log line said so.
+///
+/// The guard that comment insists on is the caller's job now: **only ever pass genuinely new
+/// arrivals**. Running these over an initial sync or a backfill "would apply every rule to fifty
+/// thousand messages the user has already dealt with, and a rule that files mail would empty
+/// their Inbox on first launch".
+///
+/// Rules first, then the filter, so a rule saying "this is never junk" is not overruled a moment
+/// later by a classifier that disagrees.
+async fn on_arrival(
+    app: &dyn Events,
+    db: &Db,
+    account_id: i64,
+    mailbox_id: i64,
+    path: &str,
+    arrived: &[i64],
+) {
+    if arrived.is_empty() {
+        return;
+    }
+
+    match crate::rules::engine::run_on_arrival(db, arrived.to_vec()).await {
+        Ok(report) if report.matched > 0 => {
+            tracing::debug!(path, matched = report.matched, "rules applied on arrival");
+        }
+        Ok(_) => {}
+        // Logged and carried on. A broken rule must not stop mail arriving — the message is
+        // already stored, and failing the sync here would mean retrying the fetch forever over
+        // something the network had nothing to do with.
+        Err(error) => tracing::warn!(%error, path, "rules failed on arrival"),
+    }
+
+    match crate::sync::upkeep::score_new_mail(db, mailbox_id, arrived.to_vec()).await {
+        Ok(filed) if filed > 0 => {
+            tracing::debug!(path, filed, "junk filed on arrival");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, path, "junk scoring failed on arrival"),
+    }
+
+    // After the rules and the filter, never before. A message a rule filed away or the
+    // classifier caught should not have raised a toast on its way past — and it would have, if
+    // this ran first.
+    app.emit(
+        "mail:arrived",
+        payload(&Arrived {
+            account_id,
+            message_ids: arrived.to_vec(),
+        }),
+    );
+}
+
 /// The CONDSTORE path: fetch what arrived, reconcile what changed, and nothing else.
 ///
 /// Split out rather than nested in `sync_mailbox` because the two paths share almost nothing:
@@ -1045,44 +1204,7 @@ async fn incremental(
             inserted = written.inserted;
             tracing::debug!(path, range, inserted, "incremental: new messages stored");
 
-            // Rules and the junk filter run **here and nowhere else**: this is the only path
-            // that carries genuinely new arrivals. Running them on the initial sync or on
-            // backfill would apply every rule to fifty thousand messages the user has already
-            // dealt with, and a rule that files mail would empty their Inbox on first launch.
-            //
-            // Rules first, then the filter, so a rule saying "this is never junk" is not
-            // overruled a moment later by a classifier that disagrees.
-            match crate::rules::engine::run_on_arrival(db, written.inserted_ids.clone()).await {
-                Ok(report) if report.matched > 0 => {
-                    tracing::debug!(path, matched = report.matched, "rules applied on arrival");
-                }
-                Ok(_) => {}
-                // Logged and carried on. A broken rule must not stop mail arriving — the
-                // message is already stored, and failing the sync here would mean retrying the
-                // fetch forever over something the network had nothing to do with.
-                Err(error) => tracing::warn!(%error, path, "rules failed on arrival"),
-            }
-
-            match crate::sync::upkeep::score_new_mail(db, mailbox_id, written.inserted_ids.clone())
-                .await
-            {
-                Ok(filed) if filed > 0 => {
-                    tracing::debug!(path, filed, "junk filed on arrival");
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, path, "junk scoring failed on arrival"),
-            }
-
-            // After the rules and the filter, never before. A message a rule filed away or the
-            // classifier caught should not have raised a toast on its way past — and it would
-            // have, if this ran first.
-            app.emit(
-                "mail:arrived",
-                payload(&Arrived {
-                    account_id,
-                    message_ids: written.inserted_ids.clone(),
-                }),
-            );
+            on_arrival(app, db, account_id, mailbox_id, path, &written.inserted_ids).await;
         }
     }
 
@@ -1484,5 +1606,101 @@ mod tests {
         // this is the one case where recording the backfill complete is honest.
         assert_eq!(backfill_start(None, 0, &[]), 0);
         assert!(crate::sync::fetch::backfill_window(&[], 0, 500).is_none());
+    }
+
+    fn mailbox_with_uids(uids: &[u32]) -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+            [],
+        )
+        .expect("account");
+
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (1, 1, 'INBOX', 'Inbox', 'inbox')",
+            [],
+        )
+        .expect("mailbox");
+
+        for (index, uid) in uids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO message (
+                     id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                     from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+                 ) VALUES (?1, 1, 1, ?2, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+                rusqlite::params![index as i64 + 1, uid],
+            )
+            .expect("message");
+        }
+
+        conn
+    }
+
+    #[test]
+    fn only_uids_at_or_above_the_last_uid_next_count_as_arrivals() {
+        // The stand-in for a modseq on a server that has none. Everything below the `uid_next`
+        // the previous sync recorded was already here, whatever this pass happened to insert —
+        // and treating it as an arrival is what would run every rule over a backfill.
+        let conn = mailbox_with_uids(&[10, 11, 12, 13]);
+        let all = vec![1, 2, 3, 4];
+
+        // Rows 3 and 4 hold UIDs 12 and 13.
+        assert_eq!(new_since(&conn, 1, 12, &all).expect("query"), vec![3, 4]);
+        assert_eq!(
+            new_since(&conn, 1, 14, &all).expect("query"),
+            Vec::<i64>::new()
+        );
+        assert_eq!(
+            new_since(&conn, 1, 10, &all).expect("query"),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn a_backfilled_message_is_not_an_arrival() {
+        // The case the guard exists for. A backfill inserts *old* messages — low UIDs — and
+        // running rules over them "would apply every rule to fifty thousand messages the user
+        // has already dealt with, and a rule that files mail would empty their Inbox".
+        let conn = mailbox_with_uids(&[3, 4, 900]);
+
+        // A backfill pass that inserted the two old ones, with the mailbox already synced up to
+        // UID 900.
+        let backfilled = vec![1, 2];
+        assert!(new_since(&conn, 1, 900, &backfilled)
+            .expect("query")
+            .is_empty());
+    }
+
+    #[test]
+    fn nothing_inserted_means_nothing_arrived() {
+        let conn = mailbox_with_uids(&[1, 2]);
+        assert!(new_since(&conn, 1, 1, &[]).expect("query").is_empty());
+    }
+
+    #[test]
+    fn another_mailboxs_messages_are_not_counted() {
+        // The id list comes from one batch and the batch belongs to one mailbox, but the filter
+        // says so explicitly rather than trusting the caller.
+        let conn = mailbox_with_uids(&[10]);
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (2, 1, 'Archive', 'Archive', 'archive')",
+            [],
+        )
+        .expect("mailbox");
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                 from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+             ) VALUES (50, 1, 2, 99, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+            [],
+        )
+        .expect("message");
+
+        assert_eq!(new_since(&conn, 1, 1, &[1, 50]).expect("query"), vec![1]);
     }
 }

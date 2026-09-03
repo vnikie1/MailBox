@@ -74,6 +74,10 @@ mod prop {
     pub const HAS_ATTACHMENT: u16 = 0x0E1B;
     /// `PR_DISPLAY_NAME`, on a folder.
     pub const DISPLAY_NAME: u16 = 0x3001;
+    /// `PR_INTERNET_CPID` — the code page the message's text was written in.
+    pub const INTERNET_CPID: u16 = 0x3FDE;
+    /// `PR_MESSAGE_CODEPAGE`, the fallback when the first is absent.
+    pub const MESSAGE_CODEPAGE: u16 = 0x3FFD;
 }
 
 /// One message pulled out of a `.pst`, as RFC 5322 bytes.
@@ -108,9 +112,56 @@ fn string(
     id: u16,
 ) -> Option<String> {
     match properties.get(id)? {
-        PropertyValue::String8(value) => Some(String::from_utf8_lossy(value.buffer()).to_string()),
+        PropertyValue::String8(value) => {
+            Some(decode_string8(value.buffer(), code_page(properties)))
+        }
         PropertyValue::Unicode(value) => Some(value.to_string()),
         _ => None,
+    }
+}
+
+/// The code page a message's 8-bit text is written in, if it says.
+///
+/// `PR_INTERNET_CPID` first, because it is the one Outlook sets from the message's own
+/// `Content-Type`; `PR_MESSAGE_CODEPAGE` is the store's answer and a reasonable second.
+fn code_page(properties: &outlook_pst::messaging::message::MessageProperties) -> Option<u32> {
+    integer(properties, prop::INTERNET_CPID)
+        .or_else(|| integer(properties, prop::MESSAGE_CODEPAGE))
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+/// Decodes a `PT_STRING8` property using the code page the message declares.
+///
+/// These are **not** UTF-8. `PT_STRING8` is 8-bit text in whatever code page the store was
+/// written with, and reading it as UTF-8 turned every non-ASCII character into a replacement
+/// character: an ANSI archive imported with its accents, umlauts and Cyrillic destroyed, in the
+/// subject line and the body alike. Nothing failed and nothing was logged; the text simply
+/// arrived wrong, and the original `.pst` is often the only other copy.
+///
+/// Windows-1252 is the fallback rather than the answer. It is right for Western European stores
+/// and wrong for Greek or Cyrillic ones, so it is only used when the message declines to say —
+/// and it is still a strict improvement on UTF-8, which is wrong for all of them.
+fn decode_string8(bytes: &[u8], code_page: Option<u32>) -> String {
+    let label = code_page.map_or_else(
+        || "windows-1252".to_string(),
+        |page| match page {
+            // The ones with names of their own rather than a `windows-N` form.
+            65001 => "UTF-8".to_string(),
+            20127 => "us-ascii".to_string(),
+            28_591..=28_599 | 28_603 | 28_605 => format!("iso-8859-{}", page - 28_590),
+            _ => format!("windows-{page}"),
+        },
+    );
+
+    let charset = charset::Charset::for_label(label.as_bytes())
+        .or_else(|| charset::Charset::for_label(b"windows-1252"));
+
+    match charset {
+        Some(charset) => charset.decode_without_bom_handling(bytes).0.into_owned(),
+        // `for_label` cannot fail for windows-1252, but returning mojibake beats panicking on
+        // somebody's archive.
+        None => String::from_utf8_lossy(bytes).to_string(),
     }
 }
 
@@ -580,5 +631,54 @@ mod tests {
             "a kept header lost its continuation: {kept}"
         );
         assert!(kept.contains("Subject: Re: Hi"));
+    }
+
+    #[test]
+    fn ansi_text_is_decoded_by_its_code_page_rather_than_as_utf8() {
+        // `PT_STRING8` is 8-bit text in the store's code page. Reading it as UTF-8 turned every
+        // non-ASCII byte into a replacement character, so an ANSI archive imported with its
+        // accents and umlauts destroyed — silently, in subjects and bodies alike, with the
+        // original .pst often the only other copy.
+
+        // "Grüße" in windows-1252: ü is 0xFC, ß is 0xDF.
+        let latin1 = [b'G', b'r', 0xFC, b'\xDF', b'e'];
+        assert_eq!(decode_string8(&latin1, Some(1252)), "Grüße");
+
+        // The same bytes read as UTF-8, which is what used to happen.
+        assert!(
+            String::from_utf8_lossy(&latin1).contains('\u{FFFD}'),
+            "the old path really did produce replacement characters"
+        );
+
+        // Cyrillic, where guessing windows-1252 would be wrong and the declared page is right.
+        // "Привет" in windows-1251.
+        let cyrillic = [0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2];
+        assert_eq!(decode_string8(&cyrillic, Some(1251)), "Привет");
+
+        // Greek, likewise. "Γειά" in windows-1253.
+        let greek = [0xC3, 0xE5, 0xE9, 0xDC];
+        assert_eq!(decode_string8(&greek, Some(1253)), "Γειά");
+    }
+
+    #[test]
+    fn a_declared_utf8_code_page_is_honoured() {
+        // 65001 is UTF-8, and a store that says so means it.
+        assert_eq!(decode_string8("café".as_bytes(), Some(65001)), "café");
+    }
+
+    #[test]
+    fn an_undeclared_code_page_falls_back_without_destroying_ascii() {
+        // Windows-1252 is a guess, and it is only reached when the message declines to say. It
+        // is still strictly better than UTF-8, which is wrong for every ANSI store rather than
+        // only for the non-Western ones.
+        assert_eq!(decode_string8(b"plain ascii", None), "plain ascii");
+        assert_eq!(decode_string8(&[b'c', b'a', b'f', 0xE9], None), "café");
+    }
+
+    #[test]
+    fn an_unknown_code_page_does_not_panic() {
+        // A corrupt or exotic value must not take down an import of somebody's archive.
+        assert_eq!(decode_string8(b"hello", Some(999_999)), "hello");
+        assert_eq!(decode_string8(b"hello", Some(0)), "hello");
     }
 }

@@ -306,10 +306,42 @@ pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<u
         thread_ids.insert(assignment.thread_key, assignment.thread_key);
     }
 
+    // Which messages currently sit in a muted conversation, read before anything moves.
+    //
+    // Muting is a property of the `thread` row, and a merge moves messages onto a different
+    // thread id — so a muted conversation that absorbed a new message, or merged into another,
+    // quietly stopped being muted. The user had said "not now" and the app resumed announcing
+    // it, which is the one outcome muting exists to prevent.
+    let muted_before: std::collections::HashSet<i64> = tx
+        .prepare(
+            "SELECT message.id
+               FROM message
+               JOIN thread ON thread.id = message.thread_id
+              WHERE message.account_id = ?1 AND thread.muted = 1",
+        )?
+        .query_map(params![account_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
     for assignment in &assignments {
         tx.execute(
             "UPDATE message SET thread_id = ?2 WHERE id = ?1",
             params![assignment.message_id, assignment.thread_key],
+        )?;
+    }
+
+    // Mute follows the messages. Once, per destination thread, rather than per message.
+    let mut carried: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for assignment in &assignments {
+        if !muted_before.contains(&assignment.message_id) {
+            continue;
+        }
+        if !carried.insert(assignment.thread_key) {
+            continue;
+        }
+
+        tx.execute(
+            "UPDATE thread SET muted = 1 WHERE id = ?1",
+            params![assignment.thread_key],
         )?;
     }
 

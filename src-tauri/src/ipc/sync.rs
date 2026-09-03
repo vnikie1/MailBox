@@ -12,6 +12,19 @@ use crate::sync::idle::Watchers;
 
 use super::mail::AppError;
 
+/// How many body fetches may be in flight at once.
+///
+/// `fetch_body` opens its own IMAP connection and holds it for the length of the run, and
+/// `bodies_ensure` spawns a task per call with nothing bounding them. The reader asks on every
+/// selection change and prefetches three rows ahead, so holding an arrow key down asked for a
+/// fresh connection per keypress — a connection storm against the user's own provider, which is
+/// how an address gets rate-limited or temporarily blocked.
+///
+/// Two, because docs/03 §5 budgets 2–4 connections **per account** and the sync engine is
+/// already using some of them. Excess callers wait rather than being dropped: the reader is
+/// waiting on this body and returning without it would leave the pane empty for good.
+static BODY_FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 /// Syncs one account now.
 ///
 /// Returns as soon as the work is *scheduled*, not when it finishes. A first sync of a large
@@ -84,6 +97,12 @@ pub async fn bodies_ensure(
     let db = db.inner().clone();
 
     tauri::async_runtime::spawn(async move {
+        // Queued behind the limit rather than opening a connection immediately.
+        let Ok(_permit) = BODY_FETCHES.acquire().await else {
+            // Only on shutdown, when the semaphore is closed.
+            return;
+        };
+
         if let Err(error) =
             crate::sync::engine::fetch_body(&app, &db, account_id, message_ids).await
         {

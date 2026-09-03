@@ -8,4 +8,12 @@ export type ImportSource = { name: string,
 /**
  * Absolute path to the profile directory.
  */
-root: string, folders: Array<ImportFolder>, };
+root: string, folders: Array<ImportFolder>, 
+/**
+ * Folders skipped because they are stored as **maildir**, which this reader cannot read.
+ *
+ * Carried so the UI can tell "this profile has no mail" apart from "this profile's mail is
+ * in a format Halcyon does not read yet". Both produce an empty folder list, and the user
+ * was being shown the first when the truth was the second.
+ */
+maildirFolders: number, };

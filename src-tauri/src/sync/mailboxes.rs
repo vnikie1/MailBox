@@ -284,6 +284,54 @@ pub fn persist(
     Ok(ids)
 }
 
+/// Removes mailboxes this account no longer has on the server.
+///
+/// The counterpart `persist` promises and nobody wrote: its comment says a vanished mailbox is
+/// "left in place here and removed by the caller only once it is sure", and no caller ever was.
+/// So a folder deleted in webmail stayed in the sidebar for the life of the install, with its
+/// messages still in it and its unread count still in the badge.
+///
+/// **This deletes mail**, through `message.mailbox_id ... ON DELETE CASCADE`, which is why the
+/// caller has to be sure. Two conditions make it so, and both are the caller's to check:
+///
+/// * The `LIST` completed. `discover` propagates a mid-stream error rather than returning a
+///   short list, so an `Ok` really is the whole tree — a half-read tree must never be treated
+///   as evidence that the rest is gone.
+/// * The list is not empty. A server that answers with nothing is having a bad day, not
+///   reporting that the account has no folders.
+///
+/// Returns the paths removed, for the log. A folder full of mail disappearing is worth a line
+/// even when it is correct.
+pub fn prune(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: i64,
+    keep: &[String],
+) -> Result<Vec<String>, DbError> {
+    if keep.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let existing: Vec<(i64, String)> = tx
+        .prepare("SELECT id, remote_path FROM mailbox WHERE account_id = ?1")?
+        .query_map(rusqlite::params![account_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut removed = Vec::new();
+
+    for (id, path) in existing {
+        if keep.iter().any(|kept| kept == &path) {
+            continue;
+        }
+
+        tx.execute("DELETE FROM mailbox WHERE id = ?1", rusqlite::params![id])?;
+        removed.push(path);
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +504,118 @@ mod tests {
             roles,
             vec![Role::Inbox, Role::Drafts, Role::Sent, Role::Trash]
         );
+    }
+
+    fn store_with_mailboxes() -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch("PRAGMA foreign_keys = ON;").expect("fk");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+            [],
+        )
+        .expect("account");
+
+        for (id, path) in [(1, "INBOX"), (2, "Archive"), (3, "Old Project")] {
+            conn.execute(
+                "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+                 VALUES (?1, 1, ?2, ?2, NULL)",
+                rusqlite::params![id, path],
+            )
+            .expect("mailbox");
+        }
+
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                 from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+             ) VALUES (1, 1, 3, 1, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+            [],
+        )
+        .expect("message");
+
+        conn
+    }
+
+    #[test]
+    fn a_folder_the_server_no_longer_lists_is_removed() {
+        // `persist` says a vanished mailbox is "removed by the caller only once it is sure", and
+        // no caller ever was — so a folder deleted in webmail stayed in the sidebar for the life
+        // of the install, with its messages in it and its unread count in the badge.
+        let mut conn = store_with_mailboxes();
+        let tx = conn.transaction().expect("tx");
+
+        let removed = prune(&tx, 1, &["INBOX".to_string(), "Archive".to_string()]).expect("prune");
+
+        assert_eq!(removed, vec!["Old Project".to_string()]);
+
+        let left: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM mailbox WHERE account_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(left, 2);
+
+        // Its mail goes with it, through the cascade. That is the point of requiring the caller
+        // to be sure before calling this.
+        let orphans: i64 = tx
+            .query_row("SELECT COUNT(*) FROM message", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(orphans, 0, "the folder went and its messages did not");
+    }
+
+    #[test]
+    fn an_empty_list_removes_nothing() {
+        // A server answering with no folders at all is having a bad day, not reporting that the
+        // account is empty. Treating it as evidence would delete the whole account's mail.
+        let mut conn = store_with_mailboxes();
+        let tx = conn.transaction().expect("tx");
+
+        assert!(prune(&tx, 1, &[]).expect("prune").is_empty());
+
+        let left: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM mailbox WHERE account_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(left, 3, "an empty list deleted mailboxes");
+    }
+
+    #[test]
+    fn another_accounts_mailboxes_are_left_alone() {
+        // The keep-list belongs to one account. Pruning across accounts would delete an
+        // imported archive the moment any server account synced.
+        let mut conn = store_with_mailboxes();
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (2, 'Local', 'local@localhost', 'local', 'none', 'local:none')",
+            [],
+        )
+        .expect("account");
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (99, 2, 'Imported', 'Imported', NULL)",
+            [],
+        )
+        .expect("mailbox");
+
+        let tx = conn.transaction().expect("tx");
+        prune(&tx, 1, &["INBOX".to_string()]).expect("prune");
+
+        let survived: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM mailbox WHERE account_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(survived, 1, "pruning one account touched another");
     }
 }

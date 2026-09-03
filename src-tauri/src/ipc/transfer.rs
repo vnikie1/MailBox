@@ -28,6 +28,12 @@ pub struct ImportSource {
     /// Absolute path to the profile directory.
     pub root: String,
     pub folders: Vec<ImportFolder>,
+    /// Folders skipped because they are stored as **maildir**, which this reader cannot read.
+    ///
+    /// Carried so the UI can tell "this profile has no mail" apart from "this profile's mail is
+    /// in a format Halcyon does not read yet". Both produce an empty folder list, and the user
+    /// was being shown the first when the truth was the second.
+    pub maildir_folders: usize,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -80,7 +86,9 @@ pub async fn import_sources() -> Result<Vec<ImportSource>, AppError> {
         thunderbird::profiles()
             .into_iter()
             .map(|profile| {
-                let folders = thunderbird::folders(&profile.root)
+                let (found, maildir_folders) = thunderbird::scan(&profile.root);
+
+                let folders = found
                     .into_iter()
                     .map(|folder| ImportFolder {
                         path: folder.path,
@@ -93,6 +101,7 @@ pub async fn import_sources() -> Result<Vec<ImportSource>, AppError> {
                     name: profile.name,
                     root: profile.root.to_string_lossy().to_string(),
                     folders,
+                    maildir_folders,
                 }
             })
             .collect::<Vec<_>>()
