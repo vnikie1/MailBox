@@ -43,6 +43,13 @@ enum Prior {
     Mailbox {
         id: i64,
         mailbox_id: i64,
+        /// The UID the message had in that mailbox.
+        ///
+        /// Restored with it, because `move_to` parks a moved row at a negative placeholder — a
+        /// UID belongs to one mailbox and means nothing in another. Putting the message back
+        /// without its UID would leave it in its original folder looking like something that
+        /// had never been on the server.
+        uid: i64,
     },
     Seen {
         id: i64,
@@ -174,7 +181,7 @@ pub fn capture(
     for &id in ids {
         let row = tx.query_row(
             "SELECT mailbox_id, flag_seen, flag_flagged, flag_color, is_junk, junk_by_user,
-                    snooze_until, thread_id
+                    snooze_until, thread_id, uid
                FROM message WHERE id = ?1",
             params![id],
             |row| {
@@ -187,11 +194,13 @@ pub fn capture(
                     row.get::<_, i64>(5)? != 0,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, i64>(8)?,
                 ))
             },
         );
 
-        let Ok((mailbox_id, seen, flagged, color, junk, by_user, snooze, thread_id)) = row else {
+        let Ok((mailbox_id, seen, flagged, color, junk, by_user, snooze, thread_id, uid)) = row
+        else {
             // Gone between the click and the write. Skipping it is right: there is nothing to
             // restore, and failing the whole operation because one message vanished would make
             // undo less reliable rather than more.
@@ -200,7 +209,11 @@ pub fn capture(
 
         for field in fields {
             priors.push(match field {
-                Field::Mailbox => Prior::Mailbox { id, mailbox_id },
+                Field::Mailbox => Prior::Mailbox {
+                    id,
+                    mailbox_id,
+                    uid,
+                },
                 Field::Seen => Prior::Seen { id, seen },
                 Field::Flagged => Prior::Flagged {
                     id,
@@ -324,24 +337,41 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
 
     for prior in &step.priors {
         match prior {
-            Prior::Mailbox { id, mailbox_id } => {
-                let current: Option<i64> = tx
+            Prior::Mailbox {
+                id,
+                mailbox_id,
+                uid,
+            } => {
+                let current: Option<(i64, i64)> = tx
                     .query_row(
-                        "SELECT mailbox_id FROM message WHERE id = ?1",
+                        "SELECT mailbox_id, uid FROM message WHERE id = ?1",
                         params![id],
-                        |row| row.get(0),
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .ok();
 
-                let Some(current) = current else { continue };
+                let Some((current, current_uid)) = current else {
+                    continue;
+                };
 
                 inverse.push(Prior::Mailbox {
                     id: *id,
                     mailbox_id: current,
+                    uid: current_uid,
                 });
 
                 queue_move(tx, *id, *mailbox_id)?;
                 crate::db::write::move_to(tx, &[*id], *mailbox_id)?;
+
+                // `move_to` parks it at a placeholder; this is where it gets its real UID back.
+                // Only when it had one: a message that had never reached the server keeps the
+                // placeholder it already had.
+                if *uid > 0 {
+                    tx.execute(
+                        "UPDATE message SET uid = ?2 WHERE id = ?1",
+                        params![id, uid],
+                    )?;
+                }
             }
             Prior::Seen { id, seen } => {
                 let current: Option<i64> = tx

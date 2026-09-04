@@ -62,6 +62,52 @@ pub fn write_batch(
             .ok();
 
         let envelope = &message.envelope;
+
+        // A message this app moved here itself, now coming back with the UID the server gave
+        // it. `move_to` parks a moved row at a negative UID because a UID means nothing outside
+        // the mailbox it came from, and this is where that row rejoins the server's numbering.
+        //
+        // Adopted rather than inserted alongside. Inserting would leave two rows for one
+        // message — the placeholder is invisible to `remove_missing`, which ignores `uid <= 0`
+        // — and would also break undo, which holds the row id of the message it has to put back.
+        let adopted: Option<i64> = match envelope
+            .message_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(message_id) if existing.is_none() => tx
+                .query_row(
+                    "SELECT id FROM message
+                      WHERE mailbox_id = ?1 AND uid <= 0 AND message_id = ?2
+                      LIMIT 1",
+                    params![mailbox_id, message_id],
+                    |row| row.get(0),
+                )
+                .ok(),
+            _ => None,
+        };
+
+        if let Some(id) = adopted {
+            tx.execute(
+                "UPDATE message
+                    SET uid = ?2, flag_seen = ?3, flag_answered = ?4, flag_flagged = ?5,
+                        flag_draft = ?6, flag_deleted = ?7
+                  WHERE id = ?1",
+                params![
+                    id,
+                    i64::from(message.uid),
+                    i64::from(message.flags.seen),
+                    i64::from(message.flags.answered),
+                    i64::from(message.flags.flagged),
+                    i64::from(message.flags.draft),
+                    i64::from(message.flags.deleted),
+                ],
+            )?;
+
+            written.updated += 1;
+            continue;
+        }
         let references = message.references.join(" ");
 
         // INTERNALDATE for ordering, falling back to the Date header only when the server

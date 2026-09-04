@@ -694,3 +694,72 @@ fn a_reply_goes_to_the_reply_to_address_when_there_is_one() {
         "the reply was addressed to the sender rather than to Reply-To"
     );
 }
+
+/// Moving a message into a mailbox that already holds its UID.
+///
+/// `message` has `UNIQUE(mailbox_id, uid)`, and a move used to carry the source UID across --
+/// so this failed the whole transaction. Deleting is a move to Trash, and on the real account
+/// this was found on, 23 of 267 Inbox messages shared a UID with something already in the Bin.
+/// **Delete did not work for any of them**, and the mutation hook swallowed the error, so
+/// nothing was said and the message stayed exactly where it was.
+#[test]
+fn a_move_into_a_mailbox_already_holding_that_uid_succeeds() {
+    let mut conn = fixture();
+
+    // The same UID in two mailboxes, which is entirely normal: a UID belongs to one mailbox.
+    for (id, mailbox) in [(100, 1), (101, 2)] {
+        conn.execute(
+            "INSERT INTO message
+               (id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk)
+             VALUES (?1, 1, ?2, 4242, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+            (id, mailbox),
+        )
+        .expect("message");
+    }
+
+    let tx = conn.transaction().expect("tx");
+    write::move_to(&tx, &[100], 2).expect("the move must not collide");
+
+    let (mailbox, uid): (i64, i64) = tx
+        .query_row(
+            "SELECT mailbox_id, uid FROM message WHERE id = 100",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read");
+
+    assert_eq!(mailbox, 2, "the message did not move");
+    assert!(
+        uid <= 0,
+        "a moved message kept a UID belonging to the mailbox it left: {uid}"
+    );
+
+    // And the message that was already there is untouched.
+    let other: i64 = tx
+        .query_row("SELECT uid FROM message WHERE id = 101", [], |row| {
+            row.get(0)
+        })
+        .expect("read");
+    assert_eq!(other, 4242);
+}
+
+#[test]
+fn several_messages_move_at_once_without_colliding_with_each_other() {
+    // The placeholder has to be unique per row, or a multi-selection delete would collide
+    // with itself rather than with whatever was already in the Bin.
+    let mut conn = fixture();
+    let tx = conn.transaction().expect("tx");
+
+    write::move_to(&tx, &[1, 2, 3], 2).expect("move");
+
+    let placeholders: i64 = tx
+        .query_row(
+            "SELECT COUNT(DISTINCT uid) FROM message WHERE id IN (1, 2, 3)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count");
+
+    assert_eq!(placeholders, 3, "the placeholder UIDs were not unique");
+}

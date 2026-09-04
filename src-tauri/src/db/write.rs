@@ -213,8 +213,23 @@ pub fn move_to(tx: &Transaction<'_>, ids: &[i64], mailbox_id: i64) -> Result<usi
 
     let before = snapshot(tx, ids)?;
 
+    // The UID goes with the mailbox, because a UID belongs to one mailbox and means nothing
+    // in another.
+    //
+    // This used to move the row and keep its old UID, and `message` has `UNIQUE(mailbox_id,
+    // uid)` — so moving a message into a mailbox that already held that UID failed the whole
+    // transaction. Deleting is a move to Trash, and on a real account roughly one message in ten
+    // shares a UID with something already in the Bin, so **Delete simply did not work** for
+    // those. The error was swallowed by the mutation hook, so nothing was said and the message
+    // stayed exactly where it was.
+    //
+    // Negative and derived from the row id: unique, so several messages can be moved at once,
+    // and never mistakable for a server UID. `remove_missing` already ignores `uid <= 0` and
+    // `ops::locate` already skips it — the codebase has always had a notion of a row that is
+    // here and not yet on the server, and a message moved locally is exactly that until the
+    // queued operation lands and the next sync brings back its real UID.
     let in_list = placeholders(ids.len(), 2);
-    let sql = format!("UPDATE message SET mailbox_id = ?1 WHERE id IN ({in_list})");
+    let sql = format!("UPDATE message SET mailbox_id = ?1, uid = -id WHERE id IN ({in_list})");
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(mailbox_id)];
     for id in ids {
