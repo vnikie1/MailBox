@@ -70,6 +70,14 @@ interface MailState {
   /** Arrow keys: moves by one through the visible order and replaces the selection. */
   moveSelection: (delta: number, order: number[]) => void
   /**
+   * Drops selected messages that have left the list, and moves on when they all have.
+   *
+   * Called by the list whenever what it is showing changes. `order` is the visible ids and
+   * `wasAt` is where the selection sat while it was still there, so the row that slid into its
+   * place is the one that gets selected — which is what every mail client does after a delete.
+   */
+  reconcileSelection: (order: number[], wasAt: number) => void
+  /**
    * Ctrl+↓ and Ctrl+↑. docs/01 §14 — moves within the open conversation, not between rows.
    *
    * `order` is the thread's messages, oldest first, as the reader stacks them.
@@ -143,6 +151,35 @@ export const useMailStore = create<MailState>()((set, get) => ({
 
     const next = order[nextIndex]
     if (next === undefined) return
+    set({ selectedMessageIds: [next], anchorMessageId: next, focusedInThread: null })
+  },
+
+  reconcileSelection: (order, wasAt) => {
+    const { selectedMessageIds } = get()
+    if (selectedMessageIds.length === 0) return
+
+    const present = selectedMessageIds.filter((id) => order.includes(id))
+
+    // Still all here. The ordinary case, and the one that must cost nothing.
+    if (present.length === selectedMessageIds.length) return
+
+    // Some of a multi-selection went. Keep the rest rather than jumping somewhere new: the
+    // user still has a selection and moving it would lose their place.
+    if (present.length > 0) {
+      set({ selectedMessageIds: present })
+      return
+    }
+
+    // All of it has gone. Nothing left to show.
+    if (order.length === 0) {
+      set({ selectedMessageIds: [], anchorMessageId: null, focusedInThread: null })
+      return
+    }
+
+    // The row that took its place, or the last one if it was at the end.
+    const next = order[Math.min(Math.max(wasAt, 0), order.length - 1)]
+    if (next === undefined) return
+
     set({ selectedMessageIds: [next], anchorMessageId: next, focusedInThread: null })
   },
 

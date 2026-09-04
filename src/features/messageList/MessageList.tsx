@@ -109,6 +109,7 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
   const toggleMessage = useMailStore((state) => state.toggleMessage)
   const extendSelection = useMailStore((state) => state.extendSelection)
   const moveSelection = useMailStore((state) => state.moveSelection)
+  const reconcileSelection = useMailStore((state) => state.reconcileSelection)
 
   const previewLines = useLayoutStore((state) => state.previewLines)
   const setPreviewLines = useLayoutStore((state) => state.setPreviewLines)
@@ -182,6 +183,31 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
   useEffect(() => {
     if (selectedMessageIds.length === 0 && firstId !== undefined) selectMessage(firstId)
   }, [firstId, selectedMessageIds.length, selectMessage])
+
+  // Where the selection sits while it is still in the list, remembered so that when it leaves
+  // the row that slid into its place can be selected.
+  const selectedAt = useRef(0)
+  const firstSelected = selectedMessageIds[0]
+  useEffect(() => {
+    if (firstSelected === undefined) return
+    const at = order.indexOf(firstSelected)
+    if (at !== -1) selectedAt.current = at
+  }, [order, firstSelected])
+
+  // Follow the list when the selection leaves it.
+  //
+  // Deleting a message is a **move to Trash**, so the row is still there in the database — the
+  // reader asked for it again after the invalidation, got it, and went on rendering the message
+  // the user had just deleted. Clearing the query cache could never have fixed that; the
+  // selection itself has to move on, which is what every mail client does and what makes Delete
+  // usable more than once without reaching for the mouse.
+  //
+  // Written against "the selection is no longer in the list" rather than against the delete, so
+  // archive, move, a rule filing something and a sync removing a message expunged elsewhere all
+  // behave the same way.
+  useEffect(() => {
+    reconcileSelection(order, selectedAt.current)
+  }, [order, reconcileSelection])
 
   // Read once per render rather than per item: getComputedStyle forces a style recalc, and
   // calling it inside estimateSize would do that a hundred times a frame. Density is in the
