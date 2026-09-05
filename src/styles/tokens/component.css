@@ -238,6 +238,15 @@
   --preview-header-pad-x: var(--sp-5);
   --preview-header-gap: var(--sp-3);
 
+  /* The PDF pages, drawn by pdf.js onto canvases rather than handed to the WebView.
+   * A page stays white in dark mode: it is paper, and a PDF carries its own colours the
+   * way an image does, so inverting it would misrepresent the document. The tray behind
+   * it takes the theme instead, and that is what separates one page from the next. */
+  --preview-page-bg: #ffffff;
+  --preview-page-gap: var(--sp-7);
+  --preview-page-max-width: 900px;
+  --preview-page-shadow: 0 1px 4px rgb(0 0 0 / 16%);
+
   /* ---------- toast ---------- */
   --toast-radius: var(--r-xl);
   --toast-pad-x: var(--sp-6);

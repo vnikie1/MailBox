@@ -1,0 +1,58 @@
+/* PDF pages drawn by pdf.js. See PdfView.tsx for why they are not shown in a frame. */
+
+/**
+ * The tray behind the pages. It takes the theme, and the pages do not — a PDF is paper and
+ * carries its own colours, so this is what tells one page from the next in either mode.
+ */
+.tray {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--preview-page-gap);
+  overflow: auto;
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--r-md);
+  background: var(--bg-raised);
+}
+
+.pages {
+  display: grid;
+  gap: var(--preview-page-gap);
+  justify-content: center;
+}
+
+/**
+ * Sized by the page's own proportions, set inline from the PDF, so the scroller has its full
+ * height before a single page has been drawn.
+ */
+.page {
+  width: 100%;
+  max-width: var(--preview-page-max-width);
+  overflow: hidden;
+  border-radius: var(--r-sm);
+  background: var(--preview-page-bg);
+  box-shadow: var(--preview-page-shadow);
+}
+
+/**
+ * The canvas is drawn at the device pixel ratio and shown at CSS size, so it stays sharp on a
+ * high-density display. `display: block` because an inline canvas sits on the text baseline
+ * and leaves a strip of paper under every page.
+ */
+.canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.status,
+.loading {
+  display: grid;
+  flex: 1 1 auto;
+  place-items: center;
+  min-height: 0;
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  text-align: center;
+}

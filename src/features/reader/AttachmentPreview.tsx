@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import type { AttachmentData } from '@/lib/generated/AttachmentData'
 import { attachmentPreview, attachmentSave } from '@/lib/ipc'
 import { Button, Sheet, useToast } from '@/ui'
 
 import styles from './AttachmentPreview.module.css'
+import { PdfView } from './PdfView'
 
 /**
  * The built-in previewer. docs/04 Phase 6.
@@ -13,10 +14,12 @@ import styles from './AttachmentPreview.module.css'
  * than a convenience one — `ipc/attachments.rs` sets out the reasoning. The short version: an
  * "Open" button beside a file called `invoice.pdf.exe` is a loaded gun with a friendly label.
  *
- * Everything shown here is rendered by the WebView from a `data:` URI, inside a frame that
- * cannot script, for a content type the **core** decided was safe. When the core refuses, the
- * only thing offered is Save — and the shell's own warnings stay intact when the user opens
- * it themselves, which is where that decision belongs.
+ * Nothing shown here is ever handed to the platform. Images and text are drawn by the WebView
+ * inside a frame that cannot script; PDFs are parsed and painted onto a canvas by pdf.js, which
+ * is bundled (see `PdfView.tsx` for why a frame cannot do it). Either way the content type was
+ * one the **core** decided was safe. When the core refuses, the only thing offered is Save —
+ * and the shell's own warnings stay intact when the user opens it themselves, which is where
+ * that decision belongs.
  *
  * Built on `Sheet` rather than a hand-rolled modal so it inherits the focus trap, the Escape
  * and click-outside dismissal, and the house transition. A second modal implementation is a
@@ -33,6 +36,25 @@ export interface AttachmentPreviewProps {
 const CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline';"
 
 /**
+ * The bytes of an attachment the core sent as a `data:` URI.
+ *
+ * `atob` yields one byte per character, so the bytes are rebuilt rather than read as text:
+ * decoding the string directly would mangle every character outside ASCII, and a PDF is not
+ * text at all.
+ */
+function bytesOf(dataUrl: string): Uint8Array {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+
+  try {
+    const binary = atob(base64)
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  } catch {
+    // A malformed data URI is the core's bug, not something to crash the reader over.
+    return new Uint8Array()
+  }
+}
+
+/**
  * The text of an attachment the core sent as a `data:` URI.
  *
  * Decoded here rather than handed to the frame as a URI, and that is the fix rather than a
@@ -45,21 +67,9 @@ const CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline';"
  * console message from inside a frame, so it presented as an empty modal.
  *
  * Drawing the text as text needs no plugin, no `object`, and no widening of any policy.
- *
- * `atob` yields one byte per character, so the bytes are rebuilt before decoding: reading them
- * as text directly would mangle every character outside ASCII.
  */
 function textOf(dataUrl: string): string {
-  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
-
-  try {
-    const binary = atob(base64)
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
-    return new TextDecoder().decode(bytes)
-  } catch {
-    // A malformed data URI is the core's bug, not something to crash the reader over.
-    return ''
-  }
+  return new TextDecoder().decode(bytesOf(dataUrl))
 }
 
 /** Escapes text for the frame. An attachment is hostile input; this one is being shown as text. */
@@ -106,6 +116,14 @@ export function AttachmentPreview({ attachmentId, filename, onClose }: Attachmen
   const [data, setData] = useState<AttachmentData | null>(null)
   const [error, setError] = useState<string | null>(null)
   const toast = useToast()
+
+  // Held stable across renders because `PdfView` reloads the document whenever these change,
+  // and decoding a 16MB attachment on every render would be its own bug.
+  const pdfBytes = useMemo(
+    () =>
+      data !== null && data.mime.toLowerCase() === 'application/pdf' ? bytesOf(data.dataUrl) : null,
+    [data],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -179,21 +197,11 @@ export function AttachmentPreview({ attachmentId, filename, onClose }: Attachmen
         <div className={styles.message}>
           <p>Opening…</p>
         </div>
-      ) : data.mime.toLowerCase() === 'application/pdf' ? (
-        // Said rather than shown, because it cannot be shown here.
-        //
-        // A PDF needs Chromium's PDF viewer, and the viewer is a plugin: "Failed to load … as a
-        // plugin, because the frame into which the plugin is loading is sandboxed". The sandbox
-        // is not negotiable for an attachment — this file's own note says an attachment is
-        // exactly as hostile as a message body — so a PDF cannot be drawn in this frame at all.
-        //
-        // It used to try anyway and produce an empty white modal, which reads as the app being
-        // broken rather than as a limit. docs/04 Phase 6 does ask for PDF in the previewer; that
-        // is unbuilt rather than done, and saying so is the honest state of it.
-        <div className={styles.message}>
-          <p>PDFs cannot be previewed here yet.</p>
-          <p>Save it to open it in your PDF reader.</p>
-        </div>
+      ) : pdfBytes !== null ? (
+        // Drawn by the app, not by the frame. Chromium's PDF viewer is a plugin and refuses to
+        // load into a sandboxed frame, and the sandbox is not negotiable for an attachment, so
+        // a PDF here is rendered by pdf.js onto a canvas instead. `PdfView` has the detail.
+        <PdfView bytes={pdfBytes} filename={filename} />
       ) : (
         <iframe
           title={filename}

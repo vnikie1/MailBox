@@ -4714,3 +4714,93 @@ All reported from using the app.
   mistake came from mapping emit line numbers onto function ranges without checking that
   `finish_add` sits _above_ the functions that call it. The real faults were both on the
   listening side, and looking for a missing emit nearly hid them.
+
+---
+
+## 2026-09-05 — A PDF viewer, bundled
+
+### Added
+
+- **PDFs now render in the attachment previewer**, drawn by a bundled pdf.js (`pdfjs-dist` 6.3)
+  onto a `<canvas>` in the app's own React tree. This closes the gap recorded in the entry
+  above, where the previewer had been made to say PDFs were unsupported rather than show a blank
+  modal — an honest message, but a poor one for the single most common thing anyone attaches to
+  an email. docs/04 Phase 6 asks for "image/PDF/text" in the previewer; all three now work.
+
+  It could not be done in the preview frame at any price. Chromium's PDF viewer is a plugin and
+  refuses to load into a sandboxed frame, and the sandbox is not negotiable for an attachment.
+  pdf.js sidesteps that entirely by parsing the file in JavaScript and painting pixels: no
+  plugin, no navigation, no scripting, no path to the network or the IPC bridge. **The bytes
+  never become a document**, which is a stronger position than the frame the other attachment
+  types get, not a weaker one.
+
+  Bundled rather than fetched, so the previewer works offline and pulls nothing at runtime.
+
+- **Pages are drawn only as they are reached**, through an `IntersectionObserver` with two
+  screens of margin, and their canvases are released when they go out of range. The core allows
+  a preview up to 16MB, which is a few hundred pages; drawing all of them at once would be
+  gigabytes of canvas for a document nobody scrolled. Every page is _measured_ up front, so the
+  scroller has its true height from the start and does not shift under a reader mid-scroll.
+
+  Rendered at the display's pixel ratio, capped at 2 — a scanned A4 page at the full ratio of a
+  4K display is a 60-megapixel canvas, and past 2 the difference is invisible in a preview.
+
+### Changed
+
+- `vite.config.ts` gained a small plugin that serves pdf.js's `standard_fonts` and `cmaps` in
+  dev and copies them into the build. pdf.js builds those URLs at runtime from a directory
+  prefix, so Vite never sees an import to follow and a hashed filename would not be findable —
+  `emitFile` with an explicit `fileName` is the escape hatch for exactly that. They are read
+  from `node_modules` rather than committed to `public/`, which would vendor 2.3MB of binaries
+  and let them drift from the installed pdf.js.
+
+  `standard_fonts` is not optional: the fourteen fonts a PDF may _reference_ without embedding
+  are what generated documents use, so without it an invoice or a payslip renders as blank
+  boxes.
+
+- The previewer's base64 decode was split into `bytesOf` and `textOf`, because a PDF needs the
+  bytes and text needs them decoded. Same code, one caller more.
+
+- Tokens `--preview-page-*` added. A PDF page stays white in dark mode: it is paper, and a PDF
+  carries its own colours the way an image does, so inverting it would misrepresent the
+  document. The tray behind the pages takes the theme instead, and that is what separates one
+  page from the next.
+
+### Notes
+
+- **The app's CSP needed no change, and that was checked rather than assumed.** pdf.js loads its
+  worker as a module worker from a same-origin URL, which `default-src 'self'` allows; its blob
+  fallback would have been blocked, and the consolation prize on that path is a "fake worker"
+  that parses on the main thread and freezes the window, so it was worth confirming. Tauri
+  serves `.mjs` as `text/javascript` (`tauri-utils/src/mime_type.rs`), which a module worker
+  requires. Fonts and CMaps are same-origin fetches under `connect-src 'self'`, and pdf.js's
+  `@font-face` data URIs are already covered by `font-src data:`. pdf.js 6 contains no `eval`,
+  so `script-src 'self'` stands without `'unsafe-eval'`.
+
+- **Loaded on demand.** pdf.js and its worker are about 1.7MB and land in their own chunks
+  (`pdf-*.js`, `pdf.worker.min-*.mjs`), so a session that never opens a PDF never pays for them.
+  A cold start that loaded a PDF renderer nobody opened would spend a good part of the startup
+  budget in docs/06 on it.
+
+- **The lazy-rendering observer was written against the wrong root, and that was caught before
+  it shipped rather than by using it.** It watched the viewport with two screens of margin, and
+  the margin bought nothing: a page scrolled out of the tray is _clipped_ by the tray, so its
+  visible area is zero however far the viewport rect is grown. Pages would have blanked at the
+  edge of the scroll instead of being drawn ahead of it. It observes the tray now. Confirmed
+  against the five-page lease PDF in the store: page 4 drew on demand when scrolled to.
+
+- Two lint rules shaped the code more than taste did, and both are worth knowing. TypeScript
+  carries flow analysis _into_ an immediately-invoked function, so every `if (cancelled) return`
+  after the first read as dead code inside one; loading and committing are split into separate
+  callbacks so each guard sits in its own scope. And `vi.fn()` alone is typed `any`, which trips
+  `no-unsafe-return` wherever a mock module forwards to it — `vi.fn(() => Promise.resolve())`
+  carries a real type.
+
+### Fixed
+
+- **Nothing held the account-sync fix from the entry above.** It shipped with no test, and the
+  two behaviours are indistinguishable once the app restarts, because a launch sync fetches the
+  new account anyway — which is exactly what let the original fault survive as long as it did,
+  and would have let a regression survive just as long. `tests/unit/syncOnAccountAdded.test.tsx`
+  now fires the `accounts:changed` handler and asserts both `syncWatch` and `syncAll` ran. It
+  was confirmed to fail with the `syncAll()` call removed, so it is testing what it claims to.
