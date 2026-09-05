@@ -4645,3 +4645,72 @@ All four reported from using the app rather than found by a sweep.
   does not mark it read, so its unread state follows it into the Bin. docs/01 §"Sidebar unread
   badge" requires only that a count disappears at zero, and says nothing about excluding Trash
   or Sent. Left as it is, and noted because it looks like the reported bug and is not.
+
+---
+
+## 2026-09-05 — Adding an account, and the attachment previewer
+
+All reported from using the app.
+
+### Fixed
+
+- **An account added mid-session was announced, watched, and never fetched.** A Yahoo account
+  showed only its name in the sidebar: the store held the account row, **zero mailboxes and zero
+  messages**, and the log had no `sync starting` for it at all.
+
+  The main window's `accounts:changed` handler called `sync_watch` and stopped. Watching reports
+  what arrives _next_, so the account got an IDLE watcher and no mailbox tree, no messages, and
+  nothing to show — until a restart or a manual Get Mail. It now syncs as well as watches.
+  `sync_all` locks per account and returns quickly for one with nothing to do, so covering every
+  account there costs little and means no path can add an account and forget to fetch it.
+  Verified live: 31 mailboxes and 470 messages on the first pass after the fix.
+
+- **Settings never heard `accounts:changed`.** It is its own OS window with its own
+  `QueryClient`, and `useAccountEvents` was mounted "once, near the root" — the root of the
+  _main_ window. This one subscribed to nothing, so it kept the account list it had cached when
+  it opened, and a newly added account appeared only after closing and reopening Settings. Which
+  reads as the account not having been added at all.
+
+- **Every non-image attachment preview was a blank modal.** The previewer drew text and PDFs with
+  `<object data="data:…">`, and the preview frame carries `sandbox`, so it **inherits the
+  application's own CSP** — which says `object-src 'none'`. Policies combine
+  most-restrictive-wins, so the `object-src data:` in the frame's own policy could never take
+  effect. Chromium says so plainly: _"Loading plugin data from 'data:…' violates the following
+  Content Security Policy directive: object-src 'none'."_ Nothing surfaces a console message
+  from inside a frame, so it presented as an empty white modal.
+
+  Text and JSON are now decoded and drawn as escaped text in a `<pre>`, which needs no plugin, no
+  `object`, and **no widening of any policy**. It also reads better than a plugin view of a text
+  file.
+
+### Notes
+
+- **PDF previews are not built**, and now say so instead of showing a blank modal. They cannot be
+  drawn in this frame at all: Chromium's PDF viewer is a plugin, and _"Failed to load … as a
+  plugin, because the frame into which the plugin is loading is sandboxed"_. The sandbox is not
+  negotiable for an attachment — this app's own note is that an attachment is exactly as hostile
+  as a message body — so the options are a bundled renderer such as pdf.js, or nothing. docs/04
+  Phase 6 lists the previewer as "image/PDF/text", so this is a real gap, recorded rather than
+  papered over. Images and text work; a PDF offers Save.
+
+- The CSP findings were established by experiment rather than by reading, because the behaviour
+  is subtle and both guesses along the way were wrong. Two throwaway pages under the scratchpad
+  proved, in order: a `srcdoc` frame renders under `frame-src 'none'` while a `src="data:"` frame
+  does not — which is why message bodies were fine and this was not; that an `<object>` inside a
+  `srcdoc` frame is blocked by the _parent's_ `object-src` regardless of its own policy; and that
+  a `data:` PDF fails even with `object-src data:` allowed, for the separate sandbox reason above.
+
+### Incidents
+
+- **Two wrong diagnoses on the way to the attachment bug, both corrected by experiment.** First
+  the app CSP's `frame-src 'none'` was blamed — plausible, and wrong, because the previewer uses
+  `srcDoc` rather than `src`. Then `object-src` was identified correctly, but the proposed fix
+  (allow `object-src data:`) would not have fixed PDFs, which fail on the sandbox instead. Each
+  was caught by running the case rather than by reasoning further, and the second would have
+  shipped a CSP relaxation that bought nothing.
+
+- **An earlier reading of `ipc/accounts.rs` concluded that neither add function emitted
+  `accounts:changed`.** That was wrong: both end in `finish_add`, which emits at line 346. The
+  mistake came from mapping emit line numbers onto function ranges without checking that
+  `finish_add` sits _above_ the functions that call it. The real faults were both on the
+  listening side, and looking for a missing emit nearly hid them.
