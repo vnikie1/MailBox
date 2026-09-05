@@ -4491,3 +4491,157 @@ failure to look hard enough.
 - **Backticks in a `node -e` were eaten by bash again**, this time inside a Rust doc comment.
   Switched to the editing tools for that file. Third occurrence in two days; the rule is now simply
   not to write prose through the shell.
+
+---
+
+## 2026-09-04 — Deleting mail, reported from using the app
+
+### Fixed
+
+- **Deleting a message failed outright whenever Trash already held its UID.** Reported as
+  "that change could not be made"; the core was rejecting the command with
+  `UNIQUE constraint failed: message.mailbox_id, message.uid`.
+
+  Deleting is a move to Trash, and `move_to` carried the source UID across while `message` has
+  `UNIQUE(mailbox_id, uid)`. A UID belongs to one mailbox and means nothing in another, so the
+  moment Trash already held that number the whole transaction failed. Measured against the real
+  account it was found on: **23 of 267 Inbox messages** shared a UID with something already in
+  the Bin — about one in ten, which is why it looked intermittent rather than broken.
+
+  A moved message now parks at a **negative placeholder UID** derived from its row id: unique,
+  so a multi-selection moves without colliding with itself, and never mistakable for a server
+  UID. The codebase already had this idea — `remove_missing` ignores `uid <= 0` and
+  `ops::locate` skips it — because a message moved locally is exactly a row that is here and not
+  yet on the server. `write_batch` adopts that row when the real UID comes back rather than
+  inserting beside it, which would leave two rows for one message and break undo (undo holds the
+  row id). Undo restores the UID with the mailbox, or putting a message back would leave it in
+  its original folder looking like something that had never been on the server.
+
+- **Deleting a message left it in the reader and did not move on.** The list now reconciles its
+  selection whenever what it shows changes: rows that have gone are dropped, and when the whole
+  selection has gone the row that slid into its place is selected.
+
+  Written against "the selection is no longer in the list" rather than against deleting, so
+  archiving, moving, a rule filing something, and a sync removing a message expunged on another
+  device all behave the same way. A multi-selection keeps whatever survives rather than jumping
+  somewhere new, and deleting the last message in a mailbox clears the selection instead of
+  leaving the reader showing mail that is no longer there.
+
+- **The contact index is filled from mail already in the store** (migration 0011). Recording
+  senders as messages arrive covers everything from now on and nothing from before, so an
+  install with a mailbox already downloaded would have kept an empty People group for weeks —
+  and the people worth suggesting are precisely the ones already there. On the real account this
+  took the index from 2 entries to **280** on first run.
+
+### Incidents
+
+- **The selection fix was the wrong diagnosis of the right report.** "Deleting doesn't remove
+  the mail from the preview" was diagnosed as the selection not moving on, and that was a
+  genuine bug and is fixed — but it was not what the user was seeing. The delete was failing
+  entirely. The lesson is the sequencing: a plausible cause was found, fixed, shipped, and the
+  symptom persisted, because nobody had looked at the error the core was actually returning.
+
+- **The delete bug was invisible until the mutation hooks were given an `onError`** two days
+  earlier. TanStack Query caught the rejection, stored it in a state nothing read, and the
+  message stayed where it was with no error anywhere. The bug is considerably older than the
+  report; the error toast is what finally made it visible. Worth remembering the next time
+  something "has always been a bit odd" — a swallowed error is not a missing bug.
+
+---
+
+## 2026-09-05 — Four things wrong with the reader
+
+All four reported from using the app rather than found by a sweep.
+
+### Fixed
+
+- **Opening a message downloaded every remote image before showing a single word**, one after
+  another, with a fresh HTTP client each time. A newsletter with thirty-two images made
+  thirty-two round trips in series: **1.9 seconds** of waiting, measured in the log between the
+  body being read and the render coming back.
+
+  Now fetched **six at a time** over one client that keeps its connection pool and DNS cache,
+  and **cached on disk for thirty days**. A second read costs no requests at all, which is
+  faster _and_ quieter: the tracking pixel fires once rather than once per read. The cache is
+  keyed on a SHA-256 of the URL and swept once per process, because a cache with no eviction is
+  a disk leak with a long fuse.
+
+  The reader also re-rendered on **every sync tick**: `messages:updated` invalidated
+  `['messageBody']` whole, so any message changing anywhere re-rendered whatever was open — and
+  rendering a body means fetching its images. Only the bodies that changed are invalidated now.
+
+  `render` itself was never the problem — 52KB in, 32KB out, 9ms — and `tests/render_budget.rs`
+  now holds that against the real message, because the complaint pointed at rendering and the
+  cost was entirely in the network.
+
+- **The reader took two goes to start scrolling.** The frame is sized from outside by
+  measuring, so until that lands it is only `min-height` tall and its content overflows — which
+  makes the inner document a scroll container. Chromium latches a wheel gesture to the first
+  scroller under the pointer and keeps it there for the whole gesture, so the first scroll went
+  nowhere. The frame document now sets `overflow: hidden`, which is the only place it counts:
+  `overflow` on the `<iframe>` element does not reach the document inside it.
+
+- **Every HTML message printed its subject above the message.** It was `<title>`. `rm_tags`
+  takes a tag out of ammonia's allowlist and the default for a disallowed tag is to _unwrap_ it
+  — the element goes and its text stays. Every marketing message carries a title and its text is
+  the subject, so it arrived as a stray paragraph, flush left, outside the layout. `title`,
+  `head`, `noscript` and `template` are now removed with their contents.
+
+- **Two banners contradicted each other.** An image that was allowed, attempted and unreachable
+  was counted as _withheld_, so a message with images on and a few failures showed "Loading them
+  tells the sender you opened this message" beside "Remote images loaded" — over a Load Images
+  button that would have done nothing. Failures have their own count and their own sentence now,
+  and no button, because there is nothing for the user to decide.
+
+- **The message list showed raw HTML in a preview.** A sender put a whole `<html>` document
+  inside the `text/plain` part, and that part feeds the preview, the search index and the junk
+  classifier alike — so a row read `<html> <head></head> <body> <p>Dear Investor,</p>`. Such a
+  part is now read as the HTML it is. The check is deliberately narrow, matching a structural
+  tag only at the very start: real mail is full of stray angle brackets, and stripping those
+  would take away text the sender meant to send.
+
+### Notes
+
+- Only **1 of 1,511** stored messages carries a preview affected by the plain-text-is-HTML bug.
+  The fix applies to bodies parsed from here on; that one row keeps its old preview until its
+  body is re-fetched. Not worth a migration, and recorded so nobody hunts for it later.
+- Both new fixtures under `src-tauri/tests/fixtures/` are **real messages captured from a real
+  mailbox**, and `.prettierignore` now covers that directory. Reformatting them would change the
+  bytes under test, and two of these bugs were only reproducible against mail shaped like real
+  mail — a whole document with a head — rather than the body fragments the unit tests use.
+
+### Incidents
+
+- **The changelog was not written for 4 or 5 September in the sessions that did the work.** Both
+  sessions ended without an entry, against the standing instruction in `CLAUDE.md` that it is
+  updated in the same session and does not need prompting. These two entries were reconstructed
+  afterwards from the commits and the investigation notes, which is exactly the position the
+  rule exists to avoid — the reasoning was still to hand this time, and next time it would not
+  be.
+
+---
+
+## 2026-09-05 — The unread counter, investigated and found correct
+
+### Notes
+
+- **Reported: "deleting the mail doesn't reset the unread counter."** Investigated against the
+  live store and no defect was found. Recorded so it is not investigated twice.
+
+  Three independent checks agree. Every cached count matches a fresh count of the rows —
+  `unread_count` and `total_count`, across the Inbox, Bin, Sent, Spam, Important and All Mail,
+  zero mismatches. The running app's sidebar reads "All Inboxes 7 unread" through the
+  accessibility tree, which is exactly what the database holds. And `moving_adjusts_both_ends`
+  covers the arithmetic directly: a move takes an unread message off the source count and adds
+  it to the destination, which is what a delete is.
+
+  The symptom was almost certainly the delete itself failing — the UID collision fixed the day
+  before. Nothing had moved, so no count moved either. The log confirms the fix is holding: no
+  `UNIQUE constraint` failures at all today, three messages parked at placeholder UIDs from
+  successful local moves, and three `move INBOX -> [Gmail]/Bin` operations queued with correct
+  positive source UIDs and no failed attempts.
+
+- **The Bin shows 241 unread and Sent shows 8.** This is not a bug either: deleting a message
+  does not mark it read, so its unread state follows it into the Bin. docs/01 §"Sidebar unread
+  badge" requires only that a count disappears at zero, and says nothing about excluding Trash
+  or Sent. Left as it is, and noted because it looks like the reported bug and is not.
