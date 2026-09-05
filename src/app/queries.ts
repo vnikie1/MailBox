@@ -361,7 +361,15 @@ export function useMailEvents(): void {
         // that is the whole point of fetching lazily — so the reader renders an empty
         // frame first and needs telling when the content actually arrives. Without this
         // the body appeared only if you clicked away and back.
-        void client.invalidateQueries({ queryKey: ['messageBody'] })
+        //
+        // Only the bodies that changed. This used to invalidate `['messageBody']` whole,
+        // so *any* message updating anywhere re-rendered whatever was open — and rendering
+        // a body means fetching every remote image in it. A newsletter left on screen was
+        // re-downloaded on every sync tick. The key carries the id, so naming it here is a
+        // prefix match over both the images-on and images-off variants of that one message.
+        for (const id of ids) {
+          void client.invalidateQueries({ queryKey: ['messageBody', id] })
+        }
       })
       .then(keep)
 

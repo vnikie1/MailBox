@@ -27,6 +27,16 @@ inlined: number,
  */
 loadedRemote: number, 
 /**
+ * How many remote images were allowed, attempted, and could not be fetched.
+ *
+ * Its own number because it is a different sentence. These used to be counted as
+ * `blocked_remote`, which drives the "Loading them tells the sender you opened this
+ * message" banner and its Load Images button — so a message whose images were **on** and
+ * partly unreachable showed that banner *and* the "images loaded" one at the same time,
+ * contradicting itself, over a button that would have done nothing new.
+ */
+failedRemote: number, 
+/**
  * True when the message had no HTML part and this is its plain text, wrapped.
  */
 fromPlainText: boolean, };

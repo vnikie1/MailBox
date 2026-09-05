@@ -137,8 +137,45 @@ pub fn parse(raw: &[u8]) -> Body {
         }
     }
 
+    // A `text/plain` part that is not plain text.
+    //
+    // Senders do this — a bank statement notice arrived with a full `<html>` document inside
+    // its text/plain part — and the part is trusted for the preview, the search index and the
+    // junk classifier alike. So the message list showed a row reading
+    // `<html> <head></head> <body> <p>Dear Investor,</p>` where the summary should be, search
+    // matched on tag names, and the classifier learned from markup.
+    //
+    // Run through the same reader used for an HTML-only message. Doing it here rather than at
+    // the preview means the stored text is right for everything that reads it.
+    if let Some(text) = &body.text {
+        if looks_like_html(text) {
+            let stripped = text_from_html(text);
+            if !stripped.trim().is_empty() {
+                body.text = Some(stripped);
+            }
+        }
+    }
+
     body.preview = build_preview(body.text.as_deref().unwrap_or_default());
     body
+}
+
+/// Whether a supposedly plain-text body is actually markup.
+///
+/// Deliberately narrow. Ordinary mail is full of stray angle brackets — quoted addresses like
+/// `<ada@example.test>`, arrows, code — and treating any of those as HTML would strip text the
+/// sender meant to send. What is being caught is a whole document put in the wrong part, so it
+/// asks for a real structural tag at the start of a line, which prose does not produce.
+fn looks_like_html(text: &str) -> bool {
+    const MARKERS: [&str; 6] = ["<html", "<body", "<head", "<div", "<table", "<!doctype"];
+
+    let opening = text.trim_start();
+    let lowered = opening
+        .get(..opening.len().min(2048))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    MARKERS.iter().any(|marker| lowered.starts_with(marker))
 }
 
 /// Walks the MIME tree, depth-bounded.
@@ -1020,5 +1057,66 @@ Sent from my phone\r\n";
             text_from_html("<!-- café --><p>Body text.</p>"),
             "Body text."
         );
+    }
+
+    #[test]
+    fn a_plain_part_that_is_really_html_is_read_as_html() {
+        // Senders do this. A bank notice arrived with a whole `<html>` document inside its
+        // text/plain part, and that part is what feeds the preview, the search index and the
+        // junk classifier — so the message list showed a row reading
+        // "<html> <head></head> <body> <p>Dear Investor,</p>" where the summary belongs.
+        let raw = b"From: bank@example.test\r\n\
+Subject: Funds/Securities Balance\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+<html>\r\n<head></head>\r\n<body>\r\n\t<p>Dear Investor,</p>\r\n\t<p>With reference to the circular.</p>\r\n</body>\r\n</html>\r\n";
+
+        let body = parse(raw);
+        let text = body.text.unwrap_or_default();
+
+        assert!(
+            !text.contains("<html"),
+            "the markup reached the stored text: {text:?}"
+        );
+        assert!(text.contains("Dear Investor,"), "{text:?}");
+        assert!(
+            !body.preview.contains('<'),
+            "the preview still shows tags: {:?}",
+            body.preview
+        );
+    }
+
+    #[test]
+    fn ordinary_text_with_angle_brackets_is_left_alone() {
+        // The reason the check is narrow. Real mail is full of stray brackets — quoted
+        // addresses, arrows, snippets of code — and stripping those would take away text the
+        // sender meant to send.
+        let raw = b"From: ada@example.test\r\n\
+Subject: Re: the address\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
+\r\n\
+Write to <grace@example.test> and copy me.\r\n\
+The comparison a < b holds, and 5 > 3.\r\n";
+
+        let body = parse(raw);
+        let text = body.text.unwrap_or_default();
+
+        assert!(text.contains("<grace@example.test>"), "{text:?}");
+        assert!(text.contains("a < b"), "{text:?}");
+        assert!(text.contains("5 > 3"), "{text:?}");
+    }
+
+    #[test]
+    fn the_marker_has_to_start_the_body() {
+        // A message that merely mentions a tag partway through is prose about HTML, not HTML.
+        assert!(!looks_like_html(
+            "I tried wrapping it in <div> and it still broke."
+        ));
+        assert!(looks_like_html(
+            "<!DOCTYPE html><html><body>Hi</body></html>"
+        ));
+        assert!(looks_like_html("  \r\n<html>\n<body>Hi"));
+        assert!(!looks_like_html("Hello there."));
+        assert!(!looks_like_html(""));
     }
 }

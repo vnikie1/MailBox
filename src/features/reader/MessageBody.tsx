@@ -121,6 +121,24 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
         </div>
       )}
 
+      {/* Allowed, attempted, and not there. A different sentence from the one above, and it
+          used to be the same one: a failed fetch was counted as withheld, so a message with
+          images *on* and a few unreachable showed "Loading them tells the sender you opened
+          this message" beside "Remote images loaded" — two banners contradicting each other,
+          over a Load Images button that would have done nothing. No button here, because there
+          is nothing for the user to decide. */}
+      {rendered.failedRemote > 0 && (
+        <div className={styles.banner} role="status">
+          <ImageOff className={styles.bannerIcon} aria-hidden />
+          <span className={styles.bannerText}>
+            {rendered.failedRemote === 1
+              ? '1 image could not be downloaded.'
+              : `${String(rendered.failedRemote)} images could not be downloaded.`}{' '}
+            The sender&rsquo;s server did not answer.
+          </span>
+        </div>
+      )}
+
       {/* The other direction, and it only appears when images *did* load. Someone who opens a
           message from a stranger and realises what that just told them needs a way to stop it
           for the rest of the thread — and with the setting on by default, this is the only

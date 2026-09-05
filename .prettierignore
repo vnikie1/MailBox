@@ -9,6 +9,12 @@ README.md
 # Reference captures — compared against, never edited.
 assets/reference/
 
+# Real messages, captured from a real mailbox and used as test input. Reformatting them would
+# change the bytes under test: the whole point of these fixtures is that they are exactly what a
+# sender actually sent, tag soup and all. Two bugs were only reproducible against mail shaped
+# like this rather than against a hand-written snippet.
+src-tauri/tests/fixtures/
+
 dist
 node_modules
 src-tauri/target

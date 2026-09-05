@@ -50,6 +50,15 @@ pub struct Rendered {
     /// setting on by default that second banner is the only per-message control there is.
     #[ts(type = "number")]
     pub loaded_remote: u32,
+    /// How many remote images were allowed, attempted, and could not be fetched.
+    ///
+    /// Its own number because it is a different sentence. These used to be counted as
+    /// `blocked_remote`, which drives the "Loading them tells the sender you opened this
+    /// message" banner and its Load Images button — so a message whose images were **on** and
+    /// partly unreachable showed that banner *and* the "images loaded" one at the same time,
+    /// contradicting itself, over a button that would have done nothing new.
+    #[ts(type = "number")]
+    pub failed_remote: u32,
     /// True when the message had no HTML part and this is its plain text, wrapped.
     pub from_plain_text: bool,
 }
@@ -161,6 +170,19 @@ fn sanitise(html: &str) -> String {
 
     builder
         .rm_tags(forbidden_tags())
+        // Removed **with their contents**, which is the difference that matters.
+        //
+        // `rm_tags` takes a tag out of the allowlist, and ammonia's default for a disallowed
+        // tag is to unwrap it: the element goes and its text stays. For `<script>` that is
+        // harmless, and ammonia already deletes script and style content by default. For
+        // `<title>` it is not: every marketing message carries one, and its text is the
+        // subject — so **every HTML message opened with the subject line printed as a stray
+        // paragraph above the message**, flush left, outside the layout, looking like a
+        // rendering fault. Reported from using the app, and visible in every screenshot of it.
+        //
+        // `head` and `noscript` for the same reason: neither is content the reader asked for,
+        // and unwrapping them spills their insides into the message.
+        .add_clean_content_tags(["title", "head", "noscript", "template"])
         // Every `on*` handler. Ammonia's default allow-list has no event handlers in it, but
         // saying so explicitly means a future change to that default cannot quietly
         // reintroduce them.
@@ -201,10 +223,11 @@ fn rewrite_images(
     inline: &HashMap<String, String>,
     load_remote: bool,
     remote: &HashMap<String, String>,
-) -> (String, u32, u32, u32) {
+) -> (String, u32, u32, u32, u32) {
     let mut out = String::with_capacity(html.len());
     let mut blocked = 0u32;
     let mut loaded = 0u32;
+    let mut failed = 0u32;
     let mut inlined = 0u32;
     let mut rest = html;
 
@@ -216,7 +239,7 @@ fn rewrite_images(
             // No closing quote: not something html5ever would emit, so stop rewriting and
             // pass the remainder through rather than guessing.
             out.push_str(after);
-            return (out, blocked, loaded, inlined);
+            return (out, blocked, loaded, failed, inlined);
         };
 
         let url = &after[..end];
@@ -247,11 +270,14 @@ fn rewrite_images(
                     loaded += 1;
                 }
                 (true, None) => {
-                    // Asked for but could not be fetched. Blocked rather than left as a live
-                    // URL — otherwise "load remote content" would quietly become "let the
+                    // Asked for but could not be fetched. Still replaced rather than left as a
+                    // live URL — otherwise "load remote content" would quietly become "let the
                     // frame make the request itself", which is the thing being prevented.
+                    //
+                    // Counted apart from the withheld ones: nothing is being kept from the
+                    // user here, the image simply is not there.
                     out.push_str(BLOCKED);
-                    blocked += 1;
+                    failed += 1;
                 }
                 (false, _) => {
                     out.push_str(BLOCKED);
@@ -269,7 +295,7 @@ fn rewrite_images(
     }
 
     out.push_str(rest);
-    (out, blocked, loaded, inlined)
+    (out, blocked, loaded, failed, inlined)
 }
 
 /// Sanitised HTML with `src` attributes untouched.
@@ -640,7 +666,7 @@ pub fn render(
     };
 
     let clean = sanitise(html);
-    let (rewritten, blocked_remote, loaded_remote, inlined) =
+    let (rewritten, blocked_remote, loaded_remote, failed_remote, inlined) =
         rewrite_images(&clean, inline, load_remote, remote);
 
     // Detected *before* folding, so a tracking number in the quoted part is still a link when
@@ -656,6 +682,7 @@ pub fn render(
         html: folded,
         blocked_remote,
         loaded_remote,
+        failed_remote,
         inlined,
         from_plain_text: false,
     }
@@ -814,7 +841,18 @@ mod tests {
 
         assert!(rendered.html.contains(BLOCKED));
         assert!(!rendered.html.contains("cdn.test"));
-        assert_eq!(rendered.blocked_remote, 1);
+
+        // Counted as *failed*, not as withheld. Both replace the URL — that is the security
+        // property this test exists for, and it is unchanged — but they are different sentences
+        // to the user. Counting a failure as withheld put the "Loading them tells the sender you
+        // opened this message" banner, and its Load Images button, on a message whose images
+        // were already on: two banners contradicting each other over a button that would have
+        // done nothing.
+        assert_eq!(rendered.failed_remote, 1);
+        assert_eq!(
+            rendered.blocked_remote, 0,
+            "nothing was withheld from the user here"
+        );
     }
 
     #[test]

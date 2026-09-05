@@ -44,6 +44,21 @@ function frameDocument(html: string, plainText: boolean): string {
 <base target="_blank">
 <style>
   html, body { margin: 0; padding: 0; background: #fff; color: #1c1c1e; }
+
+  /* The frame must never scroll itself, and saying so *inside* the document is the only place
+     it counts: \`overflow\` on the <iframe> element does not reach the document it contains.
+
+     Without this the reader took two goes to start scrolling. The frame is sized from the
+     outside by measuring, so until that lands it is only \`min-height\` tall and its content
+     overflows — which makes the inner document a scroll container. Chromium latches a wheel
+     gesture to the first scroller it finds under the pointer and keeps it there for the rest of
+     the gesture, so the first scroll went nowhere and only a second, separate gesture reached
+     the pane behind it.
+
+     \`scrollHeight\` still reports the full content height when overflow is hidden, so the
+     measurement above is unaffected. Horizontal scrolling for wide tables is unaffected too:
+     that lives on \`.halcyon-scroll\`, an element inside the body. */
+  html { overflow: hidden; }
   body {
     font: 14px/1.55 -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
     padding: 4px 2px 16px;

@@ -31,6 +31,24 @@ const MAX_REMOTE_IMAGES: usize = 60;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many remote images to fetch at once.
+///
+/// They were fetched **one after another**, and that is what "the content loading is very very
+/// slow" turned out to be: a newsletter with thirty-two images made thirty-two round trips in
+/// series before a single word appeared, because the body is not handed over until they are all
+/// in. On the message this was measured against that came to 1.9 seconds of waiting.
+///
+/// Six, which is what a browser allows per host and comfortably below what a CDN would treat as
+/// a flood. The images in one message usually share a host, so that is the number that applies.
+const REMOTE_CONCURRENCY: usize = 6;
+
+/// How long a fetched image stays in the on-disk cache.
+///
+/// Re-opening a message re-fetched every image every time, so the second read of a newsletter
+/// cost exactly as much as the first — and told the sender it had been opened again. Caching is
+/// faster *and* quieter: the tracking pixel fires once rather than once per read.
+const REMOTE_CACHE_DAYS: u64 = 30;
+
 /// Builds `cid:` → data URI from the cached `.eml`.
 ///
 /// Read from the cache, never from the network — docs/03 §6.4. The `.eml` is already on disk
@@ -126,64 +144,164 @@ fn collect_parts(
 /// from. They do not learn which client, which message, or anything that persists between
 /// senders. The user-facing copy in Settings says exactly this, because a promise of anonymity
 /// that is not kept is worse than no promise.
-async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
-    let mut fetched = HashMap::new();
+/// The HTTP client, built once.
+///
+/// Rebuilding it per message threw away the connection pool and the DNS cache, so every image
+/// paid for a fresh TCP and TLS handshake even when thirty of them shared one host.
+///
+/// No cookie store, and a generic agent. A client that carried cookies would let one sender's
+/// pixel identify the reader to the next.
+fn remote_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
 
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(REMOTE_TIMEOUT)
-        // No cookie store, and a generic agent. A client that carried cookies would let one
-        // sender's pixel identify the reader to the next.
-        .user_agent("Mozilla/5.0")
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-    else {
-        return fetched;
-    };
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(REMOTE_TIMEOUT)
+                .user_agent("Mozilla/5.0")
+                .redirect(reqwest::redirect::Policy::limited(3))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
 
-    for url in urls.iter().take(MAX_REMOTE_IMAGES) {
-        let Ok(response) = client.get(url).send().await else {
-            continue;
+/// Where fetched remote images are kept between reads.
+fn remote_cache_dir() -> Option<std::path::PathBuf> {
+    let root = crate::db::default_path().parent()?.join("remote");
+    std::fs::create_dir_all(&root).ok()?;
+    Some(root)
+}
+
+/// The cache file for one URL.
+///
+/// SHA-256 of the URL, so the name is fixed-length, contains no path separators, and cannot be
+/// steered by a sender into writing outside the directory.
+fn cache_file(dir: &std::path::Path, url: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(url.as_bytes());
+    dir.join(format!("{digest:x}"))
+}
+
+/// Drops cached images nothing has read in a while. Runs once per process.
+///
+/// A cache with no eviction is a disk leak with a long fuse: every image in every newsletter,
+/// kept for ever. Modified time rather than an index, because the file *is* the record.
+fn sweep_remote_cache(dir: &std::path::Path) {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+
+    SWEPT.call_once(|| {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
         };
 
-        if !response.status().is_success() {
-            continue;
+        let cutoff =
+            std::time::SystemTime::now() - Duration::from_secs(REMOTE_CACHE_DAYS * 24 * 60 * 60);
+
+        let mut removed = 0usize;
+
+        for entry in entries.filter_map(Result::ok) {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified < cutoff);
+
+            if stale && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
         }
 
-        let mime = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .split(';')
-            .next()
-            .unwrap_or("application/octet-stream")
-            .trim()
-            .to_ascii_lowercase();
-
-        // Only images. A server that answers an `<img src>` with HTML is not serving an
-        // image, and turning that into a data: URI would put the sender's markup back into
-        // the document the sanitiser just cleaned.
-        if !mime.starts_with("image/") {
-            continue;
+        if removed > 0 {
+            tracing::debug!(removed, "remote image cache swept");
         }
+    });
+}
 
-        if response.content_length().unwrap_or(0) > MAX_REMOTE_BYTES {
-            continue;
-        }
+/// Fetches one remote image and returns it as a `data:` URI.
+async fn fetch_one(client: &reqwest::Client, url: &str) -> Option<String> {
+    let response = client.get(url).send().await.ok()?;
 
-        let Ok(bytes) = response.bytes().await else {
-            continue;
-        };
-
-        if bytes.len() as u64 > MAX_REMOTE_BYTES {
-            continue;
-        }
-
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        fetched.insert(url.clone(), format!("data:{mime};base64,{encoded}"));
+    if !response.status().is_success() {
+        return None;
     }
 
-    fetched
+    let mime = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .split(';')
+        .next()
+        .unwrap_or("application/octet-stream")
+        .trim()
+        .to_ascii_lowercase();
+
+    // Only images. A server that answers an `<img src>` with HTML is not serving an image, and
+    // turning that into a data: URI would put the sender's markup back into the document the
+    // sanitiser just cleaned.
+    if !mime.starts_with("image/") {
+        return None;
+    }
+
+    if response.content_length().unwrap_or(0) > MAX_REMOTE_BYTES {
+        return None;
+    }
+
+    let bytes = response.bytes().await.ok()?;
+
+    if bytes.len() as u64 > MAX_REMOTE_BYTES {
+        return None;
+    }
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
+    use futures::StreamExt;
+
+    let Some(client) = remote_client() else {
+        return HashMap::new();
+    };
+
+    let cache = remote_cache_dir();
+    if let Some(dir) = cache.as_deref() {
+        sweep_remote_cache(dir);
+    }
+
+    let wanted: Vec<String> = urls.iter().take(MAX_REMOTE_IMAGES).cloned().collect();
+
+    // Concurrently, and bounded. In series this was one round trip per image before the reader
+    // could show anything at all.
+    futures::stream::iter(wanted.into_iter().map(|url| {
+        let cache = cache.clone();
+
+        async move {
+            // A hit costs no request, which is the point twice over: it is faster, and it does
+            // not tell the sender the message has been opened again.
+            if let Some(dir) = cache.as_deref() {
+                if let Ok(hit) = std::fs::read_to_string(cache_file(dir, &url)) {
+                    if !hit.is_empty() {
+                        return Some((url, hit));
+                    }
+                }
+            }
+
+            let data = fetch_one(client, &url).await?;
+
+            if let Some(dir) = cache.as_deref() {
+                // Best effort. A cache that cannot be written is slow, not broken.
+                let _ = std::fs::write(cache_file(dir, &url), &data);
+            }
+
+            Some((url, data))
+        }
+    }))
+    .buffer_unordered(REMOTE_CONCURRENCY)
+    .filter_map(|entry| async move { entry })
+    .collect()
+    .await
 }
 
 /// Returns a message's body, ready for the frame.

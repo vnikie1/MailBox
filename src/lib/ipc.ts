@@ -598,6 +598,7 @@ export async function messageBody(messageId: number, loadRemote: boolean): Promi
       html: '<pre class="halcyon-plain">Message bodies are only available in the desktop app.</pre>',
       blockedRemote: 0,
       loadedRemote: 0,
+      failedRemote: 0,
       inlined: 0,
       fromPlainText: true,
     }
