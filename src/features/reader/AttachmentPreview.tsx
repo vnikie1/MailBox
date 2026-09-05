@@ -30,7 +30,46 @@ export interface AttachmentPreviewProps {
 }
 
 /** The frame's CSP. `data:` only, and no script under any circumstances. */
-const CSP = "default-src 'none'; img-src data:; object-src data:; style-src 'unsafe-inline';"
+const CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline';"
+
+/**
+ * The text of an attachment the core sent as a `data:` URI.
+ *
+ * Decoded here rather than handed to the frame as a URI, and that is the fix rather than a
+ * refinement. Text used to be shown with `<object data="data:…">`, and **every non-image
+ * preview came up blank**: the preview frame carries `sandbox`, so it inherits the application's
+ * own Content-Security-Policy, and that says `object-src 'none'`. Policies combine
+ * most-restrictive-wins, so the `object-src data:` in the frame's own policy above could never
+ * take effect. Chromium says so in as many words — "Loading plugin data from 'data:…' violates
+ * the following Content Security Policy directive: object-src 'none'" — but nothing surfaces a
+ * console message from inside a frame, so it presented as an empty modal.
+ *
+ * Drawing the text as text needs no plugin, no `object`, and no widening of any policy.
+ *
+ * `atob` yields one byte per character, so the bytes are rebuilt before decoding: reading them
+ * as text directly would mangle every character outside ASCII.
+ */
+function textOf(dataUrl: string): string {
+  const base64 = dataUrl.slice(dataUrl.indexOf(',') + 1)
+
+  try {
+    const binary = atob(base64)
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    return new TextDecoder().decode(bytes)
+  } catch {
+    // A malformed data URI is the core's bug, not something to crash the reader over.
+    return ''
+  }
+}
+
+/** Escapes text for the frame. An attachment is hostile input; this one is being shown as text. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
 
 function frameDocument(data: AttachmentData): string {
   const mime = data.mime.toLowerCase()
@@ -40,19 +79,25 @@ function frameDocument(data: AttachmentData): string {
   // as markup either way, and the CSP above allows no scripting even if it did.
   const body = mime.startsWith('image/')
     ? `<img src="${data.dataUrl}" alt="">`
-    : mime === 'application/pdf'
-      ? `<object data="${data.dataUrl}" type="application/pdf"></object>`
-      : `<object data="${data.dataUrl}" type="text/plain"></object>`
+    : `<pre>${escapeHtml(textOf(data.dataUrl))}</pre>`
 
   return `<!doctype html>
 <html><head>
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy" content="${CSP}">
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; background: #fff; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #fff; color: #1c1c1e; }
   body { display: grid; place-items: center; }
   img { max-width: 100%; max-height: 100%; object-fit: contain; }
-  object { width: 100%; height: 100%; border: 0; }
+  pre {
+    place-self: stretch;
+    margin: 0;
+    padding: 12px 14px;
+    overflow: auto;
+    font: 12px/1.5 "Cascadia Mono", Consolas, ui-monospace, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
 </style>
 </head><body>${body}</body></html>`
 }
@@ -133,6 +178,21 @@ export function AttachmentPreview({ attachmentId, filename, onClose }: Attachmen
       ) : data === null ? (
         <div className={styles.message}>
           <p>Opening…</p>
+        </div>
+      ) : data.mime.toLowerCase() === 'application/pdf' ? (
+        // Said rather than shown, because it cannot be shown here.
+        //
+        // A PDF needs Chromium's PDF viewer, and the viewer is a plugin: "Failed to load … as a
+        // plugin, because the frame into which the plugin is loading is sandboxed". The sandbox
+        // is not negotiable for an attachment — this file's own note says an attachment is
+        // exactly as hostile as a message body — so a PDF cannot be drawn in this frame at all.
+        //
+        // It used to try anyway and produce an empty white modal, which reads as the app being
+        // broken rather than as a limit. docs/04 Phase 6 does ask for PDF in the previewer; that
+        // is unbuilt rather than done, and saying so is the honest state of it.
+        <div className={styles.message}>
+          <p>PDFs cannot be previewed here yet.</p>
+          <p>Save it to open it in your PDF reader.</p>
         </div>
       ) : (
         <iframe

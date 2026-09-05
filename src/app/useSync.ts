@@ -155,6 +155,15 @@ export function useSync(): SyncState {
     track(
       onAccountsChanged(() => {
         void syncWatch()
+
+        // And actually fetch. Watching only reports what arrives *next*, so an account added
+        // mid-session got a watcher and no mail: no mailbox tree, no messages, nothing but its
+        // name in the sidebar, until the app was restarted or Get Mail was pressed by hand.
+        //
+        // `sync_all` locks per account and returns quickly for one that has nothing to do, so
+        // running it for every account here costs little and means no path can add an account
+        // and forget to fetch it.
+        void syncAll()
       }),
     )
 

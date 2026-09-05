@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { useAppearanceSync } from '@/app/useAppearanceSync'
+import { useAccountEvents } from '@/features/accounts'
 import { AccountsSettings } from '@/features/accounts/AccountsSettings'
 import { NotificationSettings } from '@/features/accounts/NotificationSettings'
 import { ComposingSettings } from '@/features/compose/ComposingSettings'
@@ -45,6 +46,16 @@ import styles from './SettingsWindow.module.css'
  */
 function Panes() {
   useAppearanceSync()
+
+  // Settings is its own OS window with its own `QueryClient`, so it hears nothing the main
+  // window subscribes to. `useAccountEvents` was mounted once "near the root" — the root of the
+  // *main* window — and this one listened to nothing at all.
+  //
+  // So adding an account did not appear in the list here. The core announced it, the main
+  // window acted on it, and this window went on showing the answer it had cached when it
+  // opened; closing Settings and opening it again remounted the query and it appeared. Which
+  // makes it look like the account was not really added.
+  useAccountEvents()
 
   const [pane, setPane] = useState<SettingsPane>(() =>
     paneFrom(new URLSearchParams(window.location.search).get('pane')),
