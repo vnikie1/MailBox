@@ -4994,3 +4994,27 @@ runs in a browser, and neither of these faults exists in one.
   the row still carries the placeholder UID instead of its real one, so changes to that single
   message will not reach Gmail until a sync re-reads it. Restoring the UID by hand was
   declined by the sandbox, and rightly — it is a direct write to live mail.
+
+### Notes
+
+- **Drag and drop re-tested in full against the real accounts, and restored afterwards.** Three
+  cases, each checked against the store rather than by eye:
+
+  | case                                           | result                                      |
+  | ---------------------------------------------- | ------------------------------------------- |
+  | one message → a label in the same account      | Inbox 119 → 118, Amity School 1 → 2         |
+  | a three-message ctrl-selection → another label | Inbox 118 → 115, Anthropic 2 → 5            |
+  | a Gmail message → a Yahoo label                | refused; no highlight, 115 and 49 unchanged |
+
+  Every move reached Gmail: the queue drained to empty and the moved rows came back with real
+  server UIDs. All four messages were then dragged back and synced, and every mailbox is at
+  its starting count with no duplicates and nothing queued.
+
+- **The double-move defect was observed live rather than merely reasoned about.** The
+  three-message drag queued `move INBOX -> Anthropic` naming only **two** UIDs, because one of
+  the three was already parked at a placeholder from an earlier move and `ops::locate` skips
+  those. The local move was complete; the server was told about two thirds of it. That is the
+  bug recorded above, seen in the wild on the first multi-selection drag anyone would try.
+
+  It is also why the restore was done in two passes with a sync in between — moving the
+  messages straight back would have hit the same defect and duplicated them.
