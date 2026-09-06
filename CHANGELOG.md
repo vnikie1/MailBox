@@ -5062,3 +5062,31 @@ runs in a browser, and neither of these faults exists in one.
 - The flag on a _message_ row already took its own colour and still does; only the sidebar was
   wrong. A selected message in a focused list still draws its flag in `--accent-fg`, for the
   same contrast reason as the sidebar.
+
+### Notes
+
+- **The flag colour on a message row is now actually tested.** The markup has carried
+  `data-flag` all along and the CSS was right, but nothing proved it: every flagged message in
+  the browser mock was orange, so a row that read the colour and a row that ignored it looked
+  identical. The mock now spreads flags across the seven, and the test collects flags while
+  scrolling — the list is virtualised and flagged mail is sparse, so one screenful usually
+  holds a single flag, and one flag cannot show that a colour is being read rather than
+  hardcoded.
+
+### Incidents
+
+- **Flag colours cannot be set anywhere in the app.** Found while trying to confirm the colour
+  reaches a message: `flagSet` is called from exactly one place, `FlagMenu`, and `FlagMenu` is
+  exported from `features/organise/index.ts` and **rendered nowhere**. The toolbar's Flag
+  button calls `toggleFlag`, which is the plain on/off flag with no colour, and there is no
+  context menu on a row.
+
+  So the seven colours under Flagged are seven filters that can never match anything, and the
+  per-colour styling on a message row can never fire. The user's three flagged messages all
+  carry `flag_color = NULL`, which is why they draw the default orange — correctly, for a flag
+  with no colour.
+
+  Not fixed here. `FlagMenu` is complete and only needs a trigger, but it also needs `current`
+  — the colour the selection already carries — and the toolbar has the selected _ids_ and not
+  the rows, so that has to be threaded from where the rows live. That is wiring a feature, not
+  finishing this one, and it deserves its own change.

@@ -86,6 +86,9 @@ const ROLES: { role: string; name: string }[] = [
   { role: 'archive', name: 'Archive' },
 ]
 
+/** The seven flag colours, in the core's order — `engine::FLAG_COLOURS`. */
+const FLAG_COLOURS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'] as const
+
 const DAY_SECONDS = 24 * 60 * 60
 
 function build(): Store {
@@ -181,7 +184,10 @@ function build(): Store {
       seen,
       answered: rng.chance(0.18),
       flagged,
-      flagColor: flagged ? 'orange' : null,
+      // Spread across the seven rather than all orange. A mock where every flag is the same
+      // colour cannot show whether the row draws the colour or merely draws a flag, and that
+      // is exactly the difference the sidebar was getting wrong.
+      flagColor: flagged ? (FLAG_COLOURS[i % FLAG_COLOURS.length] ?? 'orange') : null,
       // The browser gallery has no classifier behind it, so nothing is junk and nothing has a
       // score. Inventing one would make the banner look implemented when it is not wired here.
       isJunk: false,

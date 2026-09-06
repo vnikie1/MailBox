@@ -196,6 +196,47 @@ test.describe('window shell', () => {
     expect(new Set(drawn).size, 'the four flags should be four different colours').toBe(4)
   })
 
+  test('a flagged message draws its flag in its own colour', async ({ page }) => {
+    // The other half of the same report: the colour has to reach the mail, not just the
+    // sidebar. The row markup has carried `data-flag` all along, but nothing proved it —
+    // every flagged message in the mock was orange, so a row that ignored the colour and a
+    // row that honoured it looked identical.
+    await page.goto('/')
+    await ready(page)
+
+    const flags = page.locator('[role="option"] [data-flag]')
+    await expect(flags.first()).toBeVisible()
+
+    // Collected while scrolling, because the list is virtualised and flagged mail is sparse:
+    // one screenful usually holds a single flag, and one flag cannot show that the colour is
+    // being read rather than hardcoded.
+    const seen = new Map<string, string>()
+    const list = page.getByRole('listbox', { name: 'Messages' })
+
+    for (let page_ = 0; page_ < 8 && seen.size < 3; page_++) {
+      for (const flag of await flags.all()) {
+        const colour = await flag.getAttribute('data-flag')
+        if (colour === null) continue
+        seen.set(colour, await flag.evaluate((el) => getComputedStyle(el).color))
+      }
+      await list.evaluate((el) => {
+        el.scrollTop += el.clientHeight
+      })
+      // A screenful further on there may be no flag at all, so this waits for the virtualiser
+      // to render rows rather than for a flag that may not be there.
+      await expect(page.getByRole('option').first()).toBeVisible()
+      await page.waitForTimeout(120)
+    }
+
+    expect(seen.size, 'the list should show more than one flag colour').toBeGreaterThan(1)
+
+    for (const [colour, drawn] of seen) {
+      expect(drawn, `a ${colour} flag should draw in --flag-${colour}`).toBe(
+        await resolved(page, `--flag-${colour}`),
+      )
+    }
+  })
+
   test('collapses to two panes below 1000px and one below 700px', async ({ page }) => {
     await page.goto('/')
     await ready(page)
