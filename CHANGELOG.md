@@ -4880,3 +4880,65 @@ All reported from using the app.
   "Inbox184", where `^Inbox\b` matches nothing because there is no boundary between "x" and
   "1". The e2e selectors match the label element instead. Recorded because the failure looks
   like the row not existing.
+
+---
+
+## 2026-09-06 — Two things the browser tests could not see
+
+Both reported from using the packaged app, immediately after the drag work above shipped
+with a green gate. Recorded together because they share a lesson: everything in that gate
+runs in a browser, and neither of these faults exists in one.
+
+### Fixed
+
+- **Dragging did nothing in the app, while every test said it worked.** The frontend was
+  correct and never ran: a Tauri webview is created with `dragDropEnabled: true`, which
+  registers an OS-level drop target on the window and takes drags before the page sees them.
+  `dragstart` never fired. Tauri's own configuration doc says so in a sentence — _"Disabling
+  it is required to use HTML5 drag and drop on the frontend on Windows"_ — and it is now
+  `false` on the main window.
+
+  Nothing costs anything by that: the setting exists to deliver _native_ file drops from
+  Explorer as Tauri events, and nothing in this app listens for one. Web-standard file drops
+  still work through the ordinary `drop` event if they are ever wanted.
+
+  This is in `CLAUDE.md` under "things that will bite you", because no amount of reading the
+  frontend would have found it.
+
+- **A selected row lost the accent while the pointer sat on it.** Ctrl-clicking a run of
+  messages left the row under the cursor grey, and the theme colour appeared only once the
+  pointer moved away.
+
+  Specificity, not logic. `.row.selected:hover` scored (0,3,0) and
+  `:global(.messageListFocused) .selected` scored (0,2,0), so merely hovering a selected row
+  replaced the accent with the neutral fill meant for a list that does not have focus. Every
+  rule involved was correct on its own, which is what made it invisible on the page.
+
+  Hover is now written `:not(.selected)` and the rule that put the fill back is gone —
+  removing the collision rather than adding a fourth rule to out-rank it.
+
+### Incidents
+
+- **The drag feature shipped with thirteen passing tests and did not work at all.** The unit
+  tests were right, the end-to-end tests were right, the gate was green, and the packaged app
+  could not drag a message one pixel. Every one of those tests runs in Chromium against the
+  Vite dev server, and the fault was in the Tauri window configuration — a layer the browser
+  suite does not have and cannot grow.
+
+  It was not caught before shipping because the live check was cut short: the machine locked
+  itself part-way through, and the run stopped after confirming nothing had been _changed_
+  rather than after confirming the drag _worked_. "Nothing moved" was read as a clean
+  cancellation, which it also was. A negative result and an untested path look identical from
+  the outside.
+
+  The lesson is not "write more browser tests". It is that a feature whose whole substance is
+  a platform gesture has to be exercised in the packaged app before it is called done, and an
+  interrupted verification is an unfinished one.
+
+### Notes
+
+- The accent regression is pinned by `tests/e2e/shell.spec.ts`, which asserts the _computed_
+  background of a selected, hovered row against the resolved `--accent`. Asserting a class
+  would have passed throughout: the class was always applied, and the colour was always
+  overridden. Confirmed to fail against the old rules — grey `rgba(0, 0, 0, 0.08)` where the
+  accent belongs.

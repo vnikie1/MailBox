@@ -155,7 +155,18 @@
   -webkit-box-orient: vertical;
 }
 
-.row:hover {
+/**
+ * Hover, and only where there is no selection to fight with.
+ *
+ * Written as `:not(.selected)` rather than as a hover rule plus a second rule putting the
+ * selected fill back, which is what this was. That pair looked equivalent and was not:
+ * `.row.selected:hover` outranks `.messageListFocused .selected` on specificity, so simply
+ * having the pointer over a selected row replaced the accent with the neutral fill. Selecting
+ * a row and leaving the cursor on it -- which is exactly what ctrl-clicking a run of messages
+ * does -- showed grey where the theme colour belongs, and it came back only once the pointer
+ * moved away.
+ */
+.row:not(.selected):hover {
   background: var(--fill-hover);
 }
 
@@ -180,10 +191,6 @@
 .runEnd {
   border-bottom-left-radius: var(--list-row-radius);
   border-bottom-right-radius: var(--list-row-radius);
-}
-
-.row.selected:hover {
-  background: var(--fill-selected-inactive);
 }
 
 :global(.messageListFocused) .selected {

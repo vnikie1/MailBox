@@ -72,6 +72,13 @@ errors is a definition-of-done item, not a preference.
   Tauri window never receives `WM_NCHITTEST` for client-area points, so Snap Layouts is
   impossible. Do not reintroduce custom caption buttons. Reasoning is in
   `src-tauri/src/platform/mod.rs`.
+- **Tauri eats HTML5 drag and drop on Windows unless you turn it off.** A webview is created
+  with `dragDropEnabled: true`, which registers an OS drop target on the window and swallows
+  drags before the page sees them — so `dragstart` never fires and nothing in the frontend is
+  wrong. Tauri's own config doc says it: "Disabling it is required to use HTML5 drag and drop
+  on the frontend on Windows." `src-tauri/tauri.conf.json` sets it `false` on the main window.
+  Browser tests cannot see this, because there is no Tauri in a browser.
+
 - **Floating layers must set their ARIA after spreading Floating UI props.** `useRole()`
   adds an `aria-labelledby` pointing at the trigger, and that outranks any `aria-label` a
   component sets before the spread. See `src/ui/Menu.tsx`.

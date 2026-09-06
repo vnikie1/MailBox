@@ -127,6 +127,36 @@ test.describe('window shell', () => {
     expect(secondSelected).not.toBe(firstSelected)
   })
 
+  test('a selected row keeps the accent while the pointer is still on it', async ({ page }) => {
+    // Reported from using the app: ctrl-clicking a run of messages left the row under the
+    // cursor grey, and it turned the theme colour only once the pointer moved away.
+    //
+    // The cause was specificity, not logic, which is why this asserts the computed colour
+    // rather than a class: `.row.selected:hover` outranked `.messageListFocused .selected`,
+    // so hovering quietly replaced the accent with the neutral unfocused fill. Every rule
+    // involved was correct on its own.
+    await page.goto('/')
+    await ready(page)
+
+    const row = page.getByRole('option').nth(1)
+    await row.click()
+    await row.hover()
+
+    const accent = await page.evaluate(() => {
+      const value = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
+      // Resolved through the browser so the comparison is like for like: the token is
+      // authored as a hex triple and `backgroundColor` always reads back as `rgb()`.
+      const probe = document.createElement('span')
+      probe.style.color = value
+      document.body.append(probe)
+      const resolved = getComputedStyle(probe).color
+      probe.remove()
+      return resolved
+    })
+
+    await expect(row).toHaveCSS('background-color', accent)
+  })
+
   test('collapses to two panes below 1000px and one below 700px', async ({ page }) => {
     await page.goto('/')
     await ready(page)
