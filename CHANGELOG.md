@@ -4942,3 +4942,55 @@ runs in a browser, and neither of these faults exists in one.
   would have passed throughout: the class was always applied, and the colour was always
   overridden. Confirmed to fail against the old rules — grey `rgba(0, 0, 0, 0.08)` where the
   accent belongs.
+
+---
+
+## 2026-09-06 — Verified in the app, and a bug found while doing it
+
+### Notes
+
+- **Both fixes confirmed in the packaged app against the real accounts.** Dragging now starts:
+  the dragged row is carried under the pointer and a same-account label lights up, while "All
+  Inboxes" — a unified row with no single destination — does not. A message dragged into a
+  Gmail label moved for real: the Inbox went 119 → 118, the label 2 → 3, and a genuine
+  `move INBOX -> Anthropic` was queued for the server. Ctrl-clicking a run of messages now
+  keeps the accent under the pointer.
+
+- **Moving a message twice before the first move reaches the server loses the second move, and
+  leaves a duplicate.** Found by moving a message into a label and straight back out again,
+  which is an ordinary thing to do with a mouse and takes about four seconds.
+
+  A locally moved message parks at a negative placeholder UID, and `ops::locate` skips
+  non-positive UIDs — correctly, since there is no server UID to name. But that means the
+  _second_ move queues nothing at all, while the first is still sitting in `pending_op`. The
+  server therefore performs only the first move. Worse, `persist` adopts a parked row with
+  `WHERE mailbox_id = ?1 AND uid <= 0 AND message_id = ?2` — matching the mailbox the _server_
+  reports — so the returning message does not find the row now parked in a different mailbox
+  and is **inserted beside it**. One message, two rows, and `remove_missing` will not clean up
+  the parked one because it ignores `uid <= 0`.
+
+  Not fixed here. The fix is not local: the pending operation names server UIDs, and the row's
+  server UID is discarded by `move_to`, so there is no way to find and rewrite the queued
+  operation from the row. Either the row has to keep its server UID alongside the placeholder,
+  or `pending_op` has to reference message ids rather than UIDs. Both are changes to the
+  operation pipeline and neither belongs in a drag-and-drop change.
+
+  This predates the drag work — every path that moves mail can hit it — but dragging makes it
+  far easier to reach, because dragging twice is quick and deliberate where two menu round
+  trips were not.
+
+### Incidents
+
+- **The live verification moved one of the user's messages and had to be undone by hand.**
+  Ctrl+Z did not reverse it: clicking a row to give the list focus marked that message read,
+  which pushed a newer step onto the undo stack, so the undo took back the read state instead
+  of the move. Dragging the message back restored the local state, but by then it was parked
+  at a placeholder UID, so the reverse move queued nothing (the defect above) and the original
+  `move INBOX -> Anthropic` was still queued. Left alone it would have moved the message on
+  the server and produced the duplicate described above.
+
+  The queued operation was removed before it ran, with the database backed up first, and the
+  counts are exactly as they started. One residue remains and was left rather than patched:
+  the row still carries the placeholder UID instead of its real one, so changes to that single
+  message will not reach Gmail until a sync re-reads it. Restoring the UID by hand was
+  declined by the sandbox, and rightly — it is a direct write to live mail.
