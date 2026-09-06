@@ -117,9 +117,18 @@ pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) 
                     _ = signal.notified() => return,
                 }
 
-                // Failures are the sync's business to report, not the watcher's — it has its
+                // The sync waits on `stop` too, and that is not belt and braces.
+                // `notify_waiters` wakes the waiters registered *at that moment*, so a stop
+                // arriving while this task was inside a sync would be dropped on the floor and
+                // the loop would go round again — re-syncing an account the user had just
+                // removed or turned off, for as long as the app ran.
+                //
+                // Failures are the sync's business to report, not the watcher's: it has its
                 // own backoff and its own error events.
-                let _ = engine.sync_account(app.as_ref(), &db, account_id).await;
+                tokio::select! {
+                    _ = engine.sync_account(app.as_ref(), &db, account_id) => {}
+                    _ = signal.notified() => return,
+                }
             }
         });
     }
