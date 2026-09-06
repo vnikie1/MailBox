@@ -80,8 +80,28 @@ export async function rulesRun(ids: number[]): Promise<RunReport> {
 
 /* -------------------------------------------------------------------------- flags */
 
+/**
+ * The seven flag colours and their names.
+ *
+ * The browser answers this one rather than returning nothing, and that is not the invention
+ * the note at the top of this file warns against: the colours are a fixed list in the core
+ * (`engine::FLAG_COLOURS`) and `vip::flag_names` always returns all seven, filling in these
+ * exact defaults for any that have not been renamed. An empty array was the *misleading*
+ * answer — it made the browser build show a Flagged row with no colours under it, which is
+ * not a state the app can actually be in.
+ */
+const DEFAULT_FLAG_NAMES: FlagName[] = [
+  { color: 'red', name: 'Red' },
+  { color: 'orange', name: 'Orange' },
+  { color: 'yellow', name: 'Yellow' },
+  { color: 'green', name: 'Green' },
+  { color: 'blue', name: 'Blue' },
+  { color: 'purple', name: 'Purple' },
+  { color: 'gray', name: 'Gray' },
+]
+
 export async function flagNames(): Promise<FlagName[]> {
-  if (!inTauri) return []
+  if (!inTauri) return DEFAULT_FLAG_NAMES
   return invoke<FlagName[]>('flag_names')
 }
 

@@ -53,6 +53,14 @@ export interface SidebarNode {
    */
   accountId?: number
   /**
+   * One of the seven flag colours, on the rows under Flagged.
+   *
+   * The row's icon takes that colour instead of the accent. Without it every colour under
+   * Flagged drew the same orange flag, so the one thing those rows exist to tell apart was
+   * the one thing they did not show.
+   */
+  flagColor?: string
+  /**
    * Set on rows that are a saved search rather than a folder: smart mailboxes, Flagged, and
    * each flag colour under it. The list queries by this instead of by mailbox id.
    *
@@ -205,6 +213,7 @@ function flaggedNode(flagNames: FlagName[]): SidebarNode {
       id: `flag-${flag.color}`,
       label: flag.name,
       icon: Flag,
+      flagColor: flag.color,
       mailboxIds: [],
       predicate: colourPredicate(flag.color),
       unreadCount: 0,

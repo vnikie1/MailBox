@@ -56,6 +56,24 @@ async function ready(page: Page) {
   await page.evaluate(() => document.fonts.ready)
 }
 
+/**
+ * A design token resolved to the `rgb()` string `toHaveCSS` compares against.
+ *
+ * Read through the browser rather than compared as authored: the tokens are hex triples and
+ * every computed colour reads back as `rgb()`, so comparing the raw values never matches.
+ */
+async function resolved(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+    const probe = document.createElement('span')
+    probe.style.color = value
+    document.body.append(probe)
+    const computed = getComputedStyle(probe).color
+    probe.remove()
+    return computed
+  }, token)
+}
+
 test.describe('window shell', () => {
   test.beforeEach(async ({ page }) => {
     await pinPreferences(page)
@@ -142,19 +160,40 @@ test.describe('window shell', () => {
     await row.click()
     await row.hover()
 
-    const accent = await page.evaluate(() => {
-      const value = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()
-      // Resolved through the browser so the comparison is like for like: the token is
-      // authored as a hex triple and `backgroundColor` always reads back as `rgb()`.
-      const probe = document.createElement('span')
-      probe.style.color = value
-      document.body.append(probe)
-      const resolved = getComputedStyle(probe).color
-      probe.remove()
-      return resolved
-    })
+    await expect(row).toHaveCSS('background-color', await resolved(page, '--accent'))
+  })
 
-    await expect(row).toHaveCSS('background-color', accent)
+  test('each flag colour in the sidebar is drawn in its own colour', async ({ page }) => {
+    // Reported from using the app: every colour under Flagged drew the same orange flag,
+    // because the sidebar paints all its icons with --accent. The one thing those seven rows
+    // exist to tell apart was the one thing they did not show.
+    await page.goto('/')
+    await ready(page)
+
+    const favourites = page.getByRole('group', { name: 'Favourites' })
+    const drawn: string[] = []
+
+    for (const colour of ['Red', 'Green', 'Blue', 'Purple'] as const) {
+      const icon = favourites
+        .getByRole('treeitem')
+        .filter({ has: page.getByText(colour, { exact: true }) })
+        .first()
+        .locator('[data-flag]')
+
+      const token = `--flag-${colour.toLowerCase()}`
+      await expect(icon, `${colour} should draw in ${token}`).toHaveCSS(
+        'color',
+        await resolved(page, token),
+      )
+
+      drawn.push(await icon.evaluate((el) => getComputedStyle(el).color))
+    }
+
+    // The regression, stated directly: they were all one colour. Asserting each against its
+    // own token is not enough on its own — a machine whose accent happens to be one of the
+    // seven would pass that for the wrong reason, which is exactly what --flag-blue and the
+    // default accent do here, both being rgb(0, 122, 255).
+    expect(new Set(drawn).size, 'the four flags should be four different colours').toBe(4)
   })
 
   test('collapses to two panes below 1000px and one below 700px', async ({ page }) => {

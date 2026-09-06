@@ -5018,3 +5018,47 @@ runs in a browser, and neither of these faults exists in one.
 
   It is also why the restore was done in two passes with a sync in between — moving the
   messages straight back would have hit the same defect and duplicated them.
+
+---
+
+## 2026-09-06 — The flag colours, in their own colours
+
+### Fixed
+
+- **Every colour under Flagged drew the same orange flag.** Red, Orange, Yellow, Green, Blue,
+  Purple and Gray each showed an accent-coloured icon, because `.icon` in the sidebar is
+  `color: var(--accent)` and nothing distinguished those seven rows from a mailbox. The single
+  thing they exist to tell apart was the one thing they did not show.
+
+  `SidebarNode` now carries `flagColor` on those rows and the icon takes `data-flag`, matching
+  what `MessageRow` has always done for the flag on a message. The rules are written
+  `.row .icon[data-flag=…]` so they do not depend on their position in the file: they have to
+  outrank `.selected .icon`, which would otherwise put the accent back on a selected row, and
+  they have to lose to `.sidebar:focus-within .selected .icon`, where the row is filled with
+  the accent and a red flag on an orange fill would be worse than no colour at all.
+
+### Changed
+
+- **The browser build now answers `flagNames` instead of returning nothing.** This file's own
+  rule is to return the empty result rather than an invented one, and that was being applied
+  where it did not belong: the seven colours are a fixed list in the core
+  (`engine::FLAG_COLOURS`), and `vip::flag_names` always returns all seven, filling in exactly
+  these default names for any not renamed. The empty array was the _misleading_ answer — it
+  gave the browser build a Flagged row with nothing under it, which is not a state the app can
+  be in. The defaults are checked against `default_flag_name` in the core, name for name.
+
+  The two 1400px shell baselines are updated as a result: the browser sidebar gained the seven
+  rows it should always have had, and everything below Flagged moved down. Acknowledging that
+  is what the baseline is for.
+
+### Notes
+
+- The regression test asserts each icon against its own token **and** that the four colours it
+  samples are four different colours. The second half is not redundant: `--flag-blue` and the
+  default `--accent` are both `rgb(0, 122, 255)`, so a per-colour check alone passes for the
+  wrong reason on any machine whose accent happens to be one of the seven. Confirmed to fail
+  with the rules removed — red drew the accent.
+
+- The flag on a _message_ row already took its own colour and still does; only the sidebar was
+  wrong. A selected message in a focused list still draws its flag in `--accent-fg`, for the
+  same contrast reason as the sidebar.

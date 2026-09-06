@@ -158,6 +158,46 @@
 }
 
 /**
+ * The seven colours under Flagged, each drawn in its own colour.
+ *
+ * Every sidebar icon is the accent, which for these rows made "Red", "Orange" and "Blue" all
+ * draw the same orange flag — the single thing those rows exist to distinguish was the one
+ * thing they did not show.
+ *
+ * Written `.row .icon[...]` so it does not depend on where it sits in this file: it has to
+ * outrank `.selected .icon` above, which would otherwise put the accent back on a selected
+ * row, and it has to lose to the focused rule below, where the row is filled with the accent
+ * and a red flag on an orange fill would be worse than no colour at all.
+ */
+.row .icon[data-flag='red'] {
+  color: var(--flag-red);
+}
+
+.row .icon[data-flag='orange'] {
+  color: var(--flag-orange);
+}
+
+.row .icon[data-flag='yellow'] {
+  color: var(--flag-yellow);
+}
+
+.row .icon[data-flag='green'] {
+  color: var(--flag-green);
+}
+
+.row .icon[data-flag='blue'] {
+  color: var(--flag-blue);
+}
+
+.row .icon[data-flag='purple'] {
+  color: var(--flag-purple);
+}
+
+.row .icon[data-flag='gray'] {
+  color: var(--flag-gray);
+}
+
+/**
  * Selection, loud state: focus is in the sidebar. docs/02 §6.2 — the row fills with the
  * accent and everything on it turns --accent-fg.
  */

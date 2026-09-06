@@ -179,7 +179,14 @@ function SidebarRow({
         )}
       </span>
 
-      <Icon className={styles.icon} aria-hidden="true" strokeWidth={1.75} />
+      <Icon
+        className={styles.icon}
+        aria-hidden="true"
+        strokeWidth={1.75}
+        // Spread rather than passed as undefined: with `exactOptionalPropertyTypes` an explicit
+        // undefined is not an absent attribute, and the CSS selects on the attribute existing.
+        {...(node.flagColor === undefined ? {} : { 'data-flag': node.flagColor })}
+      />
       <span className={styles.label}>{node.label}</span>
       <Badge count={node.unreadCount} selected={selected} className={cx(styles.badge)} />
     </div>
