@@ -4804,3 +4804,79 @@ All reported from using the app.
   and would have let a regression survive just as long. `tests/unit/syncOnAccountAdded.test.tsx`
   now fires the `accounts:changed` handler and asserts both `syncWatch` and `syncAll` ran. It
   was confirmed to fail with the `syncAll()` call removed, so it is testing what it claims to.
+
+---
+
+## 2026-09-06 — Dragging mail into a folder
+
+### Fixed
+
+- **A multi-selection could not be dragged. Only one message ever moved.** Select five, drag
+  them onto a folder, and one lands there while four stay behind — which reads as the drop
+  half-failing rather than as the selection having been discarded before the drag began.
+
+  The row selected on `mousedown`, unconditionally, so pressing inside an existing selection
+  collapsed it to the row under the pointer. The `dragstart` that followed a moment later
+  found one message where the user had picked five. The press now decides nothing while it is
+  inside the selection: the collapse waits for the button to come back up, and a drag cancels
+  it. Pressing _outside_ the selection still acts immediately, so the row highlights under the
+  finger and the drag carries the row actually grabbed. This is what Explorer, Finder and Mail
+  all do, and it is why dragging a group works there.
+
+- **The sidebar offered every folder in every account as a drop target.** Mail cannot move
+  between accounts — the message lives on a different server — and the core has always refused
+  it: `msg_move` answers `crossAccount`, "A message can only be moved to a folder in its own
+  account." But the sidebar highlighted the row anyway, accepted the drop, and let the refusal
+  arrive afterwards as an error. A row that lights up and then fails is worse than one that
+  never lights up.
+
+  A folder in another account now shows the no-drop cursor and cannot be dropped on at all.
+  So does the folder the messages are already in, where a move would do nothing.
+
+### Added
+
+- **`src/lib/messageDrag.ts`**, the drag contract shared by the list and the sidebar. It was a
+  string literal in one file and a constant in the other, which is a wire format spelled out
+  twice and therefore one that drifts.
+
+  The account is encoded in the **type name** rather than the data, and that is not cleverness
+  for its own sake: during `dragover` the browser returns an empty string from `getData` and
+  exposes only `types`. That restriction exists so a page cannot read a file the user is merely
+  dragging _across_ it. Anything a drop target must know before the drop therefore has to be
+  part of a type name — so the drag carries `application/x-halcyon-account-<id>` and
+  `application/x-halcyon-origin-<id>` beside its ids.
+
+  Both are set **only when the whole selection agrees**. A selection spanning two accounts sets
+  no account type, so nothing accepts it — which is right, and easy to reach by accident from a
+  unified mailbox, where All Inboxes lists every account at once.
+
+- `SidebarNode.accountId`, set on rows backed by exactly one real mailbox. A container has none
+  and a unified row spans several, so neither has an answer, and neither is a destination.
+
+### Changed
+
+- The browser mock refuses a cross-account move the way the core does. It did not, and a mock
+  that accepts what the real thing rejects will report a broken UI as working.
+
+### Notes
+
+- **Tested at both levels, deliberately.** `tests/unit/messageDrag.test.ts` pins the rules —
+  same account accepted, other account refused, current mailbox refused, a selection spanning
+  accounts refused everywhere, a foreign drag ignored. Those are pure functions and cheap.
+
+  What they cannot pin is that a drag _happens_. HTML5 drag and drop is a browser gesture, not
+  a function call, and the parts most likely to break — the row being `draggable` at all, the
+  payload surviving the round trip, the sidebar refusing by _not_ calling `preventDefault` —
+  only exist while a real pointer is being dragged. `tests/e2e/dragMessages.spec.ts` drags with
+  the mouse and checks the mail moved. **The multi-selection bug above was found by that test
+  and by nothing else**, which is the argument for it: every unit test passed while dragging
+  five messages moved one.
+
+- The e2e counts come from the list header rather than from counting rows. The list is
+  virtualised, so counting `option` elements counts what is on screen — a different number,
+  which changes with the window size.
+
+- A row's text runs its label straight into its unread badge: the Northgate inbox reads
+  "Inbox184", where `^Inbox\b` matches nothing because there is no boundary between "x" and
+  "1". The e2e selectors match the label element instead. Recorded because the failure looks
+  like the row not existing.

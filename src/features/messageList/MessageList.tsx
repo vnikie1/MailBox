@@ -50,6 +50,8 @@ import {
 import type { MessageRow as Row } from '@/lib/generated/MessageRow'
 
 import { MessageRow } from './MessageRow'
+import { startMessageDrag } from '@/lib/messageDrag'
+
 import { buildListItems } from './rows'
 import { SORT_LABELS, sortRows, type SortField } from './sort'
 
@@ -288,14 +290,26 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
   )
 
   const onDragStart = useCallback(
-    (id: number) => {
+    (id: number, transfer: DataTransfer) => {
+      // Dragging an unselected row drags that row, not the selection — what every list on
+      // both platforms does, and what stops a stray drag moving nine messages that were
+      // selected earlier.
       const current = useMailStore.getState().selectedMessageIds
-      if (current.includes(id)) return current
+      const dragged = current.includes(id) ? current : [id]
+      if (dragged.length === 1) selectMessage(id)
 
-      selectMessage(id)
-      return [id]
+      // Described from the rows rather than from the ids alone, because where a message may
+      // be dropped depends on the account and mailbox it is in, and only the list has those.
+      const byId = new Map(rows.map((row) => [row.id, row]))
+      startMessageDrag(
+        transfer,
+        dragged
+          .map((messageId) => byId.get(messageId))
+          .filter((row) => row !== undefined)
+          .map((row) => ({ id: row.id, accountId: row.accountId, mailboxId: row.mailboxId })),
+      )
     },
-    [selectMessage],
+    [rows, selectMessage],
   )
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {

@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useRef } from 'react'
 import { Archive, CornerUpLeft, Flag, MailOpen, Paperclip } from 'lucide-react'
 
 import type { MessageRow as MessageRowData } from '@/lib/generated/MessageRow'
@@ -20,7 +20,8 @@ export interface MessageRowProps {
   previewLines: number
   showPhoto: boolean
   onSelect: (id: number, modifiers: { shift: boolean; toggle: boolean }) => void
-  onDragStart: (id: number) => number[]
+  /** Given the row the drag began on, describes the drag on the transfer. */
+  onDragStart: (id: number, transfer: DataTransfer) => void
   /** Swipe right. docs/06 gives this to Archive, the one that is easy to undo. */
   onSwipeArchive: (id: number) => void
   /** Swipe left. Read/unread, which is reversible by doing it again. */
@@ -55,6 +56,13 @@ export const MessageRow = memo(function MessageRow({
   const sender = message.fromName ?? message.fromAddr ?? 'Unknown sender'
   const subject = message.subject ?? '(no subject)'
   const date = formatRowDate(receivedAt(message), now)
+
+  /**
+   * Set when a press landed inside the selection and the selection has not been narrowed yet.
+   * A ref, not state: nothing renders differently for it, and a press that re-rendered every
+   * visible row would be paid for on the 60fps budget this component exists to protect.
+   */
+  const collapseOnRelease = useRef(false)
 
   /**
    * What a screen reader announces for this row.
@@ -130,19 +138,49 @@ export const MessageRow = memo(function MessageRow({
             selected && runEnd && styles.runEnd,
           )}
           onMouseDown={(event) => {
-            onSelect(message.id, {
+            const modifiers = {
               shift: event.shiftKey,
               toggle: event.ctrlKey || event.metaKey,
-            })
+            }
+
+            /**
+             * Pressing inside an existing selection decides nothing yet.
+             *
+             * This used to select on the way down, unconditionally, and that made a
+             * multi-selection impossible to drag: `mousedown` collapsed the selection to the
+             * row under the pointer, and the `dragstart` that followed a moment later found
+             * one message where the user had picked five. Dropping them on a folder moved
+             * one and left the rest behind, which looks like the drop half-failing rather
+             * than the selection having been thrown away before it started.
+             *
+             * So the collapse waits for the button to come back up, and a drag cancels it —
+             * which is what Explorer, Finder and Mail all do, and why dragging a group works
+             * there. Pressing *outside* the selection still acts immediately, so the row
+             * highlights under the finger and the drag carries the row actually grabbed.
+             */
+            if (!modifiers.shift && !modifiers.toggle && selected) {
+              collapseOnRelease.current = true
+              return
+            }
+
+            onSelect(message.id, modifiers)
+          }}
+          onMouseUp={() => {
+            if (!collapseOnRelease.current) return
+            collapseOnRelease.current = false
+            onSelect(message.id, { shift: false, toggle: false })
           }}
           draggable
           onDragStart={(event) => {
-            // Dragging an unselected row drags that row, not the selection — what every list on
-            // both platforms does, and what stops a stray drag moving nine messages that were
-            // selected earlier.
-            const ids = onDragStart(message.id)
-            event.dataTransfer.setData('application/x-mailbox-threads', ids.join(' '))
-            event.dataTransfer.effectAllowed = 'move'
+            // The press turned out to be a drag, so it was never a click and must not narrow
+            // the selection. Cleared here rather than left to `mouseup`, which a drag
+            // swallows — the flag would otherwise still be set at the next press.
+            collapseOnRelease.current = false
+
+            // The list decides what is being dragged and describes it. A row knows its own
+            // message and nothing about the others, so it cannot say which account the
+            // selection belongs to — and that is what the sidebar needs before the drop.
+            onDragStart(message.id, event.dataTransfer)
           }}
         >
           <span className={styles.gutter} aria-hidden="true">

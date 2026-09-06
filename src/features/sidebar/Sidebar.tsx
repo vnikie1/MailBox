@@ -2,6 +2,7 @@ import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react'
 import { AlertTriangle, ChevronRight, PanelLeft, Settings } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
+import { canDropInMailbox, draggedMessageIds } from '@/lib/messageDrag'
 import { useLayoutStore } from '@/store/layout'
 import {
   useAccounts,
@@ -21,8 +22,6 @@ import { buildSidebar, selectionForNode, visibleRows, type SidebarNode } from '.
 
 import styles from './Sidebar.module.css'
 
-const DRAG_TYPE = 'application/x-mailbox-threads'
-
 /**
  * The absent case, as one array rather than a fresh one per render.
  *
@@ -40,7 +39,7 @@ interface SidebarRowProps {
   onSelect: (node: SidebarNode) => void
   onToggle: (id: string) => void
   onDragOverRow: (node: SidebarNode | null) => void
-  onDropRow: (node: SidebarNode, messageIds: number[]) => void
+  onDropRow: (mailboxId: number, messageIds: number[]) => void
 }
 
 function SidebarRow({
@@ -55,6 +54,20 @@ function SidebarRow({
 }: SidebarRowProps) {
   const Icon = node.icon
   const hasChildren = node.children.length > 0
+
+  /**
+   * Where a drop on this row would put the mail, or null if it is not a folder.
+   *
+   * A container row has no mailbox and a unified row has several, so in both cases there is
+   * no single destination — and lighting them up would promise something the drop cannot
+   * deliver. Predicate rows are excluded by the same test: a smart mailbox is a saved search,
+   * and there is nowhere to move mail *to*.
+   */
+  const single = node.mailboxIds.length === 1 ? node.mailboxIds[0] : undefined
+  const destination =
+    single !== undefined && node.accountId !== undefined
+      ? { id: single, accountId: node.accountId }
+      : null
 
   /**
    * Moves focus to the next or previous row of the tree.
@@ -124,10 +137,12 @@ function SidebarRow({
       }}
       onKeyDown={onKeyDown}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
-        // Only rows backed by exactly one mailbox are drop targets. A container has none
-        // and a unified row has several, and in both cases there is no single destination —
-        // highlighting them would promise something the drop cannot deliver.
-        if (node.mailboxIds.length !== 1 || !event.dataTransfer.types.includes(DRAG_TYPE)) return
+        // Not calling `preventDefault` is how a row refuses: the browser then draws the
+        // no-drop cursor and will not deliver a drop here at all. So every reason a move
+        // could not work has to be known *now*, before the user lets go — which is why
+        // `canDropInMailbox` reads the drag's types rather than its data.
+        if (destination === null || !canDropInMailbox(event.dataTransfer, destination)) return
+
         event.preventDefault()
         event.dataTransfer.dropEffect = 'move'
         onDragOverRow(node)
@@ -139,12 +154,12 @@ function SidebarRow({
         event.preventDefault()
         onDragOverRow(null)
 
-        const ids = event.dataTransfer
-          .getData(DRAG_TYPE)
-          .split(' ')
-          .map(Number)
-          .filter((id) => Number.isFinite(id))
-        if (ids.length > 0) onDropRow(node, ids)
+        // Re-checked rather than trusted. A drop only arrives on a row that accepted the
+        // drag, but the check is cheap and this is the point of no return for real mail.
+        if (destination === null || !canDropInMailbox(event.dataTransfer, destination)) return
+
+        const ids = draggedMessageIds(event.dataTransfer)
+        if (ids.length > 0) onDropRow(destination.id, ids)
       }}
     >
       <span className={styles.disclosure}>
@@ -307,11 +322,8 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
                     onDragOverRow={(target) => {
                       setDropTargetId(target?.id ?? null)
                     }}
-                    onDropRow={(target, messageIds) => {
-                      const destination = target.mailboxIds[0]
-                      if (target.mailboxIds.length === 1 && destination !== undefined) {
-                        moveMessages.mutate({ ids: messageIds, mailboxId: destination })
-                      }
+                    onDropRow={(mailboxId, messageIds) => {
+                      moveMessages.mutate({ ids: messageIds, mailboxId })
                     }}
                   />
                 ))}

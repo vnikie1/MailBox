@@ -390,6 +390,20 @@ export function moveTo(
   mailboxId: number,
 ): { changed: number; mailboxIds: number[] } {
   const data = current()
+
+  // Refused here for the same reason `msg_move` refuses it in the core: mail cannot be moved
+  // between accounts by moving a row, because the message lives on a different server. The
+  // sidebar will not offer such a drop, and this is what stops the browser build quietly
+  // accepting one anyway and reporting that a broken UI works.
+  const destination = data.mailboxes.find((mailbox) => mailbox.id === mailboxId)
+  if (destination === undefined) throw new Error('No such mailbox')
+
+  const crossing = ids.some((id) => {
+    const message = data.messages.get(id)
+    return message !== undefined && message.accountId !== destination.accountId
+  })
+  if (crossing) throw new Error('A message can only be moved to a folder in its own account.')
+
   const affected = new Set(mailboxesOf(ids))
   affected.add(mailboxId)
   let changed = 0

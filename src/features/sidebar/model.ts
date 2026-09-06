@@ -43,6 +43,16 @@ export interface SidebarNode {
    */
   mailboxIds: number[]
   /**
+   * The account this row's mailbox belongs to. Set only on rows backed by exactly one real
+   * mailbox — a container has none and a unified row spans several, so neither has an answer.
+   *
+   * Carried so that dropping messages on a row can be refused before it happens: mail cannot
+   * move between accounts, and `msg_move` says so with `crossAccount`. Without this the
+   * sidebar would light up every folder in every account and let the core do the refusing,
+   * which is a toast after the fact rather than a cursor before it.
+   */
+  accountId?: number
+  /**
    * Set on rows that are a saved search rather than a folder: smart mailboxes, Flagged, and
    * each flag colour under it. The list queries by this instead of by mailbox id.
    *
@@ -110,6 +120,7 @@ function unifiedNode(
         label: account?.displayName ?? mailbox.displayName,
         icon: iconFor(role),
         mailboxIds: [mailbox.id],
+        accountId: mailbox.accountId,
         unreadCount: mailbox.unreadCount,
         children: [],
         depth: 1,
@@ -271,6 +282,7 @@ export function buildSidebar(
         label: mailbox.displayName,
         icon: iconFor(mailbox.role),
         mailboxIds: [mailbox.id],
+        accountId: mailbox.accountId,
         unreadCount: mailbox.unreadCount,
         children: [],
         depth: 0,
