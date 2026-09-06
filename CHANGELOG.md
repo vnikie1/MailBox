@@ -5150,3 +5150,18 @@ runs in a browser, and neither of these faults exists in one.
   evening, because the inbox is the one path that worked. Reading found it, and the tell was a
   comment asserting a mechanism that no longer existed — worth remembering that a stale comment
   is evidence, not noise.
+
+### Notes
+
+- **Confirmed in the installed build, with nothing touching the app.** Launched at 19:25:59Z;
+  the launch sync pulled in **14 Yahoo messages that had been sitting on the server unseen**,
+  which is the reported bug in the data. Then, with no IDLE notification and no keypress:
+
+  | time (Z) | account |                                                                |
+  | -------- | ------- | -------------------------------------------------------------- |
+  | 19:30:47 | 4 and 5 | first timer tick, both together                                |
+  | 19:36:03 | 4       | second tick — 5:00 after that account's sync ended at 19:31:03 |
+  | 19:36:17 | 5       | second tick — 5:00 after its own sync ended at 19:31:17        |
+
+  The interval restarts when each account's sync completes rather than on a shared clock, so
+  the accounts keep independent cadences and a slow account cannot delay a fast one.
