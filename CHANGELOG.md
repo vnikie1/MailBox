@@ -5090,3 +5090,63 @@ runs in a browser, and neither of these faults exists in one.
   — the colour the selection already carries — and the toolbar has the selected _ids_ and not
   the rows, so that has to be threaded from where the rows live. That is wiring a feature, not
   finishing this one, and it deserves its own change.
+
+---
+
+## 2026-09-07 — Mail outside the inbox never arrived on its own
+
+### Fixed
+
+- **Nothing was ever re-synced unless the inbox changed.** Reported as "mailbox is not auto
+  refreshing for new mails", and the cause was a comment that described a safety net which did
+  not exist.
+
+  `idle.rs` selects `INBOX` and idles on it, with this note beside it: _"Watching every mailbox
+  would need a connection each, and the other mailboxes are covered by the periodic sync."_
+  There was no periodic sync. Every caller of `sync_account` and `sync_all` is either a UI
+  action (launch, Get Mail, adding an account, the network returning) or an IDLE notification
+  on the inbox. `POLL_INTERVAL` looks like the missing timer and is not: `poll()` runs **only**
+  for a server with no IDLE, and Gmail and Yahoo both have it, so neither of this install's
+  accounts polled at all.
+
+  Two consequences, both silent:
+
+  - **Nothing outside the inbox was ever noticed.** On this install that is 46 Gmail labels and
+    31 Yahoo folders. A server-side filter that files mail straight into a label skips the
+    inbox entirely, so the message existed on the server and never appeared here until Get Mail
+    or a restart. The same goes for mail read, flagged or moved on a phone.
+  - **A connection killed while the machine slept went unnoticed for twenty-nine minutes.** A
+    socket dropped by a sleeping laptop or a NAT timeout reports nothing at all: the watcher
+    parks in a wait that will never be woken, and only `IDLE_REISSUE` ends it. That is the shape
+    of "it worked for a while and then stopped".
+
+  Every watched account now re-syncs on a `REFRESH_INTERVAL` of five minutes, on its own task,
+  regardless of what IDLE is doing — the timer the comment always assumed. IDLE still carries
+  the fast path, so inbox mail lands in seconds as before; the timer is the floor, not the
+  mechanism. It runs beside the watcher rather than inside it because the watcher spends its
+  life parked in a wait only the server can end; `stop` uses `notify_waiters`, which wakes both.
+
+### Notes
+
+- Five minutes is Mail's shortest automatic check. `sync_account` locks per account and returns
+  quickly when there is nothing to do, so a pass that finds nothing costs a round trip per
+  mailbox and no writes.
+
+- The test asserts the interval against both holes it exists to close — shorter than
+  `IDLE_REISSUE`, or the dead-connection case is left exactly as it was; not under a minute, or
+  it is a poll rather than a safety net; not over ten, because mail that takes that long to
+  appear reads as not arriving.
+
+  It does not prove the timer _fires_. Doing that needs a `Db`, a `SyncEngine` and a server to
+  fail against, and the honest check was to watch the log of the running app for a sync with no
+  IDLE notification and no keypress in front of it.
+
+### Incidents
+
+- **The live watch that was supposed to catch this concluded nothing.** It recorded what the
+  window displayed, waited fifty minutes for mail to arrive, and none did — so it reported "no
+  mail arrived; nothing to conclude", which was correct and useless. The evidence to hand
+  actively pointed away from the bug: the inbox _had_ refreshed itself unaided earlier in the
+  evening, because the inbox is the one path that worked. Reading found it, and the tell was a
+  comment asserting a mechanism that no longer existed — worth remembering that a stale comment
+  is evidence, not noise.

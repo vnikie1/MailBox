@@ -53,6 +53,25 @@ const MIN_INTERVAL: Duration = Duration::from_secs(10);
 /// that mail is not visibly stale. docs/03 §5 names polling as the fallback, not the default.
 const POLL_INTERVAL: Duration = Duration::from_secs(120);
 
+/// How often every account is re-synced regardless of what IDLE is doing.
+///
+/// **IDLE watches INBOX and only INBOX.** Watching every mailbox would need a connection each,
+/// and the note below `select("INBOX")` used to excuse that by saying the rest were "covered by
+/// the periodic sync" — there was no periodic sync. Nothing polled an IDLE-capable server, so
+/// on Gmail or Yahoo a message filed straight into a label by a server-side rule, a flag set on
+/// a phone, or anything at all outside the inbox was invisible until the inbox happened to
+/// change, the user pressed Get Mail, or the app was restarted.
+///
+/// It is also the only thing that recovers a *silently* dead connection inside the re-issue
+/// window. A socket killed by a sleeping laptop or a NAT timeout does not report itself: the
+/// watcher sits in a wait that will never be woken, and nothing notices until `IDLE_REISSUE`
+/// comes round twenty-nine minutes later.
+///
+/// Five minutes is what Mail offers as its shortest automatic check, and `sync_account` locks
+/// per account and returns quickly when there is nothing to do, so a pass that finds nothing
+/// costs one round trip per mailbox and no writes.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+
 /// What the UI is told when the server reports a change.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +101,28 @@ impl Watcher {
 pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) -> Watcher {
     let stop = Arc::new(Notify::new());
     let signal = Arc::clone(&stop);
+
+    // The safety net, on its own task because the watcher below spends its life parked in a
+    // wait that only the server can end. `stop` uses `notify_waiters`, which wakes both.
+    {
+        let app = Arc::clone(&app);
+        let db = db.clone();
+        let engine = engine.clone();
+        let signal = Arc::clone(&stop);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
+                    _ = signal.notified() => return,
+                }
+
+                // Failures are the sync's business to report, not the watcher's — it has its
+                // own backoff and its own error events.
+                let _ = engine.sync_account(app.as_ref(), &db, account_id).await;
+            }
+        });
+    }
 
     tokio::spawn(async move {
         let mut backoff = Backoff::new();
@@ -261,9 +302,10 @@ async fn run(
         return poll(app, db, engine, account_id, stop).await;
     }
 
-    // The Inbox is what IDLE watches. Watching every mailbox would need a connection each,
-    // and the other mailboxes are covered by the periodic sync — this is about the one the
-    // user is looking at.
+    // The Inbox is what IDLE watches. Watching every mailbox would need a connection each, so
+    // this is the one the user is looking at and the one mail arrives in. Everything else is
+    // caught by `REFRESH_INTERVAL` above — which is a real timer now, where this comment used
+    // to point at a "periodic sync" that did not exist.
     session.select("INBOX").await?;
 
     tracing::debug!(account_id, "idling on INBOX");
@@ -363,6 +405,29 @@ async fn poll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_account_is_refreshed_well_inside_the_reissue_window() {
+        // The safety net has to close two holes, and both are silent.
+        //
+        // IDLE watches INBOX alone, so without this nothing outside the inbox is ever noticed
+        // — on Gmail that is every label a filter files into. And a connection killed by a
+        // sleeping laptop reports nothing, so the watcher parks in a wait that will never be
+        // woken; only `IDLE_REISSUE` ends that, twenty-nine minutes later. A refresh longer
+        // than the re-issue would leave the second hole exactly as it was.
+        assert!(
+            REFRESH_INTERVAL < IDLE_REISSUE,
+            "a refresh slower than the re-issue closes neither hole it exists for"
+        );
+        assert!(
+            REFRESH_INTERVAL >= Duration::from_secs(60),
+            "re-syncing every mailbox more than once a minute is a poll, not a safety net"
+        );
+        assert!(
+            REFRESH_INTERVAL <= Duration::from_secs(10 * 60),
+            "mail that takes more than ten minutes to appear reads as not arriving at all"
+        );
+    }
 
     #[test]
     fn the_reissue_period_stays_inside_the_rfc_limit() {
