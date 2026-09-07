@@ -42,6 +42,18 @@ interface MailState {
   selection: MailboxSelection
   /** In the list's own order, so a multi-selection can be drawn as contiguous runs. */
   selectedMessageIds: number[]
+  /**
+   * The accounts the selected messages belong to, published by the list.
+   *
+   * Derived rather than owned, and here rather than computed where it is needed, because the
+   * only place that knows it is the message list: the store holds ids, and an id says nothing
+   * about which server the message lives on. Anything offering a *destination* for the
+   * selection needs this — mail cannot move between accounts, so a selection spanning two has
+   * no valid destination at all, and the honest thing is not to offer one.
+   *
+   * More than one entry is normal: a unified mailbox lists every account at once.
+   */
+  selectedAccountIds: number[]
   /** Where a shift-range starts. Ordinary clicks move it; shift-clicks do not. */
   anchorMessageId: number | null
   /**
@@ -55,6 +67,8 @@ interface MailState {
   focusedInThread: number | null
 
   selectMailbox: (selection: MailboxSelection) => void
+  /** Called by the list when the selection or its rows change. */
+  setSelectedAccountIds: (ids: number[]) => void
   /** A plain click: replaces the selection and moves the anchor. */
   selectMessage: (id: number) => void
   /** Ctrl-click: adds or removes one, and moves the anchor to it. */
@@ -95,13 +109,33 @@ export const NO_SELECTION: MailboxSelection = {
 export const useMailStore = create<MailState>()((set, get) => ({
   selection: NO_SELECTION,
   selectedMessageIds: [],
+  selectedAccountIds: [],
   anchorMessageId: null,
   focusedInThread: null,
 
   selectMailbox: (selection) => {
     // The list decides what to select once its first page arrives; clearing here avoids a
     // frame where the reader shows a message from the mailbox you just left.
-    set({ selection, selectedMessageIds: [], anchorMessageId: null, focusedInThread: null })
+    set({
+      selection,
+      selectedMessageIds: [],
+      selectedAccountIds: [],
+      anchorMessageId: null,
+      focusedInThread: null,
+    })
+  },
+
+  setSelectedAccountIds: (ids) => {
+    // Compared before setting: this runs from an effect on every list render, and a fresh
+    // array each time would re-render every reader of it for no change.
+    const { selectedAccountIds } = get()
+    if (
+      selectedAccountIds.length === ids.length &&
+      selectedAccountIds.every((id, index) => id === ids[index])
+    ) {
+      return
+    }
+    set({ selectedAccountIds: ids })
   },
 
   selectMessage: (id) => {

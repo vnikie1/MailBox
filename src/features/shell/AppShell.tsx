@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMemo, useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronLeft } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
@@ -177,6 +177,21 @@ export function AppShell() {
   // `useThread` with the same key, so this is the same query.
   const { data: openThread = [] } = useThread(only ?? null)
   const selectedMessage = openThread.find((message) => message.id === only)
+
+  /**
+   * Where the selection could actually go.
+   *
+   * The picker used to list every folder of every account, and the core would refuse the
+   * cross-account ones after the fact with `crossAccount` — the same fault the sidebar's drop
+   * targets had, arriving as an error toast instead of a cursor. Mail cannot move between
+   * accounts, so a selection spanning two has no destination at all and is offered none.
+   */
+  const selectedAccountIds = useMailStore((state) => state.selectedAccountIds)
+  const destinations = useMemo(() => {
+    if (selectedAccountIds.length !== 1) return []
+    const [account] = selectedAccountIds
+    return mailboxes.filter((mailbox) => mailbox.accountId === account)
+  }, [mailboxes, selectedAccountIds])
 
   const actions = {
     newMessage: useCallback(() => {
@@ -450,6 +465,9 @@ export function AppShell() {
                 onSearchChange: search.setText,
                 onSearchCommit: search.commit,
                 actions,
+                // Only meaningful for one message: with several selected there is no single
+                // colour to tick, and the menu says so by ticking nothing.
+                flagColor: selectedMessage?.flagColor,
               }}
             />
           </div>
@@ -472,8 +490,13 @@ export function AppShell() {
       <MailboxPicker
         open={movingTo}
         onOpenChange={setMovingTo}
-        mailboxes={mailboxes}
+        mailboxes={destinations}
         accounts={accounts}
+        unavailable={
+          selectedAccountIds.length > 1
+            ? 'These messages are in different accounts, and mail cannot move between accounts.'
+            : 'There is nowhere to move these.'
+        }
         title={
           selectedMessageIds.length === 1
             ? 'Move message to…'

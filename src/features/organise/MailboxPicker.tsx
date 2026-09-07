@@ -14,6 +14,14 @@ export interface MailboxPickerProps {
   accounts: AccountRow[]
   /** What the chosen mailbox is for — "Move 3 messages to…". */
   title: string
+  /**
+   * Shown instead of "no match" when there is nothing to offer at all.
+   *
+   * The two empty lists mean different things and must not read the same. "No mailbox matches
+   * that" is about what was typed; this is about the selection having no possible destination,
+   * which no amount of retyping will fix.
+   */
+  unavailable?: string | undefined
   onChoose: (mailboxId: number) => void
 }
 
@@ -55,6 +63,7 @@ export function MailboxPicker({
   mailboxes,
   accounts,
   title,
+  unavailable,
   onChoose,
 }: MailboxPickerProps) {
   const [query, setQuery] = useState('')
@@ -144,7 +153,13 @@ export function MailboxPicker({
           </li>
         ))}
 
-        {matches.length === 0 && <li className={styles.empty}>No mailbox matches that.</li>}
+        {matches.length === 0 && (
+          <li className={styles.empty}>
+            {mailboxes.length === 0 && unavailable !== undefined
+              ? unavailable
+              : 'No mailbox matches that.'}
+          </li>
+        )}
       </ul>
     </Sheet>
   )

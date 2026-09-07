@@ -79,7 +79,10 @@ export function FlagMenu({ ids, current, trigger }: FlagMenuProps) {
       <MenuItem
         label="Clear Flag"
         icon={FlagOff}
-        disabled={current === null || current === undefined}
+        // Disabled only when the colour is *known* to be absent. Undefined means several
+        // messages that do not agree, and clearing those is exactly what someone with a mixed
+        // selection is reaching for — refusing it there would be the menu being clever.
+        disabled={current === null}
         onClick={() => {
           apply(null)
         }}

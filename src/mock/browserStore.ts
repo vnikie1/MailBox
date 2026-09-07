@@ -324,6 +324,17 @@ export function messageGet(id: number): MessageFull | null {
   return current().messages.get(id) ?? null
 }
 
+/**
+ * A thread's messages.
+ *
+ * Returned as **copies**, which is not tidiness. Everything else in this file hands back a
+ * freshly built row, and this used to hand back the stored objects themselves — so a mutation
+ * that edited a message in place (setting a flag colour does) left the query cache already
+ * holding the new value in the same object it had before. React had no new reference to
+ * notice, so the refetch changed nothing on screen and the flag menu appeared to tick nothing
+ * after setting a colour. Over a real IPC boundary the answer is serialised and is always a
+ * fresh object; the mock has to be too, or it is a mock of something the app never does.
+ */
 export function threadGet(messageId: number): MessageFull[] {
   // Resolve the message to its thread first, exactly as the core does. Filtering on the
   // message id directly matched only the conversation whose thread id happened to equal it.
@@ -331,12 +342,13 @@ export function threadGet(messageId: number): MessageFull[] {
   const threadId = data.messages.get(messageId)?.threadId ?? null
   if (threadId === null) {
     const single = data.messages.get(messageId)
-    return single === undefined ? [] : [single]
+    return single === undefined ? [] : [{ ...single }]
   }
 
   return [...data.messages.values()]
     .filter((message) => message.threadId === threadId)
     .sort((a, b) => a.dateSent - b.dateSent || a.id - b.id)
+    .map((message) => ({ ...message }))
 }
 
 export function search(query: SearchQuery): MessageRow[] {
@@ -365,6 +377,33 @@ function mailboxesOf(ids: number[]): number[] {
     if (message) seen.add(message.mailboxId)
   }
   return [...seen]
+}
+
+/**
+ * Sets or clears the colour flag on a selection, the way `flag_set` does.
+ *
+ * A colour implies the flag: the core's own note is that colour is a local concept riding on
+ * a plain `Flagged`, so a message with a colour is flagged and clearing the colour unflags
+ * it. Without this the browser build had no path at all and the menu threw.
+ */
+export function setFlagColor(
+  ids: number[],
+  color: string | null,
+): { changed: number; mailboxIds: number[] } {
+  const data = current()
+  const mailboxIds = mailboxesOf(ids)
+  let changed = 0
+
+  for (const id of ids) {
+    const message = data.messages.get(id)
+    if (!message) continue
+    message.flagColor = color
+    message.flagged = color !== null
+    changed += 1
+  }
+
+  recount(data, mailboxIds)
+  return { changed, mailboxIds }
 }
 
 export function setFlags(

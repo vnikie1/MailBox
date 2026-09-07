@@ -10,6 +10,9 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
+import * as browser from '@/mock/browserStore'
+import { notifyBrowserMailboxChange } from './ipc'
+
 import type { Action } from './generated/Action'
 import type { Available } from './generated/Available'
 import type { FlagName } from './generated/FlagName'
@@ -111,6 +114,15 @@ export async function flagRename(color: string, name: string): Promise<void> {
 
 /** `null` clears the flag entirely. */
 export async function flagSet(ids: number[], color: string | null): Promise<number> {
+  if (!inTauri) {
+    const { changed, mailboxIds } = browser.setFlagColor(ids, color)
+    // What `flag_set` announces in the core is `mailbox:changed`, and that is what marks the
+    // list stale — `FlagMenu` calls this directly rather than through a mutation hook, so
+    // nothing else would. Saying it here keeps the browser honest about a refresh the real
+    // app gets from the core.
+    notifyBrowserMailboxChange(mailboxIds)
+    return changed
+  }
   return invoke<number>('flag_set', { ids, color })
 }
 

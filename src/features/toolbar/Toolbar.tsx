@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 
 import { useMailStore } from '@/store/mail'
+import { FlagMenu } from '@/features/organise'
 import { SearchField } from '@/features/search'
 import { IconButton, Tooltip, TooltipGroup } from '@/ui'
 
@@ -60,12 +61,26 @@ export interface ToolbarActions {
 
 export interface ToolbarProps {
   actions: ToolbarActions
+  /**
+   * The colour the selection already carries, `null` for flagged-with-no-colour, and
+   * `undefined` when it is not one message and so there is no single answer.
+   *
+   * Not optional: with `exactOptionalPropertyTypes` an absent key and an explicit undefined
+   * are different types, and the caller genuinely has an undefined to pass.
+   */
+  flagColor: string | null | undefined
   search: string
   onSearchChange: (text: string) => void
   onSearchCommit: (text: string) => void
 }
 
-export function Toolbar({ actions, search, onSearchChange, onSearchCommit }: ToolbarProps) {
+export function Toolbar({
+  actions,
+  flagColor,
+  search,
+  onSearchChange,
+  onSearchCommit,
+}: ToolbarProps) {
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
 
   const hasSelection = selectedMessageIds.length > 0
@@ -162,16 +177,17 @@ export function Toolbar({ actions, search, onSearchChange, onSearchCommit }: Too
               />
             }
           />
-          <Tooltip
-            content="Flag"
-            trigger={
-              <IconButton
-                icon={Flag}
-                label="Flag"
-                disabled={!hasSelection}
-                onClick={actions.flag}
-              />
-            }
+          {/*
+            A menu rather than a toggle, which is what Mail's flag button is. `actions.flag`
+            is still the keyboard shortcut's plain on-or-off flag; this is where a *colour*
+            gets chosen, and until it was wired there was nowhere in the app to choose one at
+            all — the seven colours under Flagged in the sidebar were filters that could never
+            match anything.
+          */}
+          <FlagMenu
+            ids={selectedMessageIds}
+            {...(flagColor === undefined ? {} : { current: flagColor })}
+            trigger={<IconButton icon={Flag} label="Flag" disabled={!hasSelection} />}
           />
         </div>
       </TooltipGroup>

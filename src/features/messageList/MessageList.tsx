@@ -289,6 +289,21 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
     [toggleRead],
   )
 
+  // Published for anything that has to offer the selection a destination — the Move to
+  // picker, and the sidebar's drop targets by way of the same rule. Only the list can answer
+  // it: the store holds message ids, and an id does not say which account it belongs to.
+  const setSelectedAccountIds = useMailStore((state) => state.setSelectedAccountIds)
+
+  useEffect(() => {
+    const byId = new Map(rows.map((row) => [row.id, row]))
+    const accounts = new Set<number>()
+    for (const id of selectedMessageIds) {
+      const row = byId.get(id)
+      if (row !== undefined) accounts.add(row.accountId)
+    }
+    setSelectedAccountIds([...accounts].sort((a, b) => a - b))
+  }, [rows, selectedMessageIds, setSelectedAccountIds])
+
   const onDragStart = useCallback(
     (id: number, transfer: DataTransfer) => {
       // Dragging an unselected row drags that row, not the selection — what every list on
