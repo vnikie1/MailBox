@@ -5237,3 +5237,102 @@ runs in a browser, and neither of these faults exists in one.
   that moment — so a stop arriving mid-sync was dropped and the task would have gone on
   syncing an account the user had just removed, for as long as the app ran. Found by checking
   whether `reconcile` could leak tasks rather than by anything failing.
+
+---
+
+## 2026-09-07 — A badge you can read, and an accent you can choose
+
+### Fixed
+
+- **The taskbar badge was illegible, and it was illegible for a measurable reason.** It drew a
+  fixed 16×16 bitmap with a 3×5 hand-made font. On the display this was reported from,
+  `GetSystemMetricsForDpi(SM_CXSMICON, 192)` is **32** — measured, not inferred — so the shell
+  was enlarging every pixel of it. A one-pixel glyph stroke became a two-pixel smear and the
+  disc edge became a staircase.
+
+  The module comment had the trade backwards: it justified 16 pixels on the grounds that
+  "anything larger is scaled down and looks soft". Downscaling costs sharpness; upscaling costs
+  the _shape of the glyph_, which is the thing a digit cannot afford to lose. The size now comes
+  from the window's DPI, clamped, and where the answer is uncertain — Windows 11 draws a
+  per-monitor taskbar and offers no way to ask which monitor holds your button — it errs large,
+  which is right under every hypothesis.
+
+  The disc is anti-aliased by supersampling and the digits are set in Segoe UI Semibold.
+
+- **The badge was red while the app was orange.** A hardcoded `#C42B1C`, because the badge is
+  drawn into a bitmap the shell owns and cannot read a CSS custom property. It takes the app's
+  accent now, pushed down from the UI.
+
+- **Three other faults in the same file, none of them reported.** The AND mask was created from
+  a null pointer, which Win32 documents as leaving the contents **undefined** while the comment
+  beside it claimed an all-zero mask — it worked by luck, and partial alpha would have started
+  punching holes in it on someone else's machine. A device context leaked on one error path.
+  And `SetOverlayIcon` was passed no description, so the overlay had no accessible name at all
+  and Narrator announced nothing; it now says "9 unread".
+
+- **Compose and `.eml` windows had no appearance wiring whatsoever.** `useAppearanceSync` was
+  mounted in exactly three places and neither of those was one of them, so they got only
+  `main.tsx`'s pre-paint write — theme and density, never the accent. They have been drawing the
+  CSS fallback Apple blue while the rest of the app wore the OS accent. Found while auditing
+  what a user-chosen accent would have to reach.
+
+### Added
+
+- **An accent colour of the user's own.** docs/01 §11 has always specified "an in-app override
+  offering the Apple palette" over the OS accent, and it had never been built.
+  `DisplayPreferences` gains `accent` beside theme, density and transparency, defaulting to
+  `system` like the rest, and `resolveAccent` layers it over what Windows reports exactly as
+  `resolveTheme` does.
+
+  The palette is the eleven hues `primitive.css` already holds, as **light/dark pairs**. Mint is
+  the case that proves the pairs are necessary: `#00c7be` wants white on it and `#63e6e2` wants
+  black, so one value per hue would be unreadable in one theme or the other.
+
+  The swatches are real radio inputs laid under a coloured circle, so the control keeps its
+  keyboard behaviour and announces "Purple, radio button" rather than being a grid of unnamed
+  dots.
+
+### Notes
+
+- **The UI owns the accent; Rust is told.** Resolving it in both would be one rule implemented
+  twice in two languages, and the first person to pin a colour would see the taskbar disagree
+  with the window. `accent_rgb()` survives only as the fallback for the badge drawn during
+  `setup`, before any WebView exists to say otherwise — a documented degradation rather than a
+  parallel implementation.
+
+- **Written as inline custom properties, not a `[data-accent]` rule.** The CSS rule was the
+  obvious design and is a trap: `[data-window-inactive]` remaps `--accent` near the end of
+  `semantic.css` at the same specificity, so an accent rule placed after it — the natural
+  reading of "it has to come last" — would silently kill the inactive-window desaturation
+  app-wide, with no linter and no test to catch it.
+
+- **The palette exists twice on purpose**, in `primitive.css` and in TypeScript, because the
+  accent has to be a _value_ before first paint and for the badge, and neither can read a custom
+  property. `tests/unit/accentPalette.test.ts` parses the CSS and fails if they drift — the idiom
+  `settings.test.ts` already uses against the Rust source — and it guards itself first, because a
+  regex that matched nothing would make every assertion vacuously true.
+
+### Incidents
+
+- **The digits were punched straight through the disc as transparent holes, and the tests
+  passed.** The first build got the size and the colour right; the taskbar icon showed _through_
+  the glyph, so a "9" appeared as a blue hole in an orange circle.
+
+  The cause was a comment I had written asserting that GDI "writes colour and leaves alpha
+  alone", which is false: GDI is alpha-unaware and writes **zero** into the fourth byte of every
+  pixel it touches. The disc is now filled with straight colour so the text blends correctly,
+  and alpha is restored from the coverage mask and premultiplied in one pass afterwards.
+
+  The six Rust tests passed on the broken build, and were right to: they cover the disc
+  arithmetic, which was correct. What was wrong lived in a Win32 API's behaviour, which no test
+  in this repo can reach. It was found by photographing the taskbar and zooming in — the same
+  method that found the original bug.
+
+- **A survey agent fabricated a documentation citation.** Investigating the badge, one agent
+  reported that "`ITaskbarList3::SetOverlayIcon` documents its icon as SM_CXSMICON × SM_CYSMICON"
+  and called the DPI hypothesis confirmed. MSDN says "a small icon, measuring 16x16 pixels at 96
+  dpi" — a reference DPI, not a named metric — and the agent had measured nothing. The
+  conclusion happened to be right, and was independently established here by calling
+  `GetSystemMetricsForDpi` on the machine, but the reasoning was dressed as a contract when it
+  was a guess. Worth recording: an adversarial pass over the surveys caught it, and nothing else
+  would have.
