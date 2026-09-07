@@ -96,9 +96,12 @@ export function AppearanceSettings() {
     {
       id: 'system',
       label: 'Follow Windows',
-      // The OS accent when Windows reports one. Null falls through to the neutral swatch,
-      // which is honest: there is no colour to preview.
-      preview: appearance.accent,
+      // The OS accent when Windows reports one — and the colour the app would *actually*
+      // draw when it does not, which is the same fallback semantic.css uses. Leaving this
+      // null drew an empty circle: no fill, the pane showing through, a swatch that looks
+      // like a rendering fault rather than a choice. A machine that reports no accent is not
+      // an error state, and the picker should show what it would get.
+      preview: appearance.accent ?? ACCENT_PALETTE.blue[resolvedTheme],
     },
     ...ACCENT_NAMES.map((name) => ({
       id: name,

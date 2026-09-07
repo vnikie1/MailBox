@@ -28,11 +28,29 @@
   border: 0;
 }
 
+/**
+ * The legend carries the separation between one group of choices and the next.
+ *
+ * `.section` spaces its children by `--sp-4` and `.group` spaces its radios by `--sp-3` —
+ * eight pixels against six. Two numbers that close read as one rhythm, so "Density" sat as
+ * near to the Theme radios above it as those radios sat to each other, and every legend looked
+ * like the last line of the group before it rather than the first line of its own.
+ *
+ * Put here rather than as a bigger `.section` gap because a hint belongs *tight* to the group
+ * it explains: widening the section would have pushed "What Mail uses." away from Density and
+ * towards the next legend, which is the same confusion the other way round.
+ */
 .legend {
   padding: 0;
   color: var(--label-2);
   font-size: var(--t-subhead-size);
   line-height: var(--t-subhead-leading);
+}
+
+/* On the fieldset, not on its legend. A <legend> is laid out specially inside a fieldset and
+ * Chromium ignores a margin on it — the rule was there first, looked right, and moved nothing. */
+.group:not(:first-of-type) {
+  margin-top: var(--sp-5);
 }
 
 .choice {

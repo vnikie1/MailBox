@@ -158,7 +158,12 @@ function AccountRow({
           }}
           onBlur={commit}
         />
-        <span className={styles.email}>{account.email}</span>
+        {/* Titled, because the row is narrow enough that the address is often elided:
+            the avatar, the name field, a sign-in button, seven colour dots, two reorder
+            buttons and a delete all share it. */}
+        <span className={styles.email} title={account.email}>
+          {account.email}
+        </span>
       </div>
 
       {/* docs/03 §7 — an account with no stored credential cannot connect, and saying so
@@ -389,6 +394,7 @@ function OAuthClientFields({
 
       <Button
         variant="bordered"
+        className={styles.clientSave}
         onClick={() => {
           void oauthClientSet(provider, value, clientSecret === '' ? undefined : clientSecret).then(
             () => {

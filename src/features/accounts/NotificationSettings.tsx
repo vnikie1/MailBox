@@ -101,15 +101,20 @@ export function NotificationSettings() {
               />
               Play sounds when mail is sent and received
             </label>
-
-            <p className={styles.hint}>
-              Windows&rsquo; own sounds, so they follow whatever you have chosen under Sound
-              settings. The new-mail sound comes with the notification, so it needs the first option
-              above.
-            </p>
           </div>
         )
       })}
+
+      {/* Said once, under the accounts it applies to, rather than repeated inside each of
+          them. It was in the loop, so three accounts printed the same three lines three times
+          — and the repetition read as three different notes that happened to be identical,
+          which is a reason to stop and compare them. */}
+      {accounts.length > 0 && (
+        <p className={styles.hint}>
+          Windows&rsquo; own sounds, so they follow whatever you have chosen under Sound settings.
+          The new-mail sound comes with the notification, so it needs the first option above.
+        </p>
+      )}
 
       <label className={styles.choice}>
         <input

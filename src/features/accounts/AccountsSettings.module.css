@@ -64,9 +64,21 @@
   width: 100%;
 }
 
+/**
+ * Truncated, because the address is the one thing in this row with no natural length.
+ *
+ * `.identity` already has `min-width: 0` so the column can shrink, but a span with nothing
+ * said about overflow paints outside its box anyway — so a long address ran straight under the
+ * "Sign in again" button beside it, and the two were drawn on top of each other. Ellipsis is
+ * the honest answer: the full address is in the title, and the row is not where anyone reads
+ * it character by character.
+ */
 .email {
+  overflow: hidden;
   color: var(--label-2);
   font-size: 0.9em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /**
@@ -186,10 +198,30 @@
   color: var(--label-2);
 }
 
+/**
+ * The client id and secret, side by side.
+ *
+ * Aligned to the **top**, not the bottom. Bottom alignment looks equivalent and is not: only
+ * Google's secret carries a description ("Required. Google will not refresh this account
+ * without it."), so that field is a line and a half taller than its neighbour, and aligning
+ * their bottoms pushed the id field's label and input down by exactly that much. The Google
+ * row was visibly stepped while the Microsoft row beside it — neither field described — lined
+ * up perfectly, which is what made it look like a rendering fault rather than a rule.
+ */
 .clientRow {
   display: flex;
   gap: var(--sp-4);
-  align-items: flex-end;
+  align-items: start;
+}
+
+/**
+ * The Save button has no label above it, so top alignment would sit it level with the labels
+ * rather than with the inputs it belongs to. Offset by exactly what a field puts above its
+ * control — the label's line box plus `TextField`'s own gap — so it lines up by construction
+ * rather than by a number that happens to look right.
+ */
+.clientSave {
+  margin-top: calc(var(--t-subhead-leading) + var(--sp-2));
 }
 
 .clientField {
