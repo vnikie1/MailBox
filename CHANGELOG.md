@@ -5165,3 +5165,75 @@ runs in a browser, and neither of these faults exists in one.
 
   The interval restarts when each account's sync completes rather than on a shared clock, so
   the accounts keep independent cadences and a slow account cannot delay a fast one.
+
+---
+
+## 2026-09-07 — Three things finished
+
+### Fixed
+
+- **Flag colours could not be set anywhere in the app.** `FlagMenu` was written, exported from
+  `features/organise/index.ts`, and rendered nowhere; `flagSet` had exactly one caller, which
+  was that component. So the core could store a colour, the sidebar offered seven colours to
+  filter by, and a message row knew how to draw one — and nobody could put a colour on a
+  message. Every part passed its own test and the feature did not exist.
+
+  The toolbar's Flag button is now that menu, which is what Mail's flag button is. The keyboard
+  shortcut keeps the plain on-or-off flag. Clear is disabled only when the colour is _known_ to
+  be absent — undefined means several messages that disagree, and clearing those is exactly
+  what a mixed selection is reaching for.
+
+- **The Move to… picker offered folders from every account.** The same fault the sidebar's drop
+  targets had, arriving as a `crossAccount` error afterwards instead of an absence. It now
+  offers only the selection's own account, and when a selection spans two it says so rather
+  than showing an empty list that reads as a search miss. Fixing the drag and not this would
+  have left the app disagreeing with itself about where mail can go depending which hand you
+  used.
+
+  The list publishes which accounts the selection spans, because it is the only thing that
+  knows: the store holds message ids, and an id does not say which server a message is on.
+
+- **Moving a message twice before the first move reached the server lost the second move and
+  left a duplicate.** Found while restoring mail after a drag test, and older than the drag
+  work — every path that moves mail could hit it.
+
+  `move_to` parks a moved row at a negative UID, which is right, and discarded the one thing
+  the row still needed: until the queued operation lands the message _is_ still in its old
+  mailbox under its old UID. `ops::locate` skips non-positive UIDs — correctly, there is no
+  server UID to name — so **every command against a parked message queued nothing at all**. A
+  three-message drag where one was already parked queued an operation naming two. A flag on a
+  parked message did nothing. The local half always succeeded, which is what made it look
+  finished.
+
+  A message now keeps `origin_mailbox_id` and `origin_uid` (migration 0012) until it rejoins
+  the server's numbering, and `locate` names a parked row by those. That alone would leave two
+  moves queued for one UID, which cannot both be right — the first changes the UID the second
+  names — so `enqueue` supersedes: a new move takes its UIDs out of any queued move from the
+  same mailbox, deleting one left empty and keeping the other messages in a batch.
+
+### Notes
+
+- Superseding lives in `enqueue` rather than in `msg_move`, so every path that moves mail —
+  move, archive, delete-to-trash, the rules engine — gets it without having to remember.
+
+- **A known limit, recorded rather than hidden.** If the first move reaches the server but sync
+  has not read it back yet, the origin is briefly stale and the second move is refused by the
+  server. That is a failed operation in the log rather than a duplicate — strictly better than
+  before — and closing it properly needs the drain to learn the new UID, which IMAP only offers
+  where the server has UIDPLUS.
+
+### Incidents
+
+- **Two mock faults surfaced while testing the flag menu, both of which made the browser lie
+  about a working app.** `flagSet` had no browser path at all and threw. And `threadGet`
+  returned the _stored_ objects rather than copies, so a mutation editing a message in place
+  left the query cache already holding the new value in the same object — React saw no new
+  reference and did not re-render, and the menu appeared to tick nothing after a colour was
+  chosen. A real IPC boundary serialises and always returns a fresh object; a mock that shares
+  references is a mock of something the app never does.
+
+- **A flaw in the previous fix, caught before it shipped.** The refresh task added yesterday
+  waited on `stop` only between syncs, and `notify_waiters` wakes the waiters registered at
+  that moment — so a stop arriving mid-sync was dropped and the task would have gone on
+  syncing an account the user had just removed, for as long as the app ran. Found by checking
+  whether `reconcile` could leak tasks rather than by anything failing.
