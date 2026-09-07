@@ -90,9 +90,15 @@ pub fn write_batch(
 
         if let Some(id) = adopted {
             tx.execute(
+                // The origin goes when the row rejoins the server's numbering: the move it
+                // described is done, and a stale origin would send the next command against a
+                // mailbox and UID the message has already left. A non-null `origin_uid` means
+                // exactly "this row has an unfinished move", and that has to stop being true
+                // at the same moment it stops being true.
                 "UPDATE message
                     SET uid = ?2, flag_seen = ?3, flag_answered = ?4, flag_flagged = ?5,
-                        flag_draft = ?6, flag_deleted = ?7
+                        flag_draft = ?6, flag_deleted = ?7,
+                        origin_mailbox_id = NULL, origin_uid = NULL
                   WHERE id = ?1",
                 params![
                     id,

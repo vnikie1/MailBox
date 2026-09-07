@@ -143,12 +143,23 @@ pub fn locate(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<Located>, DbError
         .collect::<Vec<_>>()
         .join(", ");
 
+    // A parked row is named by where the *server* still has it, not by where it has been moved
+    // to locally. `move_to` records that origin precisely so this query can find it.
+    //
+    // Without the COALESCE this selected the placeholder UID, which the loop below then threw
+    // away — so every command issued against a message with an unfinished move queued nothing
+    // at all, silently. Moving three messages where one was already parked queued an operation
+    // naming two of them; flagging a parked message did nothing on the server. The local half
+    // succeeded in both cases, which is what made it look like it had worked.
     let sql = format!(
-        "SELECT message.account_id, mailbox.remote_path, message.uid
+        "SELECT message.account_id,
+                COALESCE(origin.remote_path, mailbox.remote_path),
+                COALESCE(message.origin_uid, message.uid)
            FROM message
            JOIN mailbox ON mailbox.id = message.mailbox_id
+           LEFT JOIN mailbox AS origin ON origin.id = message.origin_mailbox_id
           WHERE message.id IN ({placeholders})
-          ORDER BY message.account_id, mailbox.remote_path, message.uid"
+          ORDER BY 1, 2, 3"
     );
 
     let params: Vec<&dyn rusqlite::ToSql> =
@@ -204,9 +215,98 @@ pub fn mailbox_path(tx: &Transaction<'_>, mailbox_id: i64) -> Result<Option<Stri
 }
 
 /// Queues one operation. Call inside the transaction that makes the local change.
+/// Takes `uids` out of any queued move that would take them out of `from`.
+///
+/// A UID can leave a mailbox once. Moving a message that already has an unfinished move left
+/// both operations queued, and they cannot both be right: the first ran, the UID changed, and
+/// the second could no longer find the message — so the server performed the first move and
+/// never the second. The returning message then failed to match the parked row, which had
+/// since moved somewhere else, and was inserted beside it. One message, two rows, for good,
+/// because `remove_missing` ignores `uid <= 0`.
+///
+/// Rewriting rather than appending is what makes the second move *replace* the first instead
+/// of racing it. An operation left with no UIDs is deleted; a batch that still has other
+/// messages in it keeps them.
+fn supersede_move(
+    tx: &Transaction<'_>,
+    account_id: i64,
+    from: &str,
+    uids: &[u32],
+) -> Result<(), DbError> {
+    // Collected before writing: the statement borrows the transaction, and the rewrite below
+    // writes to the same table it is reading.
+    let queued: Vec<(i64, String)> = {
+        let mut statement = tx.prepare(
+            "SELECT id, payload_json FROM pending_op WHERE account_id = ?1 AND kind = 'move'",
+        )?;
+
+        let rows = statement.query_map(params![account_id], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for (id, payload) in queued {
+        // A payload this version cannot read is left alone rather than dropped. Standing rule
+        // 13: an operation we do not understand is not an operation we may throw away.
+        let Ok(Op::Move {
+            from: queued_from,
+            to,
+            uids: queued_uids,
+        }) = serde_json::from_str::<Op>(&payload)
+        else {
+            continue;
+        };
+
+        if queued_from != from {
+            continue;
+        }
+
+        let kept: Vec<u32> = queued_uids
+            .iter()
+            .copied()
+            .filter(|uid| !uids.contains(uid))
+            .collect();
+
+        if kept.len() == queued_uids.len() {
+            continue;
+        }
+
+        if kept.is_empty() {
+            tx.execute("DELETE FROM pending_op WHERE id = ?1", params![id])?;
+            continue;
+        }
+
+        let rewritten = Op::Move {
+            from: queued_from,
+            to,
+            uids: kept,
+        };
+
+        let payload = serde_json::to_string(&rewritten).map_err(|error| DbError::Encode {
+            what: "pending_op payload",
+            detail: error.to_string(),
+        })?;
+
+        tx.execute(
+            "UPDATE pending_op SET payload_json = ?2 WHERE id = ?1",
+            params![id, payload],
+        )?;
+    }
+
+    Ok(())
+}
+
 pub fn enqueue(tx: &Transaction<'_>, account_id: i64, op: &Op) -> Result<(), DbError> {
     if op.is_empty() {
         return Ok(());
+    }
+
+    // Every path that moves mail goes through here — move, archive, delete-to-trash and the
+    // rules engine — so this is the one place that has to know a second move replaces a first.
+    if let Op::Move { from, uids, .. } = op {
+        supersede_move(tx, account_id, from, uids)?;
     }
 
     let payload = serde_json::to_string(op).map_err(|error| DbError::Encode {

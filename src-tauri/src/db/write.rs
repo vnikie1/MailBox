@@ -228,8 +228,22 @@ pub fn move_to(tx: &Transaction<'_>, ids: &[i64], mailbox_id: i64) -> Result<usi
     // `ops::locate` already skips it — the codebase has always had a notion of a row that is
     // here and not yet on the server, and a message moved locally is exactly that until the
     // queued operation lands and the next sync brings back its real UID.
+    // The origin is recorded at the same time, and only on the first move: until the queued
+    // operation reaches the server the message is still in its old mailbox under its old UID,
+    // and a row that had forgotten that could not be named to the server at all. A row moved
+    // twice keeps the origin it already had, because that is still where the server has it.
+    //
+    // The CASE arms read the row as it was before this statement — SQLite evaluates every SET
+    // expression against the old values — so `uid > 0` here means "not already parked".
     let in_list = placeholders(ids.len(), 2);
-    let sql = format!("UPDATE message SET mailbox_id = ?1, uid = -id WHERE id IN ({in_list})");
+    let sql = format!(
+        "UPDATE message
+            SET origin_mailbox_id = CASE WHEN uid > 0 THEN mailbox_id ELSE origin_mailbox_id END,
+                origin_uid        = CASE WHEN uid > 0 THEN uid        ELSE origin_uid        END,
+                mailbox_id = ?1,
+                uid = -id
+          WHERE id IN ({in_list})"
+    );
 
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(mailbox_id)];
     for id in ids {

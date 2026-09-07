@@ -78,6 +78,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "backfill_contacts",
         sql: include_str!("../../migrations/0011_backfill_contacts.sql"),
     },
+    Migration {
+        version: 12,
+        name: "moved_message_origin",
+        sql: include_str!("../../migrations/0012_moved_message_origin.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.

@@ -763,3 +763,155 @@ fn several_messages_move_at_once_without_colliding_with_each_other() {
 
     assert_eq!(placeholders, 3, "the placeholder UIDs were not unique");
 }
+
+/* --------------------------------------- moving a message again before the first move syncs */
+
+/// Queues and performs a move the way `msg_move` does: locate, enqueue, then write.
+fn queue_move(tx: &rusqlite::Transaction<'_>, ids: &[i64], to_id: i64, to_path: &str) {
+    for group in crate::sync::ops::locate(tx, ids).expect("locate") {
+        crate::sync::ops::enqueue(
+            tx,
+            group.account_id,
+            &crate::sync::ops::Op::Move {
+                from: group.mailbox,
+                to: to_path.to_string(),
+                uids: group.uids,
+            },
+        )
+        .expect("enqueue");
+    }
+
+    write::move_to(tx, ids, to_id).expect("move");
+}
+
+/// Every queued move, as `(from, to, uids)`, oldest first.
+fn queued_moves(tx: &rusqlite::Transaction<'_>) -> Vec<(String, String, Vec<u32>)> {
+    let payloads: Vec<String> = {
+        let mut statement = tx
+            .prepare("SELECT payload_json FROM pending_op WHERE kind = 'move' ORDER BY id")
+            .expect("prepare");
+
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query");
+
+        rows.collect::<rusqlite::Result<Vec<_>>>().expect("rows")
+    };
+
+    payloads
+        .into_iter()
+        .map(|payload| {
+            match serde_json::from_str::<crate::sync::ops::Op>(&payload).expect("parse") {
+                crate::sync::ops::Op::Move { from, to, uids } => (from, to, uids),
+                _ => panic!("a row with kind 'move' held something else"),
+            }
+        })
+        .collect()
+}
+
+/// Moving a message twice used to tell the server about the first move only.
+///
+/// A locally moved row parks at a negative UID, and `locate` skips those — so the second move
+/// queued nothing while the first sat waiting. The server performed the first move, the UID
+/// changed, and the returning message no longer matched the parked row (which had moved on),
+/// so it was inserted beside it: one message, two rows, permanently, because `remove_missing`
+/// ignores `uid <= 0`.
+#[test]
+fn a_second_move_replaces_the_first_instead_of_leaving_both_queued() {
+    let mut conn = fixture();
+    let tx = conn.transaction().expect("tx");
+
+    queue_move(&tx, &[1], 2, "Archive");
+    queue_move(&tx, &[1], 3, "Bin");
+
+    let moves = queued_moves(&tx);
+    assert_eq!(
+        moves.len(),
+        1,
+        "two moves for one message cannot both be right: the first changes the UID the second names"
+    );
+
+    let (from, to, uids) = &moves[0];
+    assert_eq!(
+        from, "Inbox",
+        "the server still has the message where it started, not where it has been moved to locally"
+    );
+    assert_eq!(
+        to, "Bin",
+        "the surviving move must be the one asked for last"
+    );
+    assert_eq!(
+        uids,
+        &vec![1_u32],
+        "the original server UID, not the placeholder"
+    );
+}
+
+/// Superseding must take out one message, not the batch it happened to be queued with.
+#[test]
+fn superseding_leaves_the_other_messages_in_the_batch_alone() {
+    let mut conn = fixture();
+    let tx = conn.transaction().expect("tx");
+
+    queue_move(&tx, &[1, 2, 3], 2, "Archive");
+    queue_move(&tx, &[2], 3, "Bin");
+
+    let moves = queued_moves(&tx);
+    assert_eq!(moves.len(), 2, "the batch and the message taken out of it");
+
+    let (_, to_first, uids_first) = &moves[0];
+    assert_eq!(to_first, "Archive");
+    assert_eq!(
+        uids_first,
+        &vec![1_u32, 3],
+        "message 2 left the batch; 1 and 3 are still going to Archive"
+    );
+
+    let (from_second, to_second, uids_second) = &moves[1];
+    assert_eq!(from_second, "Inbox");
+    assert_eq!(to_second, "Bin");
+    assert_eq!(uids_second, &vec![2_u32]);
+}
+
+/// The origin is where the *server* has it, which does not change as the row moves locally.
+#[test]
+fn the_origin_survives_a_second_move_and_goes_when_the_uid_comes_back() {
+    let mut conn = fixture();
+    let tx = conn.transaction().expect("tx");
+
+    queue_move(&tx, &[1], 2, "Archive");
+    queue_move(&tx, &[1], 3, "Bin");
+
+    let (mailbox, uid): (i64, i64) = tx
+        .query_row(
+            "SELECT origin_mailbox_id, origin_uid FROM message WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read");
+
+    assert_eq!(
+        mailbox, 1,
+        "the origin is the Inbox, not the mailbox it passed through"
+    );
+    assert_eq!(uid, 1, "the origin UID is the one the server still has");
+}
+
+/// The silent half of the same bug: any command against a parked message queued nothing.
+#[test]
+fn a_parked_message_can_still_be_flagged_on_the_server() {
+    let mut conn = fixture();
+    let tx = conn.transaction().expect("tx");
+
+    queue_move(&tx, &[1], 2, "Archive");
+
+    let groups = crate::sync::ops::locate(&tx, &[1]).expect("locate");
+    assert_eq!(
+        groups.len(),
+        1,
+        "a message with an unfinished move is still somewhere on the server, and skipping it \
+         silently dropped every flag and delete aimed at it"
+    );
+    assert_eq!(groups[0].mailbox, "Inbox");
+    assert_eq!(groups[0].uids, vec![1_u32]);
+}
