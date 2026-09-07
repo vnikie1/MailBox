@@ -13,6 +13,7 @@ import type { FlagPatch } from '@/lib/generated/FlagPatch'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import type { MessageRow } from '@/lib/generated/MessageRow'
+import type { Rendered } from '@/lib/generated/Rendered'
 import type { Predicate } from '@/lib/generated/Predicate'
 import type { FlagName } from '@/lib/generated/FlagName'
 import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
@@ -367,8 +368,28 @@ export function useMailEvents(): void {
         // a body means fetching every remote image in it. A newsletter left on screen was
         // re-downloaded on every sync tick. The key carries the id, so naming it here is a
         // prefix match over both the images-on and images-off variants of that one message.
+        //
+        // And only the ones still *waiting*. Naming the id was not narrow enough, because the
+        // commonest `messages:updated` of all is the message being marked read 700ms after it
+        // opens — so opening a message rendered it, marked it read, and rendered it again.
+        // Measured from this install's own log: 191 of 402 renders were the same message
+        // repeated within ten seconds, at a p25 gap of 0.696s, which is `DWELL_MS` to three
+        // decimal places. That was 146 MB of the 275 MB ever rendered — over half the work the
+        // body path has ever done, thrown away.
+        //
+        // Safe because a body that has arrived cannot change: `sync::bodies` writes
+        // `body_state = 'full'` in the same UPDATE as `body_html`, and the engine only fetches
+        // a body when `body_state != 'full'`. So an empty `html` means "still coming" and a
+        // non-empty one is final. The flags on the message change constantly; the rendered
+        // document does not.
         for (const id of ids) {
-          void client.invalidateQueries({ queryKey: ['messageBody', id] })
+          void client.invalidateQueries({
+            queryKey: ['messageBody', id],
+            predicate: (query) => {
+              const body = query.state.data as Rendered | undefined
+              return body === undefined || body.html === ''
+            },
+          })
         }
       })
       .then(keep)
@@ -395,6 +416,17 @@ export function useMailEvents(): void {
 export function useMessageBody(messageId: number | null, loadRemote: boolean) {
   return useQuery({
     queryKey: ['messageBody', messageId, loadRemote] as const,
+    // A rendered body is the largest thing this app puts in the query cache, and the
+    // default retention is a clock with no ceiling on count or bytes. On the install this
+    // was measured on, the worst five-minute window held **eleven distinct bodies totalling
+    // 19.3 MB** — against a renderer whose real private working set is about 34 MB. The
+    // sizes are not typical of the mail: a 76 KB stored message rendered to 12.98 MB once
+    // its remote images were inlined as base64.
+    //
+    // A minute keeps what a reader actually returns to — clicking away and back, or
+    // arrowing down and up — and drops the long tail of everything merely passed through.
+    // The cost of getting it wrong is one re-render, which is now much cheaper than it was.
+    gcTime: 60_000,
     queryFn: () => ipc.messageBody(messageId ?? 0, loadRemote),
     enabled: messageId !== null,
     // Bodies are immutable once downloaded; the only thing that changes is whether we have

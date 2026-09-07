@@ -349,7 +349,26 @@ pub async fn message_body(
         "message_body: loaded"
     );
 
-    let inline = inline_images(raw_path.as_deref());
+    // Only when the message actually references one. `inline_images` reads the whole `.eml`
+    // off disk and walks its MIME tree to depth 32, and it ran on every render whether or not
+    // there was a single `cid:` in the markup — which the log says is the overwhelming
+    // majority, `inlined=0` even on the largest message this install has rendered.
+    //
+    // Scanned over the bytes rather than lowercasing the HTML first: a scheme is
+    // case-insensitive, and allocating a second copy of a multi-megabyte string to find out
+    // whether it contains four characters would cost more than the parse being avoided.
+    let wants_inline = html.as_deref().is_some_and(|markup| {
+        markup
+            .as_bytes()
+            .windows(4)
+            .any(|w| w.eq_ignore_ascii_case(b"cid:"))
+    });
+
+    let inline = if wants_inline {
+        inline_images(raw_path.as_deref())
+    } else {
+        HashMap::new()
+    };
 
     // Sanitise once to discover what the message wants, fetch that, then render with what
     // came back. The first pass is what guarantees the URL list contains only things that

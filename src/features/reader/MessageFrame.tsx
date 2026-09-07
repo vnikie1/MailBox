@@ -115,6 +115,9 @@ export interface MessageFrameProps {
 
 export function MessageFrame({ html, fromPlainText, resetKey }: MessageFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
+
+  /** The observer watching the document currently in the frame, so it can be replaced. */
+  const observers = useRef<ResizeObserver | null>(null)
   const [height, setHeight] = useState(0)
 
   // A new message starts from nothing. Keeping the previous height would leave the frame the
@@ -209,13 +212,28 @@ export function MessageFrame({ html, fromPlainText, resetKey }: MessageFrameProp
       }
     })
 
+    // Torn down explicitly, and the previous one with it.
+    //
+    // This used to be `frame.addEventListener('beforeunload', …)`, which never fired:
+    // `beforeunload` is a Window event and `frame` is the iframe *element*, so the listener sat
+    // on something that would never raise it. Every message opened left an observer watching a
+    // document that had been replaced — the sort of thing that is invisible until a long
+    // session and impossible to attribute afterwards.
+    observers.current?.disconnect()
+
     const observer = new ResizeObserver(measure)
     observer.observe(doc.documentElement)
-
-    frame.addEventListener('beforeunload', () => {
-      observer.disconnect()
-    })
+    observers.current = observer
   }, [])
+
+  // And on the way out, where nothing was watching at all.
+  useEffect(
+    () => () => {
+      observers.current?.disconnect()
+      observers.current = null
+    },
+    [],
+  )
 
   return (
     <iframe
