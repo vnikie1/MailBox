@@ -108,7 +108,6 @@ pub struct MessageFull {
     #[ts(type = "number")]
     pub size: i64,
     pub preview: Option<String>,
-    pub body_text: Option<String>,
     pub seen: bool,
     pub answered: bool,
     pub flagged: bool,

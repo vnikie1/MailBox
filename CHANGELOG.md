@@ -5453,3 +5453,59 @@ runs in a browser, and neither of these faults exists in one.
   (another application held the foreground). It shows the path no longer fires; it does not by
   itself demonstrate the 59% at scale. That figure comes from the old build's own log, and
   `tests/unit/bodyInvalidation.test.tsx` is what holds the behaviour in place.
+
+## 2026-09-07 — The three the memory pass wrote down and did not fix
+
+The entry above ends with two things noted and left: a render budget that could not see remote
+images, and remote images with no total cap. This closes both, plus the dead IPC field found
+alongside them.
+
+### Fixed
+
+- **The render budget could not see the only thing that makes a message grow.** All three tests
+  in `render_budget.rs` passed `HashMap::new()` as the remote image map — including
+  `loading_remote_images_is_no_slower`, whose own comment said "nothing here fetches" — while
+  asserting a threefold growth ceiling. A remote image is replaced by a base64 data URI four
+  thirds its size, so the budget excluded the entire mechanism it existed to bound. That is how
+  a **76 KB stored message rendered to 12.98 MB** under a test claiming to cap growth at three.
+
+  The tests now build the map the way `ipc::body` does — `remote_urls(sanitise_for_enumeration(…))`,
+  so the keys are the keys `render` looks up — and bound the output against what went in:
+  message × 3 **plus the images supplied**, which is the assertion that catches an image being
+  carried twice. The fixture's eight images take it from 32 KB to 1,040 KB, and it is checked
+  that all eight were substituted, because a map that silently matched nothing is the failure
+  being recovered from.
+
+- **Remote images had no total budget.** Per image, 8 MiB; per message, 60 images; in
+  aggregate, nothing — so 480 MiB of fetched bytes was within the rules, and 640 MiB of base64
+  after encoding, all of it crossing IPC into one string. `MAX_REMOTE_TOTAL_BYTES` is 8 MiB,
+  counted on the _encoded_ form because that is what is actually held, and set above the p90
+  rendered body of 3.16 MB so ordinary mail is untouched.
+
+  Two details. The fetch is now `buffered` rather than `buffer_unordered` — the same six
+  requests in flight, but results in the order the message asks for them, so what the reader
+  sees first is what gets the budget rather than whichever request happened to win. And it
+  **stops** rather than skipping: the remaining futures are dropped un-polled, so those requests
+  are never made, which matters because an image that cannot be shown should not still be
+  telling the sender the message was opened.
+
+  Nothing else needed changing. `render` already counts a URL missing from the map as an image
+  that was allowed and did not arrive, and the reader already has a banner that says so.
+
+- **`MessageFull.body_text` was dead payload.** Selected, serialised, sent over IPC, JSON-parsed
+  and cached on every message the user selected — and read by nothing. Not in the frontend,
+  where the only mention outside the generated type was the browser mock writing it, and not in
+  the core, where every other `body_text` is raw SQL for the search index, the rules engine or
+  junk scoring, none of which goes through this struct. Removing it from the struct compiled
+  first time, which is the proof.
+
+### Notes
+
+- The mock keeps a `bodyText`, moved from `MessageFull` onto its own `StoredMessage` — the same
+  place it already keeps `searchText` and `hasAttachment` for "what the Rust side stores but
+  does not return". The real `message` table still has the column; only the IPC payload lost it.
+
+  Kept rather than deleted for a second reason worth writing down: the fixture is seeded, so
+  dropping the `rng` draw that generates it shifts every later draw and changes every message in
+  it. The first attempt did exactly that and moved four visual baselines and broke a test, to
+  tidy away a field nobody sees.

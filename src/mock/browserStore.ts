@@ -46,6 +46,20 @@ interface StoredMessage extends MessageFull {
   /** Denormalised for search, mirroring the FTS columns on the Rust side. */
   searchText: string
   hasAttachment: boolean
+  /**
+   * The plain-text body.
+   *
+   * On the store rather than on `MessageFull`, which is where it used to live: the real
+   * `message` table still has the column — the search index, the rules engine and the junk
+   * classifier all read it in SQL — but `message_full` no longer returns it, because it was
+   * being selected, serialised, sent over IPC and cached on every message selected, and read
+   * by nothing at all.
+   *
+   * Kept generated rather than dropped because this fixture is seeded: removing the draw would
+   * shift every later one and change every message in it, moving four visual baselines to tidy
+   * away a field nobody sees.
+   */
+  bodyText: string
 }
 
 interface Store {

@@ -247,8 +247,16 @@ pub fn mailbox_counts(
     Ok(rows)
 }
 
+/// What the reader needs about one message.
+///
+/// `body_text` is deliberately absent. It was selected here, serialised, sent over IPC,
+/// JSON-parsed and cached on **every message the user selected** — and nothing read it. Not in
+/// the frontend, where the only mention outside the generated type was the browser mock writing
+/// it, and not in the core either: every other `body_text` in `src-tauri` is raw SQL for the
+/// search index, the rules engine or junk scoring, none of which goes through this struct. The
+/// reader gets its text from `message_body`, which renders it.
 const MESSAGE_FULL_COLUMNS: &str = "id, thread_id, mailbox_id, account_id, subject, from_name, \
-     from_addr, to_json, cc_json, date_sent, date_received, size, preview, body_text, \
+     from_addr, to_json, cc_json, date_sent, date_received, size, preview, \
      flag_seen, flag_answered, flag_flagged, flag_color, is_junk, junk_by_user, junk_score";
 
 fn message_full(row: &Row<'_>) -> rusqlite::Result<MessageFull> {
@@ -266,14 +274,13 @@ fn message_full(row: &Row<'_>) -> rusqlite::Result<MessageFull> {
         date_received: row.get(10)?,
         size: row.get(11)?,
         preview: row.get(12)?,
-        body_text: row.get(13)?,
-        seen: row.get::<_, i64>(14)? != 0,
-        answered: row.get::<_, i64>(15)? != 0,
-        flagged: row.get::<_, i64>(16)? != 0,
-        flag_color: row.get(17)?,
-        is_junk: row.get::<_, i64>(18)? != 0,
-        junk_by_user: row.get::<_, i64>(19)? != 0,
-        junk_score: row.get(20)?,
+        seen: row.get::<_, i64>(13)? != 0,
+        answered: row.get::<_, i64>(14)? != 0,
+        flagged: row.get::<_, i64>(15)? != 0,
+        flag_color: row.get(16)?,
+        is_junk: row.get::<_, i64>(17)? != 0,
+        junk_by_user: row.get::<_, i64>(18)? != 0,
+        junk_score: row.get(19)?,
         attachments: Vec::new(),
     })
 }

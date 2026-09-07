@@ -29,6 +29,23 @@ const MAX_REMOTE_BYTES: u64 = 8 * 1024 * 1024;
 /// that the core decides how much of that actually happens.
 const MAX_REMOTE_IMAGES: usize = 60;
 
+/// Ceiling on the **total** a message's remote images may add, as they will appear in the
+/// document.
+///
+/// The per-image and per-count caps do not bound the thing that matters. Sixty images of eight
+/// mebibytes each is 480 MiB, and every byte of it is base64'd at 4/3 and then crosses the IPC
+/// boundary into a string the WebView parses. That is not hypothetical: the largest render this
+/// install has logged is **12.98 MB from a 76 KB stored message**, all of the difference being
+/// inlined images, and nothing in the code would have stopped it at ten times that.
+///
+/// Measured against the same log, the p90 rendered body is 3.16 MB, so eight mebibytes leaves
+/// the overwhelming majority of real mail untouched and clips only the tail that was never
+/// going to be read as a document anyway.
+///
+/// Counted on the encoded string rather than the fetched bytes, because that is what is
+/// actually held: the data URI is what goes in the map, in the HTML, over IPC and into the DOM.
+const MAX_REMOTE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How many remote images to fetch at once.
@@ -258,6 +275,21 @@ async fn fetch_one(client: &reqwest::Client, url: &str) -> Option<String> {
     Some(format!("data:{mime};base64,{encoded}"))
 }
 
+/// Books one image against the budget, or refuses it.
+///
+/// Separated from the fetch loop because the loop cannot run without a network and this is the
+/// part with arithmetic worth checking. Saturating, so a hostile `Content-Length` cannot wrap
+/// the total back to something small and let everything through.
+fn book(spent: &mut usize, len: usize) -> bool {
+    let next = spent.saturating_add(len);
+    if next > MAX_REMOTE_TOTAL_BYTES {
+        return false;
+    }
+
+    *spent = next;
+    true
+}
+
 async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
     use futures::StreamExt;
 
@@ -274,7 +306,7 @@ async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
 
     // Concurrently, and bounded. In series this was one round trip per image before the reader
     // could show anything at all.
-    futures::stream::iter(wanted.into_iter().map(|url| {
+    let mut stream = futures::stream::iter(wanted.into_iter().map(|url| {
         let cache = cache.clone();
 
         async move {
@@ -298,10 +330,40 @@ async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
             Some((url, data))
         }
     }))
-    .buffer_unordered(REMOTE_CONCURRENCY)
-    .filter_map(|entry| async move { entry })
-    .collect()
-    .await
+    // Ordered, where this used to be `buffer_unordered`. The concurrency is identical — the same
+    // six requests are in flight — but results arrive in the order the message asks for them,
+    // which matters now that the budget below can stop part way: what a reader sees first is
+    // what gets the budget, rather than whichever request happened to finish first.
+    .buffered(REMOTE_CONCURRENCY);
+
+    let mut images = HashMap::new();
+    let mut spent = 0_usize;
+
+    while let Some(entry) = stream.next().await {
+        let Some((url, data)) = entry else {
+            continue;
+        };
+
+        if !book(&mut spent, data.len()) {
+            // Stop rather than skip. The remaining futures are dropped un-polled, so the
+            // requests are never made — which is the quiet half of the point: an image that
+            // cannot be shown should not still be telling the sender the message was opened.
+            //
+            // Nothing else needs to know. `render` counts any URL missing from this map as a
+            // remote image that was allowed and did not arrive, which is exactly what happened,
+            // and the reader already has a banner that says so.
+            tracing::debug!(
+                fetched = images.len(),
+                spent,
+                "remote images: budget spent, leaving the rest"
+            );
+            break;
+        }
+
+        images.insert(url, data);
+    }
+
+    images
 }
 
 /// Returns a message's body, ready for the frame.
@@ -621,6 +683,60 @@ fn remote_images_from(stored: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The assertion really is on constants, which is the point: what is being pinned is a
+    // *relationship between them* that no amount of runtime testing would catch, and that a
+    // later edit to any one of the three could silently break.
+    #[allow(clippy::assertions_on_constants)]
+    #[test]
+    fn the_total_budget_is_the_one_that_binds() {
+        // The per-image and per-count caps look like they bound a message and do not: sixty
+        // images of eight mebibytes is 480 MiB of fetched bytes, 640 MiB once base64'd, all of
+        // it crossing IPC into one string. The total has to be smaller than that product or it
+        // is not a limit at all.
+        assert!(
+            MAX_REMOTE_TOTAL_BYTES < MAX_REMOTE_IMAGES * MAX_REMOTE_BYTES as usize,
+            "a total budget no smaller than the product of the other two caps binds nothing"
+        );
+
+        // And large enough not to clip ordinary mail. Measured against this install's log, the
+        // p90 rendered body is 3.16 MB; a budget under that would be cutting images out of
+        // messages nobody would call excessive.
+        assert!(
+            MAX_REMOTE_TOTAL_BYTES >= 4 * 1024 * 1024,
+            "a budget this small would clip newsletters that are merely ordinary"
+        );
+    }
+
+    #[test]
+    fn the_budget_fills_and_then_refuses() {
+        let mut spent = 0;
+
+        assert!(book(&mut spent, MAX_REMOTE_TOTAL_BYTES / 2));
+        assert_eq!(spent, MAX_REMOTE_TOTAL_BYTES / 2);
+
+        assert!(book(&mut spent, MAX_REMOTE_TOTAL_BYTES / 2));
+        assert_eq!(spent, MAX_REMOTE_TOTAL_BYTES);
+
+        // Full. And a refusal must not spend anything, or the running total would drift away
+        // from what has actually been kept.
+        assert!(!book(&mut spent, 1));
+        assert_eq!(spent, MAX_REMOTE_TOTAL_BYTES);
+    }
+
+    #[test]
+    fn one_enormous_image_cannot_wrap_the_total() {
+        // The size comes from a response the sender controls. Plain addition would wrap and
+        // report a tiny total, which would let every image through — the opposite of the cap.
+        let mut spent = MAX_REMOTE_TOTAL_BYTES - 1;
+
+        assert!(!book(&mut spent, usize::MAX));
+        assert_eq!(
+            spent,
+            MAX_REMOTE_TOTAL_BYTES - 1,
+            "a refusal spends nothing"
+        );
+    }
 
     #[test]
     fn remote_images_default_to_on() {

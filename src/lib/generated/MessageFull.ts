@@ -4,7 +4,7 @@ import type { AttachmentRow } from "./AttachmentRow";
 /**
  * A message with its body and recipients, for the reader.
  */
-export type MessageFull = { id: number, threadId: number | null, mailboxId: number, accountId: number, subject: string | null, fromName: string | null, fromAddr: string | null, toJson: string | null, ccJson: string | null, dateSent: number, dateReceived: number, size: number, preview: string | null, bodyText: string | null, seen: boolean, answered: boolean, flagged: boolean, flagColor: string | null, 
+export type MessageFull = { id: number, threadId: number | null, mailboxId: number, accountId: number, subject: string | null, fromName: string | null, fromAddr: string | null, toJson: string | null, ccJson: string | null, dateSent: number, dateReceived: number, size: number, preview: string | null, seen: boolean, answered: boolean, flagged: boolean, flagColor: string | null, 
 /**
  * Whether the message is filed as junk.
  */
