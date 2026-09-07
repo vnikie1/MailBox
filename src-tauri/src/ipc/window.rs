@@ -18,6 +18,23 @@ pub fn appearance_get(window: WebviewWindow) -> Appearance {
     appearance::compute(&window)
 }
 
+/// The colour the taskbar badge is drawn in, pushed from the UI.
+///
+/// The UI owns this because it is the only thing that knows the answer: the app draws with the
+/// OS accent until the user pins one in Settings, and the pinned value lives in the WebView.
+/// Resolving it again here would be a second copy of the same rule in a second language, and
+/// the taskbar would show one colour while the window showed another.
+///
+/// Both values are `0x00RRGGBB`. The foreground comes down with the fill rather than being
+/// worked out here, because it is decided by the same WCAG luminance function that gives every
+/// button in the app its `--accent-fg`, and a badge that picked its own would drift from it.
+#[tauri::command]
+pub async fn badge_paint(app: tauri::AppHandle, fill: u32, ink: u32) -> Result<(), AppError> {
+    crate::platform::badge::set_paint(fill, ink);
+    crate::platform::tray::repaint(&app).await;
+    Ok(())
+}
+
 /// Opens the Settings window, or brings it forward if it is already open.
 ///
 /// A real window rather than a sheet over the mailbox, which is what docs/06 Phase 11 asks for

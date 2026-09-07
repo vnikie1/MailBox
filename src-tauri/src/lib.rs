@@ -96,6 +96,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             ipc::window::appearance_get,
+            ipc::window::badge_paint,
             ipc::window::settings_open,
             ipc::transfer::import_sources,
             ipc::transfer::import_pick_files,

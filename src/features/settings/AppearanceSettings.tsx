@@ -1,4 +1,13 @@
-import type { Density, ThemePreference, TransparencyPreference } from '@/lib/appearance'
+import {
+  ACCENT_NAMES,
+  ACCENT_PALETTE,
+  resolveTheme,
+  type AccentPreference,
+  type Density,
+  type ThemePreference,
+  type TransparencyPreference,
+} from '@/lib/appearance'
+import { useAppearanceStore } from '@/store/appearance'
 import { useSettingsStore } from '@/store/settings'
 
 import styles from './settings.module.css'
@@ -36,14 +45,67 @@ const TRANSPARENCIES: { id: TransparencyPreference; label: string }[] = [
   { id: 'reduce', label: 'Never translucent' },
 ]
 
+/**
+ * The names shown beside each swatch.
+ *
+ * A swatch grid without names is a control only a sighted user can operate, and "the fourth
+ * circle" is not something a screen reader can say. These are also what the labels announce,
+ * so they have to read as colour names rather than as token ids.
+ */
+const ACCENT_LABELS: Record<string, string> = {
+  blue: 'Blue',
+  red: 'Red',
+  orange: 'Orange',
+  yellow: 'Yellow',
+  green: 'Green',
+  mint: 'Mint',
+  teal: 'Teal',
+  indigo: 'Indigo',
+  purple: 'Purple',
+  pink: 'Pink',
+  gray: 'Graphite',
+}
+
 export function AppearanceSettings() {
   const theme = useSettingsStore((state) => state.theme)
   const density = useSettingsStore((state) => state.density)
   const transparency = useSettingsStore((state) => state.transparency)
 
+  const accent = useSettingsStore((state) => state.accent)
+
   const setTheme = useSettingsStore((state) => state.setTheme)
   const setDensity = useSettingsStore((state) => state.setDensity)
   const setTransparency = useSettingsStore((state) => state.setTransparency)
+  const setAccent = useSettingsStore((state) => state.setAccent)
+
+  // The swatches preview the colour the app would actually draw, which means resolving the
+  // theme here too: every hue has a light and a dark member, and showing the light one while
+  // the app is dark would make the picker lie about its own result.
+  const appearance = useAppearanceStore((state) => state.appearance)
+  const resolvedTheme = resolveTheme(appearance, {
+    theme,
+    density,
+    transparency,
+    accent,
+  })
+
+  // "Follow Windows" first and selected by default, for the same reason every other setting
+  // on this pane leads with it: Windows already knows the answer, and asking again is how an
+  // app ends up the one thing on the desktop wearing a different colour.
+  const ACCENT_OPTIONS: { id: AccentPreference; label: string; preview: string | null }[] = [
+    {
+      id: 'system',
+      label: 'Follow Windows',
+      // The OS accent when Windows reports one. Null falls through to the neutral swatch,
+      // which is honest: there is no colour to preview.
+      preview: appearance.accent,
+    },
+    ...ACCENT_NAMES.map((name) => ({
+      id: name,
+      label: ACCENT_LABELS[name] ?? name,
+      preview: ACCENT_PALETTE[name][resolvedTheme],
+    })),
+  ]
 
   return (
     <section className={styles.section}>
@@ -88,6 +150,46 @@ export function AppearanceSettings() {
       </fieldset>
 
       <p className={styles.hint}>{DENSITIES.find((choice) => choice.id === density)?.hint}</p>
+
+      <fieldset className={styles.group}>
+        <legend className={styles.legend}>Accent colour</legend>
+
+        <div className={styles.swatches}>
+          {ACCENT_OPTIONS.map((option) => (
+            <label key={option.id} className={styles.swatch} title={option.label}>
+              <input
+                type="radio"
+                name="accent"
+                className={styles.swatchInput}
+                aria-label={option.label}
+                checked={accent === option.id}
+                onChange={() => {
+                  setAccent(option.id)
+                }}
+              />
+              {/*
+                The colour arrives as an inline style rather than from a token, and that is
+                deliberate. Standing rule 1 keeps raw colour out of components because a
+                component should not invent one — but this is not the component choosing a
+                colour, it is rendering a value the user is picking from, and the values are
+                the same eleven pairs primitive.css holds. tests/unit/accentPalette.test.ts
+                fails if the two ever disagree.
+              */}
+              <span
+                className={styles.swatchFill}
+                style={option.preview === null ? undefined : { background: option.preview }}
+                aria-hidden="true"
+              />
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <p className={styles.hint}>
+        {accent === 'system'
+          ? 'Halcyon is using the accent colour from Windows.'
+          : `Halcyon is using ${ACCENT_LABELS[accent] ?? accent}, whatever Windows is set to.`}
+      </p>
 
       <fieldset className={styles.group}>
         <legend className={styles.legend}>Translucency</legend>

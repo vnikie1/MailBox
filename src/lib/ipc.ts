@@ -991,6 +991,22 @@ export async function onSettingsPane(handler: (pane: SettingsPane) => void): Pro
  */
 const DISPLAY_CHANNEL = 'halcyon.settings.display'
 
+/**
+ * Tells the core what colour to draw the taskbar badge.
+ *
+ * The badge is drawn into a bitmap the shell owns, so it cannot read a CSS custom property —
+ * the colour has to be handed over deliberately. It comes from here rather than being read
+ * from Windows in Rust because the app draws with the OS accent only until someone pins one in
+ * Settings, and that preference lives in the WebView. Two resolutions would mean the taskbar
+ * and the window disagreeing the first time anyone used the feature.
+ *
+ * Both values are `0x00RRGGBB`.
+ */
+export async function setBadgePaint(fill: number, ink: number): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('badge_paint', { fill, ink })
+}
+
 export async function broadcastDisplayPreferences(preferences: DisplayPreferences): Promise<void> {
   if (!runningInTauri) {
     // Same-origin tabs, which is what the browser path's second window is.

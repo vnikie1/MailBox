@@ -145,6 +145,18 @@ async fn compose_from_tray(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.message)
 }
 
+/// Redraws the badge even when the count has not moved.
+///
+/// `refresh` deliberately does nothing when the number is the same, which is right for the
+/// event it hangs off — a sync raises `mailbox:changed` once per mailbox. But the *colour* can
+/// change while the number does not, and that is exactly what happens when someone picks a new
+/// accent in Settings. Without this the badge would keep the old colour until the next message
+/// arrived.
+pub async fn repaint(app: &AppHandle) {
+    SHOWN.store(u32::MAX, Ordering::Relaxed);
+    refresh(app).await;
+}
+
 /// Recomputes the count and updates the tray tooltip and the taskbar badge.
 ///
 /// Both from one number, so they cannot disagree. Cheap when nothing changed, which matters:

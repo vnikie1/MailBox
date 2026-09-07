@@ -154,7 +154,11 @@ describe('preference resolution', () => {
   it('writes the resolved theme and the density together', () => {
     const root = document.createElement('html')
 
-    applyAppearance(os, { theme: 'light', density: 'compact', transparency: 'full' }, root)
+    applyAppearance(
+      os,
+      { theme: 'light', density: 'compact', transparency: 'full', accent: 'system' },
+      root,
+    )
 
     expect(root.dataset.theme).toBe('light')
     expect(root.dataset.density).toBe('compact')

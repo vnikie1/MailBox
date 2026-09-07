@@ -52,6 +52,20 @@ fn hex_from_rgb(r: u8, g: u8, b: u8) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
+/// The OS accent as `0x00RRGGBB`, for the taskbar badge drawn before any WebView exists.
+///
+/// Deliberately not the app's accent: since the user can pin one in Settings, only the UI knows
+/// what the app is actually showing, and it pushes that down (see `badge::set_paint`). This is
+/// the startup fallback and nothing else.
+pub(crate) fn accent_rgb() -> Option<u32> {
+    let colour = UISettings::new()
+        .ok()?
+        .GetColorValue(UIColorType::Accent)
+        .ok()?;
+
+    Some((u32::from(colour.R) << 16) | (u32::from(colour.G) << 8) | u32::from(colour.B))
+}
+
 fn accent_hex() -> Option<String> {
     let colour = UISettings::new()
         .ok()?

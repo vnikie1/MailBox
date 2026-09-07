@@ -3,6 +3,7 @@ import { AlertTriangle, Paperclip } from 'lucide-react'
 
 import type { EmlMessage } from '@/lib/generated/EmlMessage'
 import { emlRead } from '@/lib/ipc'
+import { useAppearanceSync } from '@/app/useAppearanceSync'
 import { EmptyState } from '@/ui'
 
 import { MessageFrame } from './MessageFrame'
@@ -21,6 +22,12 @@ import styles from './EmlWindow.module.css'
  * user most needs to be told something — they double-clicked a file and got a blank window.
  */
 export function EmlWindow() {
+  // Every window has to run this, not just the mailbox. A second OS window is a second React
+  // root, and main.tsx only writes the theme and density before first paint — it never sets the
+  // accent. Without this the window drew the CSS fallback blue while the rest of the app wore
+  // the accent, and a pinned accent would not have reached it at all.
+  useAppearanceSync()
+
   const path = useMemo(() => new URLSearchParams(window.location.search).get('eml'), [])
 
   const [message, setMessage] = useState<EmlMessage | null>(null)

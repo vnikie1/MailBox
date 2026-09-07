@@ -15,6 +15,7 @@ import {
   composeSizeLimit,
   onCloseRequested,
 } from '@/lib/ipc'
+import { useAppearanceSync } from '@/app/useAppearanceSync'
 import { Button, IconButton, Sheet, TextField, type Token } from '@/ui'
 
 import { formatFileSize as formatSize } from '@/lib/date'
@@ -107,6 +108,12 @@ function bodyWithSignature(draft: ReplyDraft): string {
 }
 
 export function ComposeWindow() {
+  // Every window has to run this, not just the mailbox. A second OS window is a second React
+  // root, and main.tsx only writes the theme and density before first paint — it never sets the
+  // accent. Without this the window drew the CSS fallback blue while the rest of the app wore
+  // the accent, and a pinned accent would not have reached it at all.
+  useAppearanceSync()
+
   const parameters = useMemo(() => new URLSearchParams(window.location.search), [])
   const replyTo = parameters.get('message')
   const replyKind = parameters.get('kind') ?? 'reply'

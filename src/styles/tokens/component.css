@@ -333,6 +333,13 @@
   --settings-pane-gap: var(--sp-7);
   --settings-report-max-height: 260px;
   --settings-signature-min-height: 200px;
+
+  /* The accent swatches. Sized like a touch target rather than a dot: eleven colours in a
+   * row have to be distinguishable and clickable, and a 16px circle is neither. */
+  --settings-swatch: 28px;
+  --settings-swatch-gap: var(--sp-4);
+  --settings-swatch-ring: 2px;
+  --settings-swatch-selected-ring: 3px;
   --transfer-list-max-height: 220px;
   --first-run-icon: 18px;
 

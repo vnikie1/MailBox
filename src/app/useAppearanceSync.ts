@@ -1,12 +1,20 @@
 import { useEffect } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
-import { applyAppearance, applyWindowActive } from '@/lib/appearance'
+import {
+  accentForeground,
+  applyAppearance,
+  applyWindowActive,
+  resolveAccent,
+  resolveTheme,
+  rgbNumber,
+} from '@/lib/appearance'
 import {
   getAppearance,
   onAppearanceChanged,
   onDisplayPreferencesChanged,
   onWindowFocusChanged,
+  setBadgePaint,
 } from '@/lib/ipc'
 import { useAppearanceStore } from '@/store/appearance'
 import { useSettingsStore } from '@/store/settings'
@@ -36,6 +44,7 @@ export function useAppearanceSync(): void {
   const theme = useSettingsStore((state) => state.theme)
   const density = useSettingsStore((state) => state.density)
   const transparency = useSettingsStore((state) => state.transparency)
+  const accent = useSettingsStore((state) => state.accent)
 
   useEffect(() => {
     let cancelled = false
@@ -69,6 +78,19 @@ export function useAppearanceSync(): void {
   }, [setAppearance, setWindowActive, applyRemote])
 
   useEffect(() => {
-    applyAppearance(appearance, { theme, density, transparency }, document.documentElement)
-  }, [appearance, theme, density, transparency])
+    const preferences = { theme, density, transparency, accent }
+
+    applyAppearance(appearance, preferences, document.documentElement)
+
+    // And the taskbar, which is outside the document and cannot be reached by a token. It is
+    // sent the same resolved pair the window is wearing, so the two cannot disagree — the
+    // badge used to be a fixed red while the app wore the accent, which is what made it the
+    // one thing on screen in the wrong colour.
+    const resolved = resolveAccent(appearance, preferences, resolveTheme(appearance, preferences))
+    if (resolved !== null) {
+      const fill = rgbNumber(resolved)
+      const ink = rgbNumber(accentForeground(resolved))
+      if (fill !== null && ink !== null) void setBadgePaint(fill, ink)
+    }
+  }, [appearance, theme, density, transparency, accent])
 }

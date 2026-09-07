@@ -89,12 +89,14 @@ describe('display preferences across windows', () => {
     useSettingsStore.getState().setTheme('dark')
 
     expect(broadcast).toHaveBeenCalledTimes(1)
-    // The whole triple, not the one field that changed: the receiving window applies what it
-    // is given, and a partial payload would reset the two it did not carry.
+    // Every field, not the one that changed: the receiving window applies what it is given,
+    // and a partial payload would reset the ones it did not carry. Accent is in here for the
+    // same reason — a theme changed in Settings must not silently unpin someone's accent.
     expect(broadcast).toHaveBeenCalledWith({
       theme: 'dark',
       density: 'default',
       transparency: 'system',
+      accent: 'system',
     })
   })
 
@@ -107,7 +109,7 @@ describe('display preferences across windows', () => {
     const { useSettingsStore } = await import('@/store/settings')
     useSettingsStore
       .getState()
-      .applyRemote({ theme: 'dark', density: 'compact', transparency: 'reduce' })
+      .applyRemote({ theme: 'dark', density: 'compact', transparency: 'reduce', accent: 'system' })
 
     expect(broadcast).not.toHaveBeenCalled()
     expect(useSettingsStore.getState().density).toBe('compact')

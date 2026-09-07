@@ -47,6 +47,58 @@
   accent-color: var(--accent);
 }
 
+/* The accent picker. Real radios, drawn as swatches — see AppearanceSettings.tsx for why the
+ * colour itself arrives as an inline style rather than from a token. */
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--settings-swatch-gap);
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.swatch {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: var(--settings-swatch);
+  height: var(--settings-swatch);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+
+/* Transparent and full-size rather than display:none. A hidden input is not focusable, and
+ * this control has to stay operable by keyboard and readable by Narrator; laying it over the
+ * swatch also means the whole swatch is the hit target without a label-for dance. */
+.swatchInput {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.swatchFill {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--r-pill);
+  box-shadow: inset 0 0 0 var(--hairline) var(--separator);
+}
+
+/* The ring sits outside the fill so a dark swatch on a dark pane still reads as chosen. */
+.swatchInput:checked + .swatchFill {
+  box-shadow:
+    0 0 0 var(--settings-swatch-ring) var(--bg-content),
+    0 0 0 var(--settings-swatch-selected-ring) var(--label-1);
+}
+
+.swatchInput:focus-visible + .swatchFill {
+  box-shadow:
+    0 0 0 var(--settings-swatch-ring) var(--bg-content),
+    0 0 0 var(--settings-swatch-selected-ring) var(--accent);
+}
+
 .hint {
   margin: 0;
   color: var(--label-2);

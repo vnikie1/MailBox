@@ -4,6 +4,7 @@ import { persist, createJSONStorage } from 'zustand/middleware'
 import {
   DEFAULT_PREFERENCES,
   type Density,
+  type AccentPreference,
   type DisplayPreferences,
   type ThemePreference,
   type TransparencyPreference,
@@ -33,6 +34,7 @@ interface SettingsState extends DisplayPreferences {
   setTheme: (theme: ThemePreference) => void
   setDensity: (density: Density) => void
   setTransparency: (transparency: TransparencyPreference) => void
+  setAccent: (accent: AccentPreference) => void
   /** A change made in another window. Applied, never re-announced. */
   applyRemote: (preferences: DisplayPreferences) => void
 }
@@ -57,6 +59,9 @@ export const useSettingsStore = create<SettingsState>()(
         setTransparency: (transparency) => {
           change({ transparency })
         },
+        setAccent: (accent) => {
+          change({ accent })
+        },
         applyRemote: (preferences) => {
           set(preferences)
         },
@@ -65,12 +70,25 @@ export const useSettingsStore = create<SettingsState>()(
     {
       name: 'halcyon.settings.display',
       storage: createJSONStorage(() => localStorage),
-      partialize: ({ theme, density, transparency }) => ({ theme, density, transparency }),
+      partialize: ({ theme, density, transparency, accent }) => ({
+        theme,
+        density,
+        transparency,
+        accent,
+      }),
     },
   ),
 )
 
 /** The preference triple alone, for the code that resolves it against the OS state. */
 export function displayPreferences(state: DisplayPreferences): DisplayPreferences {
-  return { theme: state.theme, density: state.density, transparency: state.transparency }
+  return {
+    theme: state.theme,
+    density: state.density,
+    transparency: state.transparency,
+    // No defaulting needed for an install that predates this field: zustand shallow-merges
+    // what it read over the initial state, so a persisted object with no accent key keeps the
+    // one DEFAULT_PREFERENCES put there.
+    accent: state.accent,
+  }
 }
