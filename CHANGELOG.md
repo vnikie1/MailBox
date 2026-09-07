@@ -5336,3 +5336,120 @@ runs in a browser, and neither of these faults exists in one.
   `GetSystemMetricsForDpi` on the machine, but the reasoning was dressed as a contract when it
   was a guess. Worth recording: an adversarial pass over the surveys caught it, and nothing else
   would have.
+
+---
+
+## 2026-09-07 — Memory, measured before it was optimised
+
+### Notes
+
+- **The app uses about 133 MB of RAM, not 300.** The first measurement taken for this work
+  reported `PrivateMemorySize64` as "private memory" and totalled 303 MB. That counter is
+  **PrivateBytes — committed address space, not resident memory**. The figure that means RAM is
+  `WorkingSetPrivate`, and on the same machine, same moment:
+
+  | process                    | working set | **private working set (RAM)** | private bytes |
+  | -------------------------- | ----------- | ----------------------------- | ------------- |
+  | renderer                   | 89.1 MB     | **52.5 MB**                   | 76.4 MB       |
+  | browser root               | 75.0 MB     | **17.9 MB**                   | 94.3 MB       |
+  | GPU                        | 65.1 MB     | **32.7 MB**                   | 271.2 MB      |
+  | halcyon.exe                | 49.5 MB     | **23.6 MB**                   | 60.3 MB       |
+  | network, storage, crashpad | 29.4 MB     | **5.8 MB**                    | 26.3 MB       |
+  | **total**                  | 308.0 MB    | **132.6 MB**                  | 528.4 MB      |
+
+  Working set double-counts the WebView2 runtime's shared pages across six processes; private
+  bytes counts address space that was never touched. Recorded because a wrong denominator sent
+  two of six audits to the wrong conclusion — see the incident below.
+
+### Fixed
+
+- **Every message opened was rendered twice, and the second render was thrown away.** Opening a
+  message marks it read after `DWELL_MS`, which emits `messages:updated`, which invalidated that
+  message's rendered body. Measured from this install's own log rather than argued: **191 of 402
+  renders were the same message repeated within ten seconds, at a p25 gap of 0.696 s** against a
+  `DWELL_MS` of 700. Counting only re-renders of a body that had _already_ loaded — the
+  unambiguous waste — **172 renders, 162.2 MB of the 276.0 MB ever rendered, 59%.**
+
+  `staleTime: Infinity` on that query reads like "never refetch", and is why this survived: an
+  explicit invalidation overrides it. There is now a predicate, so a body refetches only while
+  its html is still empty. The invalidation is still needed for the case it was written for — a
+  message is selected before its body downloads, and the reader has to be told when it lands.
+
+  Safe by construction rather than by judgement: `sync::bodies` writes `body_state = 'full'` in
+  the **same UPDATE** as `body_html`, and the engine only fetches a body when `body_state !=
+'full'`. A body that has arrived cannot change.
+
+- **`inline_images` read the whole `.eml` off disk and walked its MIME tree on every render**,
+  whether or not the markup contained a single `cid:` — which the log says is nearly always
+  (`inlined=0` even on the largest message this install has rendered). Now scanned for first,
+  over the bytes, so a multi-megabyte string is not lowercased to answer a four-character
+  question.
+
+- **Rendered bodies had no retention bound.** No `gcTime` is set anywhere in `src/`, so
+  TanStack's five-minute default applied with no cap on count or bytes. Sliding that window over
+  the log, the worst case held **eleven distinct bodies totalling 19.3 MB** — against a renderer
+  whose real private working set is about 34 MB. Bounded to a minute, which keeps what a reader
+  returns to and drops what they merely passed.
+
+- **The reader's `ResizeObserver` was never disconnected.** The teardown was
+  `frame.addEventListener('beforeunload', …)` on the iframe _element_; `beforeunload` is a Window
+  event and never reaches an element, so every message opened left an observer watching a
+  document that had been replaced. Whether Blink eventually collects it is not answerable from
+  source — fixed because it is dead code, not for a number.
+
+### Notes
+
+- Bodies are much larger than the brief assumed. Across 278 non-empty renders: **median 224 KB,
+  p90 3.16 MB, max 12.98 MB** — and that 12.98 MB came from a **76 KB** stored message. All of
+  the expansion is remote images base64-inlined at 4/3 of their bytes, capped per image
+  (`MAX_REMOTE_BYTES` 8 MiB × `MAX_REMOTE_IMAGES` 60) and **not capped in total**.
+
+- `src-tauri/tests/render_budget.rs` cannot see any of this. All three tests pass
+  `HashMap::new()` as the remote map while asserting a 3× growth ceiling, so the one thing that
+  actually drives growth — remote images — is absent from the budget that exists to bound it.
+  Recorded rather than fixed; it needs a fixture with real image bytes.
+
+### Incidents
+
+- **The brief for the audit was wrong, and it sent two of six investigations to a false
+  conclusion.** Both ranked an SQLite page cache first: 8 MiB per connection × 5 connections =
+  40 MiB, "the largest single lever in the core". The arithmetic is right and the conclusion is
+  impossible — a page cache is malloc'd heap and cannot exceed the process's private working
+  set, which is 23.6 MB. The error was mine: I handed the agents PrivateBytes labelled as
+  private memory.
+
+  What caught it was the adversarial pass, which measured the process tree itself instead of
+  trusting the brief, and independently reproduced the one audit that had got the counter right.
+  Every figure it reported was re-derived here before anything was changed — the 172/162.2 MB
+  waste number reproduces to the byte.
+
+- **A survey agent's estimate was out by a factor of 15–30 in the direction that mattered.** The
+  query-cache audit called the resident body cache "0.6–1.3 MB, currently small — the finding
+  that grows fastest with use, not the one costing you now", and deferred it. The measured worst
+  window is 19.3 MB, and it is the best single explanation of the renderer's size. Six parallel
+  investigations agreeing on a shape is not evidence about its magnitude; only measurement is.
+
+### Measured afterwards
+
+- **The idle footprint did not move, and was not expected to.** New build, eight minutes after
+  launch, untouched: **131.9 MB private working set** against the old build's 132.6 MB. Most of
+  that is the WebView2 runtime and is not ours to reduce. What these changes remove is _work and
+  growth_, not the floor.
+
+- **The mechanism is gone.** Same launch, both builds, nothing touched:
+
+  |                                      | old build                  | new build       |
+  | ------------------------------------ | -------------------------- | --------------- |
+  | first render, body absent            | `out_len=0`                | `out_len=0`     |
+  | second render, 0.694 s later         | `out_len=0`                | `out_len=0`     |
+  | third, on arrival                    | `out_len=1,094,967`        | `out_len=1,141` |
+  | **re-renders after the body loaded** | **172 across its history** | **0**           |
+
+  Both render twice while the body is still empty, which is correct — it genuinely has not
+  arrived, and that is the case the invalidation exists for. The difference is everything after
+  arrival.
+
+  Said plainly: this window is one small message, because the UI could not be driven at the time
+  (another application held the foreground). It shows the path no longer fires; it does not by
+  itself demonstrate the 59% at scale. That figure comes from the old build's own log, and
+  `tests/unit/bodyInvalidation.test.tsx` is what holds the behaviour in place.
