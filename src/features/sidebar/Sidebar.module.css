@@ -72,6 +72,11 @@
   border-radius: var(--sidebar-row-radius);
   cursor: default;
   user-select: none;
+
+  /* Standing rule 7. Nothing moves — only the fill cross-fades, which also softens any
+   * single frame the drop highlight is still dropped for. Zeroed under reduced motion,
+   * because the duration tokens are. */
+  transition: background var(--dur-micro) var(--ease-out);
 }
 
 /* Always laid out, so a row with children and a row without share a text baseline and
@@ -130,17 +135,6 @@
 
 .badge {
   margin-left: var(--sp-3);
-}
-
-/**
- * The drop target. docs/02 §6.2 — the accent at 25% alpha with a 1px accent inset ring.
- *
- * An inset box-shadow rather than a border, because a border occupies layout and every row
- * below would shift by a pixel as the pointer crossed this one.
- */
-.dropTarget {
-  background: color-mix(in srgb, var(--accent) var(--tint-drop), transparent);
-  box-shadow: inset 0 0 0 var(--hairline) var(--accent);
 }
 
 /**
@@ -223,4 +217,42 @@
 .failed {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/**
+ * The drop target. docs/01 §3 — "the row gets a filled accent pill".
+ *
+ * **Not** docs/02 §6.2's accent at 25% with a 1px inset ring, which is what this was, and
+ * which the user reported as a defect: "i am not able to see the label clearly underneath
+ * while dragging and dropping the mail". The two documents disagree with each other, and the
+ * measurements say the weaker one is not usable. A 25% accent fill is **1.39:1** against the
+ * light sidebar and **1.35:1** against the dark one, against WCAG 1.4.11's 3:1 floor for a
+ * non-text control — the whole affordance was resting on a 1px ring around a 32px row.
+ *
+ * Worse, that ratio is not even a fixed number in the shipped app. The sidebar is a 72%-alpha
+ * surface over DWM Mica Alt, which samples the desktop wallpaper, so a 25% tint composites
+ * over whatever picture the user has behind the window. A full-strength fill is the only
+ * treatment that holds across eleven accent hues, two themes, and an arbitrary desktop.
+ *
+ * The conflict between the two docs is reported in CHANGELOG.md for the user to settle; if
+ * they rule for docs/02, the fallback is a --tint-drop-strong token near 70% with a 2px ring,
+ * which measures better than 25% but still cannot be guaranteed over Mica.
+ *
+ * Still a background rather than a border — standing rule 6, and the reason is recorded in
+ * docs/PHASE-2-VERIFICATION.md: a border occupies layout, so every row below would shift by a
+ * pixel as the pointer crossed this one.
+ *
+ * Written from `.sidebar` so it outranks `.sidebar:focus-within .selected` above. At the old
+ * specificity a row that was both selected and a drop target lost its fill to the selection
+ * and showed only the ring — reachable whenever the selected row is not the drag's origin.
+ */
+.sidebar .row.dropTarget {
+  background: var(--accent);
+}
+
+.sidebar .row.dropTarget .label,
+.sidebar .row.dropTarget .icon,
+.sidebar .row.dropTarget .chevron,
+.sidebar .row.dropTarget .badge {
+  color: var(--accent-fg);
 }

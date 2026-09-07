@@ -1,0 +1,116 @@
+/**
+ * The drag deck — the bitmap Windows carries under the cursor while messages are dragged.
+ * docs/01 §4: "Rows stack into a fanned deck with a count badge".
+ *
+ * Not a component. It is built imperatively in `dragDeck.ts`, handed to `setDragImage`, and
+ * removed one task later, so nothing here is ever seen as part of the page. Five things are
+ * load-bearing and every one of them looks removable:
+ *
+ *  - **Every surface is opaque.** Blink paints the snapshot from the nearest enclosing
+ *    stacking context, and there is nothing behind a drag image to show through. A
+ *    translucent card reads as dirt rather than as glass, so `--bg-menu-opaque`, never
+ *    `--bg-menu`.
+ *  - **No box-shadow.** The bitmap is sized to the union of the border boxes, so any ink
+ *    outside them is clipped off. Standing rule 4 permits a shadow on a drag image; the
+ *    platform will not carry one. Windows draws its own lift, so nothing is lost.
+ *  - **The transparent top and left borders are the cursor gap.** `setDragImage` ignores a
+ *    negative hot spot, so the only way to hold the deck clear of the pointer is to pad the
+ *    bitmap and put the hot spot at 0,0.
+ *  - **`pointer-events: none` is not decoration.** `DragController::StartDrag` re-runs a hit
+ *    test at the drag origin and cancels the drag if the source is no longer the hit node. A
+ *    container sitting at 0,0 can win that test and kill the drag outright — which would
+ *    break drags started near the top-left of the window and nowhere else.
+ *  - **`z-index` on all three cards.** A transformed element makes a stacking context and
+ *    paints in the positioned phase, so without these the two *empty* cards behind would
+ *    paint over the front one and the deck would come out blank.
+ */
+
+.deck {
+  position: fixed;
+  top: 0;
+  left: 0;
+  display: grid;
+  grid-template-columns: var(--drag-card-width);
+  padding: 0 var(--drag-deck-fan-room) var(--drag-deck-fan-room) 0;
+
+  /* Never remove — see the note above about the hit test at the drag origin. */
+  pointer-events: none;
+  border-top: var(--drag-cursor-gap) solid transparent;
+  border-left: var(--drag-cursor-gap) solid transparent;
+  isolation: isolate;
+}
+
+.card {
+  position: relative;
+  display: flex;
+  grid-area: 1 / 1;
+  gap: var(--drag-card-gap);
+  align-items: center;
+  overflow: hidden;
+  padding: var(--drag-card-pad-y) var(--drag-card-pad-x);
+  background: var(--bg-menu-opaque);
+  border: var(--hairline) solid var(--separator);
+  border-radius: var(--drag-card-radius);
+}
+
+.front {
+  z-index: 3;
+}
+
+.behind1 {
+  z-index: 2;
+  transform: translate(var(--drag-deck-fan), var(--drag-deck-fan));
+}
+
+.behind2 {
+  z-index: 1;
+  transform: translate(var(--drag-deck-fan-room), var(--drag-deck-fan-room));
+}
+
+.text {
+  flex: 1 1 auto;
+
+  /* Without this the flex item refuses to shrink below its content, the ellipsis below
+   * never engages, and a 300-character subject widens the bitmap instead of being cut. */
+  min-width: 0;
+}
+
+.sender,
+.subject {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sender {
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  font-weight: var(--t-headline-weight);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+}
+
+/* The same type role the row gives its date — a second line that is present without
+ * competing with the name above it. */
+.subject {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+/* Inside the card, deliberately, rather than clipped to its corner: Blink sizes the bitmap
+ * to the bounding box of every descendant, so a badge hanging outside would still be
+ * captured but would move the box's origin and silently offset the hot spot. */
+.count {
+  flex: 0 0 auto;
+  min-width: var(--badge-min-width);
+  padding: 0 var(--badge-pad-x);
+  color: var(--accent-fg);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  text-align: center;
+  background: var(--accent);
+  border-radius: var(--r-pill);
+}

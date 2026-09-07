@@ -50,10 +50,29 @@ describe('formatRowDate', () => {
   })
 })
 
+describe('the two formatters disagree on purpose', () => {
+  it('keeps the list row bare while the reader header spells the day out', () => {
+    // The same instant, formatted for both places. If these ever converge, one of them has
+    // been changed without regard for why they differ: the row is a narrow column sitting
+    // under a sticky 'Today' header, and the reader header is neither of those things.
+    const sent = new Date('2026-08-26T09:41:00')
+
+    expect(formatRowDate(sent, NOW)).toBe('9:41 AM')
+    expect(formatReaderDate(sent, NOW)).toBe('Today, 26 August • 9:41 AM')
+  })
+})
+
 describe('formatReaderDate', () => {
   it('spells the date out where there is room', () => {
-    expect(formatReaderDate(new Date('2026-08-26T09:41:00'), NOW)).toBe('9:41 AM')
-    expect(formatReaderDate(new Date('2026-08-25T22:27:00'), NOW)).toBe('Yesterday at 10:27 PM')
+    // Every branch names a day. A bare time in the header of an open message cannot say
+    // which day it was, and unlike a row in the list there is no section header above it
+    // to supply one.
+    expect(formatReaderDate(new Date('2026-08-26T09:41:00'), NOW)).toBe(
+      'Today, 26 August • 9:41 AM',
+    )
+    expect(formatReaderDate(new Date('2026-08-25T22:27:00'), NOW)).toBe(
+      'Yesterday, 25 August • 10:27 PM',
+    )
     expect(formatReaderDate(new Date('2026-03-12T14:00:00'), NOW)).toBe('12 March • 2:00 PM')
     expect(formatReaderDate(new Date('2025-03-12T14:00:00'), NOW)).toBe('12 March 2025 • 2:00 PM')
   })

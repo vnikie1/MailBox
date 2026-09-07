@@ -39,6 +39,8 @@ interface SidebarRowProps {
   onSelect: (node: SidebarNode) => void
   onToggle: (id: string) => void
   onDragOverRow: (node: SidebarNode | null) => void
+  /** Puts this row's highlight out — but only if it is the row currently lit. */
+  onDragLeaveRow: (node: SidebarNode) => void
   onDropRow: (mailboxId: number, messageIds: number[]) => void
 }
 
@@ -50,6 +52,7 @@ function SidebarRow({
   onSelect,
   onToggle,
   onDragOverRow,
+  onDragLeaveRow,
   onDropRow,
 }: SidebarRowProps) {
   const Icon = node.icon
@@ -136,6 +139,18 @@ function SidebarRow({
         onSelect(node)
       }}
       onKeyDown={onKeyDown}
+      onDragEnter={(event: DragEvent<HTMLDivElement>) => {
+        // `dragover` alone is not enough, which is not obvious and was measured rather than
+        // reasoned about: approaching a row from the right — the direction every drag out of
+        // the message list arrives from — and stopping just inside its edge fires a single
+        // `dragenter` and no `dragover` at all. The row then never lit up for as long as the
+        // pointer rested there, which is not a flicker but the highlight simply never
+        // appearing, on the commonest gesture there is.
+        if (destination === null || !canDropInMailbox(event.dataTransfer, destination)) return
+
+        event.preventDefault()
+        onDragOverRow(node)
+      }}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
         // Not calling `preventDefault` is how a row refuses: the browser then draws the
         // no-drop cursor and will not deliver a drop here at all. So every reason a move
@@ -147,8 +162,21 @@ function SidebarRow({
         event.dataTransfer.dropEffect = 'move'
         onDragOverRow(node)
       }}
-      onDragLeave={() => {
-        onDragOverRow(null)
+      onDragLeave={(event: DragEvent<HTMLDivElement>) => {
+        // A `dragleave` fires on this row every time the pointer crosses into one of its own
+        // children — the chevron, the icon, the label, the badge — because those are separate
+        // elements and the event bubbles back up to here. Clearing unconditionally made the
+        // highlight strobe: measured at runs of three and four dark frames while gliding
+        // along a row, and a row left dark indefinitely when the pointer came to rest a pixel
+        // past a child's edge.
+        //
+        // `relatedTarget` is where the pointer went. If that is inside this row, it never
+        // actually left. It is null when the pointer leaves the window altogether, and
+        // falling through to clear is the right answer for that case.
+        const next = event.relatedTarget
+        if (next instanceof Node && event.currentTarget.contains(next)) return
+
+        onDragLeaveRow(node)
       }}
       onDrop={(event: DragEvent<HTMLDivElement>) => {
         event.preventDefault()
@@ -328,6 +356,13 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
                     onToggle={toggleSection}
                     onDragOverRow={(target) => {
                       setDropTargetId(target?.id ?? null)
+                    }}
+                    onDragLeaveRow={(target) => {
+                      // Only the row that is actually lit may put the light out. Moving from
+                      // one row to the next fires enter-then-leave, so an unconditional null
+                      // here would wipe the highlight the new row had just set — which works
+                      // today only by the order those two events happen to arrive in.
+                      setDropTargetId((current) => (current === target.id ? null : current))
                     }}
                     onDropRow={(mailboxId, messageIds) => {
                       moveMessages.mutate({ ids: messageIds, mailboxId })

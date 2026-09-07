@@ -52,6 +52,7 @@ import type { MessageRow as Row } from '@/lib/generated/MessageRow'
 import { MessageRow } from './MessageRow'
 import { startMessageDrag } from '@/lib/messageDrag'
 
+import { setMessageDragImage } from './dragDeck'
 import { buildListItems } from './rows'
 import { SORT_LABELS, sortRows, type SortField } from './sort'
 
@@ -316,13 +317,23 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
       // Described from the rows rather than from the ids alone, because where a message may
       // be dropped depends on the account and mailbox it is in, and only the list has those.
       const byId = new Map(rows.map((row) => [row.id, row]))
+      const dragging = dragged
+        .map((messageId) => byId.get(messageId))
+        .filter((row) => row !== undefined)
+
       startMessageDrag(
         transfer,
-        dragged
-          .map((messageId) => byId.get(messageId))
-          .filter((row) => row !== undefined)
-          .map((row) => ({ id: row.id, accountId: row.accountId, mailboxId: row.mailboxId })),
+        dragging.map((row) => ({
+          id: row.id,
+          accountId: row.accountId,
+          mailboxId: row.mailboxId,
+        })),
       )
+
+      // Built from the same rows the transfer was described from, so what the user sees under
+      // the cursor and what the drop will actually move cannot disagree. This is the only
+      // scope holding all three: the rows, the count, and the transfer.
+      setMessageDragImage(transfer, dragging, id)
     },
     [rows, selectMessage],
   )

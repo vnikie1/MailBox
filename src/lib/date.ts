@@ -45,12 +45,38 @@ export function formatRowDate(date: Date, now: Date): string {
   return isSameYear(date, now) ? format(date, 'dd/MM') : format(date, 'dd/MM/yy')
 }
 
-/** The reader header, where there is room for the whole thing. */
+/**
+ * The reader header, where there is room for the whole thing.
+ *
+ *   today            Today, 26 August • 9:41 AM
+ *   yesterday        Yesterday, 25 August • 10:27 PM
+ *   this year        12 March • 2:00 PM
+ *   older            12 March 2025 • 2:00 PM
+ *
+ * Every branch names a calendar date. The first two did not — today was a bare `9:41 AM`
+ * and yesterday was `Yesterday at 10:27 PM` — which was reported from using the app: "the
+ * mail preview doesnt show the date of the mail at top, just the time".
+ *
+ * It reads as an omission rather than a shorthand because this is the header of an *open*
+ * message, which is where a date gets copied out, quoted into a reply, or read aloud to
+ * somebody. The row in the list is the place for a bare time: there the neighbouring rows
+ * and the sticky `Today` header supply the day, and the column is too narrow for more.
+ * Open on its own, a message has neither, and `9:41 AM` cannot say which day it was.
+ *
+ * `Today` and `Yesterday` are kept in front of the date rather than replaced by it. They
+ * are the fastest thing to read and the whole reason the relative form exists; the date is
+ * added beside them, not instead of them.
+ *
+ * docs/01 §4's diagram shows `9:41 AM` in this header, but the message it draws is itself
+ * from today, so it fixes the time and says nothing about the date — the diagram is equally
+ * consistent with either rule. The two dated branches below were already here and already
+ * departed from a literal reading of it.
+ */
 export function formatReaderDate(date: Date, now: Date): string {
   const days = daysAgo(date, now)
 
-  if (days <= 0) return format(date, 'h:mm a')
-  if (days === 1) return `Yesterday at ${format(date, 'h:mm a')}`
+  if (days <= 0) return `Today, ${format(date, 'd MMMM • h:mm a')}`
+  if (days === 1) return `Yesterday, ${format(date, 'd MMMM • h:mm a')}`
 
   return isSameYear(date, now)
     ? format(date, 'd MMMM • h:mm a')

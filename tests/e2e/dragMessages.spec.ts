@@ -80,6 +80,59 @@ test.describe('dragging messages onto a mailbox', () => {
     await expect.poll(async () => messageCount(page)).toBe(clientsBefore + 1)
   })
 
+  /**
+   * The highlight the user aims at, held steady across a row.
+   *
+   * Reported from using the app: "i am not able to see the label clearly underneath while
+   * dragging and dropping the mail". Two separate causes, both reproduced here rather than
+   * argued about:
+   *
+   *  - a `dragleave` fires on the row every time the pointer crosses onto one of its own
+   *    children — chevron, icon, label, badge — and clearing on all of them made the fill
+   *    strobe, measured at runs of three and four dark frames while gliding along one row;
+   *  - `dragover` does not fire when the pointer enters a row and stops, so approaching from
+   *    the right and resting left the row dark indefinitely.
+   *
+   * Driven with raw drag events rather than `dragTo`, because `dragTo` moves to a row's
+   * centre in one step and would sail straight over the child boundaries that break it.
+   */
+  test('keeps the drop target lit while the pointer crosses the row it is over', async ({
+    page,
+  }) => {
+    const source = page.getByRole('option').first()
+    const target = mailboxRow(page, NORTHGATE, 'Clients')
+    const label = target.getByText('Clients', { exact: true })
+
+    await source.hover()
+    await page.mouse.down()
+
+    // Onto the row, then onto the label inside it. It is that second move that used to put
+    // the highlight out, because the leave from the row arrives with nothing to restore it.
+    await target.hover()
+    await expect(target).toHaveClass(/dropTarget/)
+
+    await label.hover()
+    await expect(target).toHaveClass(/dropTarget/)
+
+    // And still lit after resting there, which is the case with no further `dragover`.
+    await page.waitForTimeout(700)
+    await expect(target).toHaveClass(/dropTarget/)
+
+    await page.mouse.up()
+  })
+
+  test('leaves no drag deck behind in the document', async ({ page }) => {
+    // The deck is mounted so Blink can photograph it and removed a task later. If either the
+    // timer or the `dragend` listener regressed, a card would be left sitting at the window's
+    // top-left corner — and every committed screenshot baseline would start failing.
+    await page
+      .getByRole('option')
+      .first()
+      .dragTo(mailboxRow(page, NORTHGATE, 'Travel'))
+
+    await expect(page.locator('[class*="deck"]')).toHaveCount(0)
+  })
+
   test('refuses a folder belonging to a different account', async ({ page }) => {
     // The core refuses this outright — `msg_move` answers `crossAccount` — so the sidebar
     // must not offer it. A row that accepts a drop and then reports a failure is worse than

@@ -6,7 +6,7 @@ import { formatRowDate } from '@/lib/date'
 import { cx } from '@/lib/cx'
 import { Avatar } from '@/ui'
 
-import { receivedAt } from './rows'
+import { receivedAt, senderLabel, subjectLabel } from './rows'
 import { useSwipe } from './useSwipe'
 
 import styles from './MessageRow.module.css'
@@ -53,8 +53,8 @@ export const MessageRow = memo(function MessageRow({
   onSwipeToggleRead,
 }: MessageRowProps) {
   const unread = !message.seen
-  const sender = message.fromName ?? message.fromAddr ?? 'Unknown sender'
-  const subject = message.subject ?? '(no subject)'
+  const sender = senderLabel(message)
+  const subject = subjectLabel(message)
   const date = formatRowDate(receivedAt(message), now)
 
   /**

@@ -22,6 +22,38 @@ export interface BuildOptions {
   grouped: boolean
 }
 
+/**
+ * The first of `values` with visible text, or null.
+ *
+ * `??` is not enough. An empty `From` header is a real thing on the wire, and a `fromName`
+ * of `''` or `'   '` passes a nullish check intact — the row then draws a blank line where
+ * the sender should be, and falls back to nothing rather than to the address it has.
+ */
+function firstNonEmpty(...values: (string | null)[]): string | null {
+  for (const value of values) {
+    const trimmed = value?.trim()
+    if (trimmed !== undefined && trimmed !== '') return trimmed
+  }
+
+  return null
+}
+
+/**
+ * What a row calls its sender — and what the drag deck calls the same message.
+ *
+ * Shared rather than written twice because the deck is a picture of the row: if the two
+ * ever disagreed, the thing under the cursor would name a different message from the one
+ * being carried, and there would be no way to tell which was right.
+ */
+export function senderLabel(row: MessageRow): string {
+  return firstNonEmpty(row.fromName, row.fromAddr) ?? 'Unknown sender'
+}
+
+/** The same, for the subject. */
+export function subjectLabel(row: MessageRow): string {
+  return firstNonEmpty(row.subject) ?? '(no subject)'
+}
+
 /** Epoch seconds to a Date, at the one place rows cross from the wire into the UI. */
 export function receivedAt(row: MessageRow): Date {
   return new Date(row.dateReceived * 1000)

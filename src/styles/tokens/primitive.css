@@ -143,7 +143,14 @@
   --focus-ring-alpha: 40%;
   --tint-subtle: 12%; /* reader banners — docs/02 §6.4 */
   --tint-token: 15%; /* search tokens, invalid chips — docs/02 §6.6, §6.7 */
-  --tint-drop: 25%; /* sidebar drop target — docs/02 §6.2 */
+
+  /* Kept, unused, deliberately. docs/02 §6.2 asks for the sidebar drop target to be the
+   * accent at 25%; docs/01 §3 asks for a filled accent pill, and the sidebar now draws the
+   * pill because 25% measures 1.35-1.39:1 against the sidebar and the user could not see it.
+   * The docs contradict each other and the user has to settle which is right — this stays so
+   * that ruling for docs/02 is a one-line revert rather than an archaeology exercise.
+   * See CHANGELOG.md and features/sidebar/Sidebar.module.css. */
+  --tint-drop: 25%;
 }
 
 /* Definition of done: honour prefers-reduced-motion. Collapsing the duration tokens

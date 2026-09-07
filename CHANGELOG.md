@@ -5509,3 +5509,117 @@ alongside them.
   dropping the `rng` draw that generates it shifts every later draw and changes every message in
   it. The first attempt did exactly that and moved four visual baselines and broke a test, to
   tidy away a field nobody sees.
+
+## 2026-09-07 — Three things reported from using it: the drag, the label, the date
+
+### Fixed
+
+- **A dragged message carried its body text under the cursor.** Nothing called `setDragImage`,
+  so Chromium fell back to photographing the dragged element — the whole row: sender, date,
+  subject, icons, and however many lines of preview the density calls for. Up to 329 × 140,
+  and because the default hot spot is wherever inside the row the user happened to grab, about
+  half of it hung to the **left** of the pointer, directly over the 232px sidebar being aimed
+  at. So the two complaints turned out to share a cause.
+
+  There is now a drag deck, which is what docs/01 §4 asked for all along — "rows stack into a
+  fanned deck with a count badge" — and had never been built. Heading only: sender on one line,
+  subject on the second, no preview, no date, no avatar, no icons. Several messages get three
+  cards and a count badge, whatever the number, because the deck means "several" and the badge
+  carries how many; fifty cards would be two hundred pixels of stripes. The front card names
+  **the row the drag started on** rather than the first of the selection, so it says what the
+  user thinks they picked up. 220 × 66, hanging down and to the right of the pointer, so the
+  sidebar stays visible.
+
+- **The sidebar row being aimed at was hard to see, for three separate reasons.** Measured in a
+  running browser rather than reasoned about:
+
+  1. **The highlight was cleared on every `dragleave`** — including the ones that fire as the
+     pointer crosses onto the row's own chevron, icon, label or badge, because those are
+     separate elements and the event bubbles. Sampling the row's class once per painted frame
+     during a slow glide, it went dark for runs of three and four consecutive frames. Now
+     guarded on `relatedTarget`: if the pointer went somewhere inside this row, it never left.
+  2. **`dragover` does not fire when the pointer enters a row and stops.** Approaching from the
+     right — the direction every drag out of the message list arrives from — and resting just
+     inside the edge produced one `dragenter` and no `dragover` at all, and the row never lit
+     up for as long as the pointer sat there. Not a flicker: the highlight simply never
+     appearing, on the commonest gesture there is. There is now a `dragenter` handler.
+  3. **The fill was too faint to carry the job.** See the deviation below.
+
+  Also fixed while in there: leaving a row now clears only that row's highlight. Moving between
+  rows fires enter-then-leave, so an unconditional clear wiped the highlight the new row had
+  just set — which worked only by the order the two events happen to arrive in.
+
+- **An open message showed a time but never a date.** Today's mail read `9:41 AM` and
+  yesterday's `Yesterday at 10:27 PM`; neither named a day. Every branch of the reader header
+  now does: `Today, 26 August • 9:41 AM`. "Today" and "Yesterday" are kept in front of the date
+  rather than replaced by it — they are the fastest thing to read, so the date is added beside
+  them.
+
+  The message **list** deliberately still shows a bare time, and a test now pins that the two
+  formatters stay different on purpose. In the list the sticky `Today` header and the
+  neighbouring rows already supply the day and the column is too narrow for more; an open
+  message has neither, and it is the place a date gets copied out of or quoted into a reply.
+
+- **An empty `From` header rendered a blank sender line.** `fromName ?? fromAddr` passes `''`
+  and `'   '` straight through, so a malformed header drew nothing rather than falling back to
+  the address it had. The row and the drag deck now share one `senderLabel`, so they cannot
+  disagree about what a message is called and neither can regress alone.
+
+### Changed
+
+- **The sidebar drop target is now a filled accent pill, not a 25% tint.** This is a deviation
+  from docs/02 §6.2 and the reason is measurement: 25% accent is **1.39:1** against the light
+  sidebar and **1.35:1** against the dark one, against WCAG 1.4.11's 3:1 floor for a non-text
+  control. The whole affordance was resting on a 1px ring around a 32px row.
+
+  And that ratio is not even fixed in the shipped app. The sidebar is a 72%-alpha surface over
+  DWM Mica Alt, which samples the desktop wallpaper, so a 25% tint composites over whatever
+  picture is behind the window. A full-strength fill is the only treatment that holds across
+  eleven accent hues, two themes, and an arbitrary desktop.
+
+  The rule is also written from `.sidebar` now, which fixes a latent cascade bug: at the old
+  specificity a row that was both selected and a drop target lost its fill to the selection and
+  showed only the ring.
+
+  `--tint-drop` is kept, unused and commented, so that ruling the other way is a one-line
+  revert rather than an archaeology exercise.
+
+### Notes
+
+- **The two specs contradict each other here and somebody has to settle it.** docs/01 §3 says
+  "the row gets a filled accent pill"; docs/02 §6.2 says "bg `--accent` at 0.25 alpha + 1px
+  accent inset ring". PROMPT.md:52 names docs/02 the visual source of truth, and PROMPT.md:57
+  asks for conflicts to be reported rather than quietly resolved. Implemented docs/01's pill,
+  because it is the one the measurements and the bug report both point at — but the docs should
+  be made to agree.
+
+- **If this change ever breaks, the symptom is a drag carrying _nothing_.** `setDragImage`
+  overwrites Chromium's default row snapshot before the deck is rasterized, and the fallback
+  chain handles only selection, image and link drags — never this kind. The behaviour that
+  would restore the row snapshot sits behind a runtime flag that is off in stable WebView2. So
+  a ghostless drag reads as "the change did nothing" when it is the opposite, and that is worth
+  knowing before debugging it.
+
+- **The deck's geometry is invented.** docs/01 §4 gives the words "fanned deck with a count
+  badge" and no numbers. Three cards, a 4px step, 200px wide, a 12px cursor gap — recommended
+  and proceeded with under standing rule 21, not derived. The step is a translation rather than
+  a rotation on purpose: rotation puts painted corners outside the border box Blink sizes the
+  bitmap from, and clipped corners would look like a rendering bug.
+
+  `--drag-card-width` is the dial. Windows washes a drag image out above roughly 280–300px on
+  an axis, and no source says whether that is CSS or device pixels — at 200% those differ by
+  two. 200 is under the lower figure either way.
+
+- **No test on any platform can see the finished drag image.** It is rasterized by Blink and
+  composited by the Windows shell: Playwright cannot screenshot it, and the browser tests have
+  no Tauri and no shell. The unit tests assert the tree — right text on the card, wrong text
+  absent, mounted when Blink needs it, gone afterwards — and the picture is checked by eye.
+  `assets/reference/` still holds no capture of a drag, so per CLAUDE.md no claim that this
+  matches Mail is available.
+
+- **Two gaps seen and deliberately left.** docs/01 §3's "the count animates" is still
+  unimplemented, and the deck hanging down-right of the pointer will often cover the very badge
+  the line refers to — which is an argument for rethinking the line rather than building it.
+  And there is still no spring-loaded expansion: a collapsed account or parent folder cannot be
+  opened mid-drag, so the user must abort, expand, and start again. Both are real, both are
+  outside these three reports.

@@ -31,6 +31,38 @@
    * docs/02 §6.10 both want one. */
   --measure-prose: 60ch;
 
+  /* ---------- the drag deck — docs/01 §4 ----------
+   * "Rows stack into a fanned deck with a count badge." The bitmap Windows carries under
+   * the cursor while mail is dragged. Built in messageList/dragDeck.ts, handed to
+   * setDragImage, and thrown away one task later.
+   *
+   * --drag-card-width is the dial. Windows washes a drag image out with a heavy
+   * transparency gradient above roughly 280-300px on an axis (Atlassian says 280, react-dnd
+   * says 300; neither says whether it is CSS or device pixels, and at 200% those differ by
+   * two). 200 leaves room under the lower figure either way. If a deck ever looks faded,
+   * this is the number to cut, and the fallback is one line and 120px.
+   *
+   * The whole deck is 220 x 66: 12 of cursor gap, 200 of card, 8 of fan. The old ghost was
+   * a whole message row, 329 wide and up to 140 tall, which is over every one of those
+   * thresholds and half of it sat to the LEFT of the pointer, on top of the 232px sidebar
+   * the user was aiming at. */
+  --drag-card-width: 200px;
+  --drag-card-radius: var(--r-md);
+  --drag-card-pad-x: var(--sp-4);
+  --drag-card-pad-y: var(--sp-3);
+  --drag-card-gap: var(--sp-3);
+
+  /* One card's step behind the one in front, and the two steps' worth of room the
+   * container has to reserve for them. Separate tokens rather than the same calc() written
+   * twice, so they cannot drift apart. */
+  --drag-deck-fan: var(--sp-2);
+  --drag-deck-fan-room: var(--sp-4);
+
+  /* Clear space between the pointer and the deck. Spent as a transparent border, because
+   * setDragImage ignores a negative hot spot — the only way to hold the picture off the
+   * cursor is to pad the bitmap and put the hot spot at its corner. */
+  --drag-cursor-gap: var(--sp-6);
+
   /* ---------- sidebar row — docs/02 §6.2, height measured from the reference ----------
    * docs/02 §6.2 and §7 say 28. Measured off assets/reference/mail-window-light-active.png
    * it is 32: six consecutive row pairs are 48px apart in a 2000px-wide render of a
