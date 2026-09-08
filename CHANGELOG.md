@@ -5979,3 +5979,54 @@ alongside them.
   message's action row that opens Save All / the file list / Quick Look. Saving each file is
   wired; "Save All" would need a command that takes a folder once rather than prompting per
   file, which `attachment_save` cannot do. Named rather than half-built.
+
+## 2026-09-08 — Save All, and one search hit per email
+
+### Added
+
+- **Save All, and the paperclip menu it lives in.** A paperclip carrying the attachment count
+  sits with the message's actions and opens Save All _(total size)…_ followed by each file by
+  name. It sits before the reply actions because it is about this message rather than about
+  answering it, and it is absent entirely on a message with no attachments — standing rule 18.
+
+  `attachments_save_all` is its own command rather than a loop over `attachment_save`, which
+  opens a **file** dialog per attachment: six receipts would have asked the user where to put a
+  file six times. This asks once, for a folder.
+
+  Two things it does that a naive version would not:
+
+  - **A repeated filename is numbered, never overwritten.** One message really can carry the
+    same name twice — Outlook attaches inline images as `image001.png` over and over — and mail
+    from a stranger can name a file anything. A second `invoice.pdf` becomes `invoice (2).pdf`.
+    The number goes _before_ the extension, because `invoice.pdf (2)` is not a PDF as far as
+    Windows is concerned and would open the "Open with" dialog instead of a reader.
+  - **A part that fails is reported by name and the rest still save.** Five of six saved with
+    the sixth named is more use than nothing saved and a reason. The toast names them, because
+    "one failed" is not actionable and the one that failed is probably the one that was wanted.
+
+### Fixed
+
+- **Search returned the same email once per folder it was filed in.** The other half of the
+  Gmail-label duplication fixed in the conversation view earlier today: a labelled message is
+  stored once per label, so searching across mailboxes matched every copy.
+
+  It is arguable that two hits in two folders is informative. It is not, in practice — the
+  result list shows a subject and a sender, so the repeats read as "this arrived twice" rather
+  than "this is filed in two places", and they push genuinely different results off the end of a
+  limited list. Search now returns one hit per `(account, Message-Id)`, preferring the copy in a
+  mailbox with a **role** over one in a label folder.
+
+  It **removes and never reorders**, so the ranking the search produced survives intact — a
+  search that shuffled its own results while deduplicating would be a worse bug than the one
+  being fixed. There is a test for exactly that.
+
+### Notes
+
+- **The same Message-Id in two different accounts is two emails**, and both are kept. Message-Ids
+  are unique per sender, not per mailbox: the same newsletter to two of the user's addresses is
+  two things they actually received.
+
+- **Saving cannot be tested end to end.** Both paths open a system dialog, which lives outside
+  the page and outside Playwright. What the tests cover is that the controls exist, are
+  reachable and name the right things; the filename-collision arithmetic — the part that could
+  silently destroy a file — is pure and is tested directly in Rust.

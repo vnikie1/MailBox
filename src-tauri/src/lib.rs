@@ -208,6 +208,7 @@ pub fn run() {
             ipc::body::open_external_confirmed,
             ipc::attachments::attachment_preview,
             ipc::attachments::attachment_save,
+            ipc::attachments::attachments_save_all,
         ])
         .setup(move |app| {
             let main = app

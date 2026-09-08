@@ -585,6 +585,7 @@ import type { HostMismatch } from './generated/HostMismatch'
 import type { LinkOutcome } from './generated/LinkOutcome'
 import type { Rendered } from './generated/Rendered'
 import type { AttachmentData } from './generated/AttachmentData'
+import type { SavedAll } from '@/lib/generated/SavedAll'
 import type { OutgoingMessage } from './generated/OutgoingMessage'
 import type { PickedFile } from './generated/PickedFile'
 import type { OutboxRow } from './generated/OutboxRow'
@@ -661,6 +662,17 @@ export async function attachmentPreview(attachmentId: number): Promise<Attachmen
  * There is deliberately no "open" — see `ipc/attachments.rs`. Saving puts the file where the
  * user chose, with the shell's own warnings intact when they open it themselves.
  */
+/**
+ * Saves every attachment on a message into one folder, asked for once.
+ *
+ * Not a loop over `attachmentSave`: that opens a file dialog per attachment, so a message with
+ * six receipts would ask the user where to put a file six times.
+ */
+export async function attachmentsSaveAll(messageId: number): Promise<SavedAll> {
+  if (!runningInTauri) return { directory: null, saved: 0, failed: [] }
+  return invoke<SavedAll>('attachments_save_all', { messageId })
+}
+
 export async function attachmentSave(attachmentId: number): Promise<string | null> {
   if (!runningInTauri) return null
   return invoke<string | null>('attachment_save', { attachmentId })

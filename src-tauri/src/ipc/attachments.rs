@@ -274,9 +274,197 @@ pub async fn attachment_save(
     Ok(Some(destination.to_string_lossy().to_string()))
 }
 
+/// What a Save All produced, so the window can say something true about it.
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAll {
+    /// Where they went. `None` when the user cancelled the folder picker.
+    pub directory: Option<String>,
+    pub saved: usize,
+    /// Attachments that could not be written, by name, so the toast can name them.
+    pub failed: Vec<String>,
+}
+
+/// Saves every attachment on one message into a folder the user picks once.
+///
+/// ## Why this is its own command
+///
+/// `attachment_save` opens a *file* dialog per attachment. Looping it for a message with six
+/// receipts asks the user where to put a file six times, which is not the same feature wearing
+/// a different name — it is a worse one. This asks once and writes them all.
+///
+/// ## Collisions are resolved, not overwritten
+///
+/// Two parts of one message can carry the same filename — `image001.png` twice is what Outlook
+/// does with inline images — and mail from a stranger can name a file anything at all. A second
+/// `invoice.pdf` becomes `invoice (2).pdf` rather than replacing the first, because silently
+/// destroying the first file is the one outcome the user cannot undo.
+///
+/// A part that fails is reported by name rather than aborting the rest: five of six saved and
+/// one named is more use than nothing saved and a reason.
+#[tauri::command]
+pub async fn attachments_save_all(
+    db: State<'_, Db>,
+    message_id: i64,
+) -> Result<SavedAll, AppError> {
+    let ids: Vec<i64> = db
+        .read(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id FROM attachment
+                  WHERE message_id = ?1 AND COALESCE(is_inline, 0) = 0
+                  ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map(rusqlite::params![message_id], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<i64>>>()?;
+            Ok(rows)
+        })
+        .await?;
+
+    if ids.is_empty() {
+        return Ok(SavedAll {
+            directory: None,
+            saved: 0,
+            failed: Vec::new(),
+        });
+    }
+
+    let chosen = tokio::task::spawn_blocking(|| {
+        crate::platform::files::pick_folder_dialog("Save all attachments to…")
+    })
+    .await
+    .map_err(|_| AppError {
+        code: "cancelled".into(),
+        message: "Choosing a folder was interrupted.".into(),
+    })?;
+
+    let Some(directory) = chosen else {
+        return Ok(SavedAll {
+            directory: None,
+            saved: 0,
+            failed: Vec::new(),
+        });
+    };
+
+    let mut saved = 0;
+    let mut failed = Vec::new();
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for id in ids {
+        let row = match read_row(db.inner(), id).await {
+            Ok(row) => row,
+            Err(_) => continue,
+        };
+
+        let Ok((path, part_id, filename, _mime)) = locate(row) else {
+            continue;
+        };
+
+        let bytes = match tokio::task::spawn_blocking({
+            let path = path.clone();
+            let part_id = part_id.clone();
+            move || decode(&path, &part_id)
+        })
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            _ => {
+                failed.push(filename);
+                continue;
+            }
+        };
+
+        let name = unique_name(
+            &crate::platform::files::safe_file_name(&filename),
+            &mut used,
+        );
+        let destination = directory.join(&name);
+
+        match tokio::task::spawn_blocking(move || std::fs::write(&destination, &bytes)).await {
+            Ok(Ok(())) => saved += 1,
+            _ => {
+                tracing::warn!(name, "attachments: one could not be written");
+                failed.push(filename);
+            }
+        }
+    }
+
+    Ok(SavedAll {
+        directory: Some(directory.to_string_lossy().to_string()),
+        saved,
+        failed,
+    })
+}
+
+/// A name not yet used in this run, suffixing `(2)`, `(3)` … before the extension.
+///
+/// Tracked in a set rather than by asking the filesystem, because the collisions that matter
+/// here are *within one message* — two parts genuinely called `image001.png` — and a name that
+/// does not exist on disk yet is still taken if the previous part in this loop just claimed it.
+fn unique_name(name: &str, used: &mut std::collections::HashSet<String>) -> String {
+    if used.insert(name.to_string()) {
+        return name.to_string();
+    }
+
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+        _ => (name, String::new()),
+    };
+
+    for n in 2.. {
+        let candidate = format!("{stem} ({n}){extension}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+
+    unreachable!("the loop returns on the first name not already taken")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_filename_is_numbered_rather_than_overwritten() {
+        // Outlook attaches inline images as image001.png over and over, so one message really
+        // does carry the same name twice. Writing both to one path would leave the user with
+        // the last one and no sign the others existed.
+        let mut used = std::collections::HashSet::new();
+
+        assert_eq!(unique_name("invoice.pdf", &mut used), "invoice.pdf");
+        assert_eq!(unique_name("invoice.pdf", &mut used), "invoice (2).pdf");
+        assert_eq!(unique_name("invoice.pdf", &mut used), "invoice (3).pdf");
+    }
+
+    #[test]
+    fn the_number_goes_before_the_extension() {
+        // "invoice.pdf (2)" is not a PDF as far as Windows is concerned — it would open the
+        // Open With dialog instead of a reader.
+        let mut used = std::collections::HashSet::new();
+        unique_name("report.tar.gz", &mut used);
+
+        assert_eq!(unique_name("report.tar.gz", &mut used), "report.tar (2).gz");
+    }
+
+    #[test]
+    fn a_name_with_no_extension_still_numbers() {
+        let mut used = std::collections::HashSet::new();
+        unique_name("README", &mut used);
+
+        assert_eq!(unique_name("README", &mut used), "README (2)");
+    }
+
+    #[test]
+    fn a_dotfile_is_not_treated_as_all_extension() {
+        // ".gitignore" splits into an empty stem and "gitignore", and numbering that would
+        // produce " (2).gitignore" — a file starting with a space.
+        let mut used = std::collections::HashSet::new();
+        unique_name(".gitignore", &mut used);
+
+        assert_eq!(unique_name(".gitignore", &mut used), ".gitignore (2)");
+    }
 
     #[test]
     fn only_formats_the_frame_can_render_inertly_are_previewable() {

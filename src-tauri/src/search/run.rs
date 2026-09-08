@@ -67,6 +67,89 @@ fn vip_addresses(conn: &Connection) -> Result<HashSet<String>, DbError> {
 /// One query for the whole candidate set, for the same reason `participated_threads` is: asked
 /// per row it would be a round trip through the reader pool for one string, a couple of hundred
 /// times.
+/// Which of `ids` sit in a mailbox that has a `role` — inbox, sent, archive and the rest.
+///
+/// A Gmail label folder has no role, which is exactly what makes it the copy to drop when the
+/// same message is also filed somewhere real.
+fn filed_in_real_mailbox(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<std::collections::HashSet<i64>, DbError> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    let list = (0..ids.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut statement = conn.prepare(&format!(
+        "SELECT message.id
+           FROM message
+           JOIN mailbox ON mailbox.id = message.mailbox_id
+          WHERE message.id IN ({list}) AND mailbox.role IS NOT NULL"
+    ))?;
+
+    let params: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+    let rows = statement
+        .query_map(params.as_slice(), |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    Ok(rows.into_iter().collect())
+}
+
+/// Keeps one candidate per `(account, Message-Id)`, preferring one filed in a real mailbox.
+///
+/// A candidate with no `Message-Id` is always kept: an absent value is not evidence that two
+/// messages are the same one, and collapsing on it would hide real mail.
+///
+/// Order is preserved, so whatever the query planner returned first still ranks first among
+/// equals — this only removes, it never reorders.
+fn dedupe_by_identity(
+    candidates: Vec<(MessageRow, f64)>,
+    identities: &std::collections::HashMap<i64, String>,
+    filed: &std::collections::HashSet<i64>,
+) -> Vec<(MessageRow, f64)> {
+    let mut best: std::collections::HashMap<(i64, &str), usize> = std::collections::HashMap::new();
+    let mut drop = vec![false; candidates.len()];
+
+    for (index, (row, _)) in candidates.iter().enumerate() {
+        let Some(message_id) = identities.get(&row.id).filter(|id| !id.is_empty()) else {
+            continue;
+        };
+
+        match best.get(&(row.account_id, message_id.as_str())) {
+            None => {
+                best.insert((row.account_id, message_id.as_str()), index);
+            }
+            Some(&kept) => {
+                // The one in a real mailbox wins. If neither is, or both are, the first stays —
+                // which keeps the ranking the search already produced.
+                let challenger_is_filed = filed.contains(&row.id);
+                let kept_is_filed = candidates
+                    .get(kept)
+                    .is_some_and(|(kept_row, _)| filed.contains(&kept_row.id));
+
+                if challenger_is_filed && !kept_is_filed {
+                    drop[kept] = true;
+                    best.insert((row.account_id, message_id.as_str()), index);
+                } else {
+                    drop[index] = true;
+                }
+            }
+        }
+    }
+
+    candidates
+        .into_iter()
+        .zip(drop)
+        .filter_map(|(candidate, dropped)| (!dropped).then_some(candidate))
+        .collect()
+}
+
 fn message_identities(
     conn: &Connection,
     ids: &[i64],
@@ -184,6 +267,18 @@ pub fn run_parsed(
     let candidate_ids: Vec<i64> = candidates.iter().map(|(row, _)| row.id).collect();
     let identities = message_identities(conn, &candidate_ids)?;
 
+    // One hit per email, not one per folder it happens to sit in. Gmail exposes every label as
+    // an IMAP folder, so a labelled message is stored once per label and a search across
+    // mailboxes returned the same mail several times over — on the account this was reported
+    // from, 107 Message-IDs were duplicated inside one account.
+    //
+    // It is arguable that two hits in two folders is informative. It is not, in practice: the
+    // result list shows a subject and a sender, so the repeats read as "this arrived twice"
+    // rather than "this is filed in two places", and they push genuinely different results off
+    // the end of a limited list.
+    let filed = filed_in_real_mailbox(conn, &candidate_ids)?;
+    let candidates = dedupe_by_identity(candidates, &identities, &filed);
+
     let thread_ids: Vec<i64> = candidates
         .iter()
         .filter_map(|(row, _)| row.thread_id)
@@ -249,4 +344,110 @@ pub fn run_parsed(
 
     hits.truncate(limit as usize);
     Ok(hits)
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::*;
+
+    fn row(id: i64) -> MessageRow {
+        MessageRow {
+            id,
+            thread_id: Some(1),
+            mailbox_id: 1,
+            account_id: 1,
+            subject: Some("Credit Advice".into()),
+            from_name: None,
+            from_addr: Some("bank@example.test".into()),
+            date_received: 0,
+            preview: None,
+            size: 0,
+            seen: false,
+            answered: false,
+            flagged: false,
+            flag_color: None,
+            has_attachment: false,
+            muted: false,
+        }
+    }
+
+    fn identities(pairs: &[(i64, &str)]) -> std::collections::HashMap<i64, String> {
+        pairs
+            .iter()
+            .map(|(id, mid)| (*id, (*mid).to_string()))
+            .collect()
+    }
+
+    fn ids(result: &[(MessageRow, f64)]) -> Vec<i64> {
+        result.iter().map(|(row, _)| row.id).collect()
+    }
+
+    #[test]
+    fn the_same_mail_under_two_labels_is_one_hit() {
+        // Gmail stores a labelled message once per label. Searching across mailboxes returned
+        // it once per folder, which reads as "this arrived three times".
+        let candidates = vec![(row(1), 1.0), (row(2), 1.0), (row(3), 1.0)];
+        let identities = identities(&[(1, "abc@x"), (2, "abc@x"), (3, "abc@x")]);
+        let filed = std::collections::HashSet::from([2]);
+
+        let kept = dedupe_by_identity(candidates, &identities, &filed);
+
+        assert_eq!(
+            ids(&kept),
+            vec![2],
+            "kept a label's copy over the filed one"
+        );
+    }
+
+    #[test]
+    fn different_messages_are_all_kept() {
+        let candidates = vec![(row(1), 1.0), (row(2), 1.0)];
+        let identities = identities(&[(1, "abc@x"), (2, "def@x")]);
+
+        let kept = dedupe_by_identity(candidates, &identities, &std::collections::HashSet::new());
+
+        assert_eq!(ids(&kept), vec![1, 2]);
+    }
+
+    #[test]
+    fn messages_without_an_identity_are_never_collapsed() {
+        // Two different emails that both lack a Message-Id are still two emails. Folding them
+        // on the absent value would hide one.
+        let candidates = vec![(row(1), 1.0), (row(2), 1.0)];
+
+        let kept = dedupe_by_identity(
+            candidates,
+            &std::collections::HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        assert_eq!(ids(&kept), vec![1, 2]);
+    }
+
+    #[test]
+    fn the_order_the_ranking_produced_survives() {
+        // This removes; it must never reorder. A search that shuffled its own ranking while
+        // deduplicating would be a worse bug than the one being fixed.
+        let candidates = vec![(row(5), 3.0), (row(1), 2.0), (row(9), 1.0)];
+        let identities = identities(&[(5, "a@x"), (1, "b@x"), (9, "c@x")]);
+
+        let kept = dedupe_by_identity(candidates, &identities, &std::collections::HashSet::new());
+
+        assert_eq!(ids(&kept), vec![5, 1, 9]);
+    }
+
+    #[test]
+    fn two_accounts_holding_the_same_message_id_are_both_kept() {
+        // The same newsletter to two addresses is two emails the user actually received, and
+        // Message-Ids are only unique per sender, not per mailbox.
+        let mut second = row(2);
+        second.account_id = 2;
+
+        let candidates = vec![(row(1), 1.0), (second, 1.0)];
+        let identities = identities(&[(1, "abc@x"), (2, "abc@x")]);
+
+        let kept = dedupe_by_identity(candidates, &identities, &std::collections::HashSet::new());
+
+        assert_eq!(ids(&kept), vec![1, 2]);
+    }
 }

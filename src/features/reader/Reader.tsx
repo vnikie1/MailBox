@@ -4,7 +4,9 @@ import {
   ChevronDown,
   CornerUpRight,
   Forward,
+  Download,
   Mail,
+  Paperclip,
   Reply,
   ReplyAll,
   ShieldAlert,
@@ -13,7 +15,7 @@ import {
 import type { AttachmentRow } from '@/lib/generated/AttachmentRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import { cx } from '@/lib/cx'
-import { formatReaderDate } from '@/lib/date'
+import { formatFileSize, formatReaderDate } from '@/lib/date'
 import { useThread } from '@/app/queries'
 
 import { AttachmentPreview } from './AttachmentPreview'
@@ -22,11 +24,22 @@ import { JunkBanner } from './JunkBanner'
 import { MessageBody } from './MessageBody'
 import { useMarkRead } from './useMarkRead'
 import { useThreadBodies } from './useBodyPrefetch'
-import { attachmentSave, composeOpen, storeNow } from '@/lib/ipc'
+import { attachmentSave, attachmentsSaveAll, composeOpen, storeNow } from '@/lib/ipc'
 
 import { RedirectSheet } from './RedirectSheet'
 import { useMailStore } from '@/store/mail'
-import { Avatar, EmptyState, IconButton, ScrollArea, Tooltip, TooltipGroup, useToast } from '@/ui'
+import {
+  Avatar,
+  EmptyState,
+  IconButton,
+  Menu,
+  MenuItem,
+  MenuSeparator,
+  ScrollArea,
+  Tooltip,
+  TooltipGroup,
+  useToast,
+} from '@/ui'
 import { Toolbar, type ToolbarProps } from '@/features/toolbar/Toolbar'
 
 import styles from './Reader.module.css'
@@ -148,6 +161,68 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
               They are always laid out; making them enter the layout would move the date
               leftward on hover, which standing rule 6 forbids. */}
           <span className={styles.actions}>
+            {/* The attachments, as Mail puts them: a paperclip carrying the count, opening a
+                menu of Save All and then each file. It sits before the reply actions because
+                it is about this message rather than about answering it. */}
+            {message.attachments.length > 0 && (
+              <Menu
+                label="Attachments"
+                trigger={
+                  <IconButton
+                    icon={Paperclip}
+                    label={`${String(message.attachments.length)} attachment${
+                      message.attachments.length === 1 ? '' : 's'
+                    }`}
+                  />
+                }
+              >
+                <MenuItem
+                  label={`Save All (${formatFileSize(
+                    message.attachments.reduce((sum, each) => sum + (each.size ?? 0), 0),
+                  )})…`}
+                  icon={Download}
+                  onClick={() => {
+                    void attachmentsSaveAll(message.id)
+                      .then((result) => {
+                        // Cancelled: the user closed the folder picker, and a toast for that
+                        // would be the app narrating its own no-op.
+                        if (result.directory === null) return
+
+                        toast.show({
+                          title:
+                            result.failed.length === 0
+                              ? `Saved ${String(result.saved)} to ${result.directory}`
+                              : `Saved ${String(result.saved)}, ${String(result.failed.length)} could not be written`,
+                          // Named rather than counted: "one failed" is not actionable, and the
+                          // one that failed is probably the one the user was after.
+                          ...(result.failed.length === 0
+                            ? {}
+                            : { description: result.failed.join(', ') }),
+                        })
+                      })
+                      .catch((error: unknown) => {
+                        toast.show({
+                          title: 'Those attachments could not be saved',
+                          description: error instanceof Error ? error.message : String(error),
+                        })
+                      })
+                  }}
+                />
+
+                <MenuSeparator />
+
+                {message.attachments.map((attachment) => (
+                  <MenuItem
+                    key={attachment.id}
+                    label={attachment.filename ?? 'Attachment'}
+                    onClick={() => {
+                      setPreviewing(attachment)
+                    }}
+                  />
+                ))}
+              </Menu>
+            )}
+
             <TooltipGroup>
               <Tooltip
                 content="Reply"
