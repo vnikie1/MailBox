@@ -46,6 +46,13 @@
    * a whole message row, 329 wide and up to 140 tall, which is over every one of those
    * thresholds and half of it sat to the LEFT of the pointer, on top of the 232px sidebar
    * the user was aiming at. */
+
+  /* The flag strip inside a menu — docs/01 §8, the row of colours macOS Mail puts under a
+   * "Flag:" label. The cell is larger than the --menu-swatch dot beside a named item,
+   * because this one is a target for the pointer rather than a marker beside a word. */
+  --menu-swatch-cell: 20px;
+  --menu-swatch-gap: var(--sp-2);
+
   --drag-card-width: 200px;
   --drag-card-radius: var(--r-md);
   --drag-card-pad-x: var(--sp-4);

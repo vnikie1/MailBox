@@ -9,6 +9,7 @@ import { ToastProvider } from '@/ui'
 import { useAppearanceSync } from './useAppearanceSync'
 import { useMailEvents } from './queries'
 import { SyncContext, useSync } from './useSync'
+import { useNativeContextMenu } from './useNativeContextMenu'
 import { useSystemEvents } from './useSystemEvents'
 
 /**
@@ -40,6 +41,7 @@ function Shell() {
   useMailEvents()
   const sync = useSync()
   useSystemEvents()
+  useNativeContextMenu()
 
   const { firstRun } = useAccountsGate()
 

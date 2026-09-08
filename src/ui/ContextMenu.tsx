@@ -46,6 +46,16 @@ export interface ContextMenuProps {
   /** The region that responds to a right-click. */
   children: ReactNode
   className?: string | undefined
+  /**
+   * Called with the event before the menu opens. Return `false` to refuse.
+   *
+   * A list wraps its rows in ONE of these rather than one per row — a virtualised list would
+   * otherwise build and tear down a floating tree on every scroll — so something has to work
+   * out which row the pointer was over, and select it, before the menu renders against it.
+   * Refusing is how a right-click on the empty space below the last row does nothing rather
+   * than opening a menu that acts on whatever happened to be selected.
+   */
+  onOpen?: ((event: ReactMouseEvent<HTMLDivElement>) => boolean) | undefined
 }
 
 /**
@@ -65,11 +75,14 @@ export function ContextMenu(props: ContextMenuProps) {
   )
 }
 
-function ContextMenuInner({ label, menu, children, className }: ContextMenuProps) {
+function ContextMenuInner({ label, menu, children, className, onOpen }: ContextMenuProps) {
   const [isOpen, setIsOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
 
-  const elementsRef = useRef<(HTMLButtonElement | null)[]>([])
+  // `HTMLElement`, not `HTMLButtonElement`: every row was a button until the flag strip,
+  // which registers its container div as one navigable stop and moves between the swatches
+  // itself. See `MenuSwatchRow`.
+  const elementsRef = useRef<(HTMLElement | null)[]>([])
   const labelsRef = useRef<(string | null)[]>([])
 
   const nodeId = useFloatingNodeId()
@@ -119,6 +132,10 @@ function ContextMenuInner({ label, menu, children, className }: ContextMenuProps
   }, [tree])
 
   const handleContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    // Before preventDefault, so a refusal leaves the event untouched and the document-level
+    // suppressor still gets to stop Edge's own menu appearing.
+    if (onOpen !== undefined && !onOpen(event)) return
+
     event.preventDefault()
 
     const { clientX: x, clientY: y } = event

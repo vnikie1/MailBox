@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -36,6 +37,7 @@ import { useMailStore } from '@/store/mail'
 import { useSettingsStore } from '@/store/settings'
 import {
   Button,
+  ContextMenu,
   EmptyState,
   IconButton,
   Menu,
@@ -85,6 +87,14 @@ export interface MessageListProps {
   searchRows?: Row[] | undefined
   /** Rendered above the rows while a search is running. */
   scopeBar?: ReactNode
+  /**
+   * The right-click menu, built from the rows it will act on.
+   *
+   * A render function rather than a node, because only the list knows which rows are involved
+   * — and only the shell knows what the actions are. Inverting it this way keeps the list from
+   * growing a dependency on every message action in the app.
+   */
+  contextMenu?: ((rows: Row[]) => ReactNode) | undefined
 }
 
 /**
@@ -105,7 +115,12 @@ function flattenPages(data: { pages: (Row[] | { items: Row[] })[] } | undefined)
   return (data?.pages ?? []).flatMap((page) => (Array.isArray(page) ? page : page.items))
 }
 
-export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }: MessageListProps) {
+export function MessageList({
+  showSidebarToggle = false,
+  searchRows,
+  scopeBar,
+  contextMenu,
+}: MessageListProps) {
   const selection = useMailStore((state) => state.selection)
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
   const selectMessage = useMailStore((state) => state.selectMessage)
@@ -338,6 +353,42 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
     [rows, selectMessage],
   )
 
+  /**
+   * The rows a right-click acts on, and the selection it leaves behind.
+   *
+   * Right-clicking inside the selection keeps it — that is how a menu comes to act on nine
+   * messages. Right-clicking *outside* it selects that row first, which is what every list on
+   * both platforms does and what stops a menu quietly acting on something off screen.
+   */
+  const [menuRows, setMenuRows] = useState<Row[]>([])
+
+  const onContextMenuOpen = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>): boolean => {
+      const element =
+        event.target instanceof Element ? event.target.closest('[data-message-id]') : null
+
+      // The empty space below the last row. Refusing here is what stops a menu appearing that
+      // would act on a selection the pointer is nowhere near.
+      if (element === null) return false
+
+      const id = Number(element.getAttribute('data-message-id'))
+      const byId = new Map(rows.map((row) => [row.id, row]))
+      const target = byId.get(id)
+      if (target === undefined) return false
+
+      const current = useMailStore.getState().selectedMessageIds
+      if (current.includes(id)) {
+        setMenuRows(current.map((each) => byId.get(each)).filter((row) => row !== undefined))
+      } else {
+        selectMessage(id)
+        setMenuRows([target])
+      }
+
+      return true
+    },
+    [rows, selectMessage],
+  )
+
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const delta = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0
     if (delta === 0) return
@@ -556,61 +607,73 @@ export function MessageList({ showSidebarToggle = false, searchRows, scopeBar }:
           />
         )}
 
-        <div
-          ref={scrollRef}
-          role="listbox"
-          aria-label="Messages"
-          aria-multiselectable
-          aria-busy={isPending}
-          tabIndex={0}
-          className={cx(styles.scroll, focused && 'messageListFocused')}
-          onKeyDown={onKeyDown}
-          onFocus={() => {
-            setFocused(true)
-          }}
-          onBlur={() => {
-            setFocused(false)
-          }}
+        {/* One menu around every row, not one per row: the list is virtualised, so a menu per
+            row would build and tear down a floating tree on every scroll. `onContextMenuOpen`
+            works out which row the pointer was over and refuses the empty space below them. */}
+        {/* No className. `ContextMenu`'s region is `display: contents` on purpose, so it adds
+            no box of its own — the scroller below still sizes against the pane. Giving it one
+            put a flex container in between and the virtualiser measured the wrong height. */}
+        <ContextMenu
+          label="Message actions"
+          onOpen={onContextMenuOpen}
+          menu={contextMenu?.(menuRows)}
         >
           <div
-            className={styles.inner}
-            style={{ height: `${String(virtualiser.getTotalSize())}px` }}
+            ref={scrollRef}
+            role="listbox"
+            aria-label="Messages"
+            aria-multiselectable
+            aria-busy={isPending}
+            tabIndex={0}
+            className={cx(styles.scroll, focused && 'messageListFocused')}
+            onKeyDown={onKeyDown}
+            onFocus={() => {
+              setFocused(true)
+            }}
+            onBlur={() => {
+              setFocused(false)
+            }}
           >
-            {virtualItems.map((virtualItem) => {
-              const item = items[virtualItem.index]
-              if (!item) return null
+            <div
+              className={styles.inner}
+              style={{ height: `${String(virtualiser.getTotalSize())}px` }}
+            >
+              {virtualItems.map((virtualItem) => {
+                const item = items[virtualItem.index]
+                if (!item) return null
 
-              return (
-                <div
-                  key={virtualItem.key}
-                  className={styles.item}
-                  style={{
-                    height: `${String(virtualItem.size)}px`,
-                    transform: `translateY(${String(virtualItem.start)}px)`,
-                  }}
-                >
-                  {item.kind === 'header' ? (
-                    <div className={styles.sectionHeader}>{item.label}</div>
-                  ) : (
-                    <MessageRow
-                      message={item.message}
-                      now={now}
-                      selected={selected.has(item.message.id)}
-                      runStart={item.runStart}
-                      runEnd={item.runEnd}
-                      previewLines={previewLines}
-                      showPhoto={showPhotos}
-                      onSelect={onRowSelect}
-                      onDragStart={onDragStart}
-                      onSwipeArchive={onSwipeArchive}
-                      onSwipeToggleRead={onSwipeToggleRead}
-                    />
-                  )}
-                </div>
-              )
-            })}
+                return (
+                  <div
+                    key={virtualItem.key}
+                    className={styles.item}
+                    style={{
+                      height: `${String(virtualItem.size)}px`,
+                      transform: `translateY(${String(virtualItem.start)}px)`,
+                    }}
+                  >
+                    {item.kind === 'header' ? (
+                      <div className={styles.sectionHeader}>{item.label}</div>
+                    ) : (
+                      <MessageRow
+                        message={item.message}
+                        now={now}
+                        selected={selected.has(item.message.id)}
+                        runStart={item.runStart}
+                        runEnd={item.runEnd}
+                        previewLines={previewLines}
+                        showPhoto={showPhotos}
+                        onSelect={onRowSelect}
+                        onDragStart={onDragStart}
+                        onSwipeArchive={onSwipeArchive}
+                        onSwipeToggleRead={onSwipeToggleRead}
+                      />
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </div>
-        </div>
+        </ContextMenu>
       </div>
     </div>
   )

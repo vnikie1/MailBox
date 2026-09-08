@@ -35,7 +35,7 @@ import {
   useTypeahead,
   type Placement,
 } from '@floating-ui/react'
-import { Check, ChevronRight, type LucideIcon } from 'lucide-react'
+import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { durationToken, lengthToken } from '@/lib/tokens'
@@ -107,7 +107,10 @@ function MenuInner({
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
   const [hasFocusInside, setHasFocusInside] = useState(false)
 
-  const elementsRef = useRef<(HTMLButtonElement | null)[]>([])
+  // `HTMLElement`, not `HTMLButtonElement`: every row was a button until the flag strip,
+  // which registers its container div as one navigable stop and moves between the swatches
+  // itself. See `MenuSwatchRow`.
+  const elementsRef = useRef<(HTMLElement | null)[]>([])
   const labelsRef = useRef<(string | null)[]>([])
 
   const tree = useFloatingTree()
@@ -289,6 +292,128 @@ function MenuInner({
         )}
       </MenuContext>
     </FloatingNode>
+  )
+}
+
+export interface MenuSwatchRowProps {
+  /** The text before the swatches. macOS Mail writes it "Flag:". */
+  label: string
+  /** The swatches, in the order they are drawn. */
+  options: { value: string; name: string }[]
+  /**
+   * Which option is currently set.
+   *
+   * `null` means explicitly none — the clear cell takes the tick. `undefined` means the
+   * selection disagrees, and then nothing is ticked, because claiming a colour they do not
+   * share would be worse than saying nothing. `exactOptionalPropertyTypes` is on, so the
+   * undefined has to be written out.
+   */
+  current?: string | null | undefined
+  /** The leading cell that clears the value. Omitted when there is nothing to clear. */
+  clearLabel?: string
+  onPick: (value: string | null) => void
+}
+
+/**
+ * A horizontal strip of colour swatches inside a menu. docs/01 §8 — Mail puts the flag
+ * colours on one row under a "Flag:" label rather than in a submenu, because picking a
+ * colour is done by eye and a vertical list of seven words is slower than a row of dots.
+ *
+ * ## Why this is one navigable stop rather than eight
+ *
+ * Floating UI's list navigation moves up and down a menu with the arrow keys. If each swatch
+ * registered itself, Down would step sideways through eight colours before reaching Archive,
+ * which is not how a menu behaves anywhere. So the *container* is the stop, and Left/Right
+ * move between swatches once it has focus — the same shape as a radio group, and the reason
+ * `elementsRef` above had to widen from a button to an element.
+ *
+ * Typeahead is deliberately given nothing: `useListItem` is called without a label, so
+ * pressing "r" in the menu reaches "Reply" rather than being swallowed by "Red".
+ */
+export function MenuSwatchRow({ label, options, current, clearLabel, onPick }: MenuSwatchRowProps) {
+  const menu = useMenuContext()
+  const tree = useFloatingTree()
+  // No `label`: this row is not a typeahead target. See the note above.
+  const item = useListItem()
+  const isActive = item.index === menu.activeIndex
+  const containerRef = useRef<HTMLDivElement | null>(null)
+
+  // `null` is the clear cell, and it leads so the row reads left to right as "none, then
+  // these". Typed up front rather than inferred: an empty literal infers `never[]`.
+  const cells: (string | null)[] = clearLabel === undefined ? [] : [null]
+  cells.push(...options.map((option) => option.value))
+
+  const move = (delta: number, from: HTMLElement) => {
+    const buttons = [...(containerRef.current?.querySelectorAll('button') ?? [])]
+    const index = buttons.indexOf(from as HTMLButtonElement)
+    // Clamped rather than wrapped: running off the end of a row of colours and reappearing at
+    // the other end is disorienting when the row is this short.
+    const next = buttons[Math.min(Math.max(index + delta, 0), buttons.length - 1)]
+    next?.focus()
+  }
+
+  return (
+    <div
+      ref={(node) => {
+        containerRef.current = node
+        item.ref(node)
+      }}
+      role="group"
+      aria-label={label}
+      className={styles.swatchRow}
+      tabIndex={isActive ? 0 : -1}
+      onFocus={(event) => {
+        menu.setHasFocusInside(true)
+
+        // Arrow-keying down the menu focuses this group, because the group is the navigable
+        // stop. Focus is handed straight on to a swatch — the current colour if there is one —
+        // so what the user sees is a ring around a colour rather than a ring around a strip
+        // with no indication of which cell is live. Only when the group itself was the target:
+        // a focus event bubbling up from a cell must not bounce focus back to the start.
+        if (event.target !== event.currentTarget) return
+
+        const buttons = [...event.currentTarget.querySelectorAll('button')]
+        const marked = buttons.find((button) => button.getAttribute('aria-checked') === 'true')
+        ;(marked ?? buttons[0])?.focus()
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+
+        // Stopped before the menu sees it: left and right would otherwise close this menu or
+        // open a submenu, which is what those keys mean everywhere else in a menu.
+        event.preventDefault()
+        event.stopPropagation()
+        move(event.key === 'ArrowRight' ? 1 : -1, event.target as HTMLElement)
+      }}
+    >
+      <span className={styles.swatchLabel}>{label}</span>
+
+      {cells.map((value) => {
+        const name = value === null ? clearLabel : options.find((o) => o.value === value)?.name
+
+        return (
+          <button
+            key={value ?? '__clear__'}
+            type="button"
+            role="menuitemradio"
+            aria-checked={current === value}
+            aria-label={name}
+            tabIndex={-1}
+            className={cx(styles.swatchCell, value === null && styles.swatchClear)}
+            {...(value === null ? {} : { style: { background: `var(--flag-${value})` } })}
+            onClick={() => {
+              onPick(value)
+              tree?.events.emit('click')
+            }}
+          >
+            {value === null && <X className={styles.swatchClearIcon} strokeWidth={2.5} />}
+            {current === value && value !== null && (
+              <Check className={styles.swatchTick} strokeWidth={3} />
+            )}
+          </button>
+        )
+      })}
+    </div>
   )
 }
 

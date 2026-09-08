@@ -6,6 +6,7 @@ import { LIST_MAX, LIST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, useLayoutStore } from '@/
 import {
   useAccounts,
   useArchiveMessages,
+  useBlockedSenders,
   useDeleteMessages,
   useFlagNames,
   useMailboxes,
@@ -16,6 +17,8 @@ import {
   useToggleRead,
   useVips,
 } from '@/app/queries'
+import { MessageContextMenu } from '@/features/messageList/MessageContextMenu'
+import { blockSender, flagSet, unblockSender } from '@/lib/organise'
 import { useMailStore } from '@/store/mail'
 import { Button, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
@@ -88,6 +91,7 @@ export function AppShell() {
   // entries rather than issuing a second set of reads.
   const { data: smart = [] } = useSmartMailboxes()
   const { data: flagNames = [] } = useFlagNames()
+  const { data: blockedSenders = new Set<string>() } = useBlockedSenders()
   const { data: vips = [] } = useVips()
   const move = useMoveMessages()
   const remove = useDeleteMessages()
@@ -266,6 +270,49 @@ export function AppShell() {
         .catch(failed('The rules could not be run'))
     }, [selectedMessageIds, toast, failed]),
 
+    // Not on the toolbar — the toolbar's flag control is `FlagMenu`, which sets colours
+    // itself. The context menu's swatch strip is a design-system primitive with no opinion
+    // about mail, so the shell supplies the verb.
+    setFlag: useCallback(
+      (colour: string | null) => {
+        void flagSet(selectedMessageIds, colour).catch(failed('The flag could not be set'))
+      },
+      [selectedMessageIds, failed],
+    ),
+
+    blockSender: useCallback(
+      (address: string) => {
+        void blockSender(address)
+          .then(() => {
+            // Said out loud because blocking is retroactive: the core files everything already
+            // here from that address as junk, and a silent menu click would leave the user
+            // wondering where their mail went.
+            toast.show({
+              title: `Blocked ${address}`,
+              description: 'Mail already here from this address has been marked as junk.',
+            })
+          })
+          .catch(failed('That sender could not be blocked'))
+      },
+      [toast, failed],
+    ),
+
+    unblockSender: useCallback(
+      (address: string) => {
+        void unblockSender(address)
+          .then(() => {
+            // The reverse is not symmetric, and saying so is the honest thing: unblocking stops
+            // future mail being filed, it does not walk back what was already filed.
+            toast.show({
+              title: `Unblocked ${address}`,
+              description: 'Mail already marked as junk stays where it is.',
+            })
+          })
+          .catch(failed('That sender could not be unblocked'))
+      },
+      [toast, failed],
+    ),
+
     undo,
     redo,
 
@@ -427,6 +474,14 @@ export function AppShell() {
           >
             <MessageList
               showSidebarToggle={!showSidebar}
+              contextMenu={(rows) => (
+                <MessageContextMenu
+                  rows={rows}
+                  flagNames={flagNames}
+                  blocked={blockedSenders}
+                  actions={actions}
+                />
+              )}
               searchRows={searching ? search.visible.map((hit) => hit.row) : undefined}
               scopeBar={
                 searching ? (

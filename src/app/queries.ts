@@ -18,7 +18,7 @@ import type { Predicate } from '@/lib/generated/Predicate'
 import type { FlagName } from '@/lib/generated/FlagName'
 import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
 import type { Vip } from '@/lib/generated/Vip'
-import { flagNames, smartList, smartMessages, vipsList } from '@/lib/organise'
+import { blockedList, flagNames, smartList, smartMessages, vipsList } from '@/lib/organise'
 import { useToast } from '@/ui'
 import * as ipc from '@/lib/ipc'
 
@@ -126,6 +126,23 @@ export function useVips() {
   return useQuery<Vip[]>({
     queryKey: ['vips'],
     queryFn: vipsList,
+  })
+}
+
+/**
+ * The addresses the user has blocked, lowercased for comparison.
+ *
+ * A Set rather than the array the core returns, because the only question ever asked of it is
+ * whether one sender is in it — and it is asked once per context menu, on every right-click.
+ *
+ * This is what lets Block Sender be a two-way switch. Without it the menu could only ever say
+ * "Block", including for someone already blocked, and clicking it twice would do the same
+ * thing both times with nothing to show for it.
+ */
+export function useBlockedSenders() {
+  return useQuery<ReadonlySet<string>>({
+    queryKey: ['blockedSenders'],
+    queryFn: async () => new Set((await blockedList()).map((address) => address.toLowerCase())),
   })
 }
 

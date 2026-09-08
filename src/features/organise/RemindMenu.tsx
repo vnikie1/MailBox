@@ -7,8 +7,16 @@ export interface RemindMenuProps {
   ids: number[]
   /** Whether any of the selection is already snoozed, which is what enables Cancel. */
   anySnoozed?: boolean
-  /** Required: both of these are root menus, and a root menu without a trigger cannot open. */
-  trigger: NonNullable<MenuProps['trigger']>
+  /**
+   * The control that opens it, when this is a root menu.
+   *
+   * Optional, where it used to be required. A root menu without a trigger cannot open — but
+   * this is also mounted *inside* the message context menu, where it is a submenu and the row
+   * with the chevron is its own trigger. Passing one there would draw a button inside a menu.
+   */
+  trigger?: MenuProps['trigger']
+  /** The leading icon, for when this is a submenu row. */
+  icon?: MenuProps['icon']
 }
 
 /**
@@ -60,7 +68,7 @@ function inAnHour(): number {
 }
 
 /** Remind Me. docs/01 §8. */
-export function RemindMenu({ ids, anySnoozed = false, trigger }: RemindMenuProps) {
+export function RemindMenu({ ids, anySnoozed = false, trigger, icon }: RemindMenuProps) {
   const toast = useToast()
 
   const set = (at: () => number, label: string) => {
@@ -80,7 +88,11 @@ export function RemindMenu({ ids, anySnoozed = false, trigger }: RemindMenuProps
   }
 
   return (
-    <Menu label="Remind Me" trigger={trigger}>
+    <Menu
+      label="Remind Me"
+      {...(icon === undefined ? {} : { icon })}
+      {...(trigger === undefined ? {} : { trigger })}
+    >
       <MenuItem
         label="In an Hour"
         icon={Clock}
@@ -117,16 +129,22 @@ export function RemindMenu({ ids, anySnoozed = false, trigger }: RemindMenuProps
         }}
       />
 
-      <MenuSeparator />
+      {/* Rendered only where it can do something. A message-list selection can never hold a
+          snoozed message — the list query filters them out — so in the context menu this row
+          would always be present and always dead, which standing rule 18 rules out. */}
+      {anySnoozed && (
+        <>
+          <MenuSeparator />
 
-      <MenuItem
-        label="Cancel Reminder"
-        icon={BellOff}
-        disabled={!anySnoozed}
-        onClick={() => {
-          void unsnooze(ids)
-        }}
-      />
+          <MenuItem
+            label="Cancel Reminder"
+            icon={BellOff}
+            onClick={() => {
+              void unsnooze(ids)
+            }}
+          />
+        </>
+      )}
     </Menu>
   )
 }

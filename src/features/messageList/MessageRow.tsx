@@ -130,6 +130,9 @@ export const MessageRow = memo(function MessageRow({
           role="option"
           aria-selected={selected}
           aria-label={announcement}
+          // Read by the list's context menu, which is mounted once around every row rather
+          // than once per row, and so has only the event target to work out what was clicked.
+          data-message-id={message.id}
           tabIndex={-1}
           className={cx(
             styles.row,
@@ -138,6 +141,13 @@ export const MessageRow = memo(function MessageRow({
             selected && runEnd && styles.runEnd,
           )}
           onMouseDown={(event) => {
+            // Left button only. A right-click fires `mousedown` too, and running the selection
+            // logic on it collapsed a multi-selection to the row under the pointer — so a menu
+            // opened on nine selected messages would act on one, having silently thrown the
+            // other eight away. The context menu does its own selecting, and it keeps a
+            // selection the pointer is already inside.
+            if (event.button !== 0) return
+
             const modifiers = {
               shift: event.shiftKey,
               toggle: event.ctrlKey || event.metaKey,

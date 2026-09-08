@@ -19,6 +19,7 @@ export {
   MenuItem,
   MenuSection,
   MenuSeparator,
+  MenuSwatchRow,
   type MenuItemProps,
   type MenuProps,
   type MenuSectionProps,

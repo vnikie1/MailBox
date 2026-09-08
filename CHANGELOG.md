@@ -5623,3 +5623,114 @@ alongside them.
   And there is still no spring-loaded expansion: a collapsed account or parent folder cannot be
   opened mid-drag, so the user must abort, expand, and start again. Both are real, both are
   outside these three reports.
+
+## 2026-09-08 — The right-click menus
+
+### Added
+
+- **A message context menu.** Right-clicking a message showed Edge's own menu — Reload, Save
+  as, Print, Inspect — because nothing in the app had ever answered a `contextmenu` event. A
+  `ContextMenu` component existed and was wired only into the dev gallery.
+
+  The menu follows macOS Mail's order, from the user's own screenshots: Reply, Reply All,
+  Forward, Redirect / Remind Me / Mark as Read, Move to Junk, Delete, Block Sender / the flag
+  colours / Archive, Move to… / Apply Rules. Fourteen rows against Mail's nineteen; the five
+  missing ones are in **Notes** below, with why.
+
+  Three things worth recording about how it is put together:
+
+  - **One menu around the whole list, not one per row.** The list is virtualised, so a menu per
+    row would build and tear down a floating tree on every scroll. `onOpen` resolves the row
+    from the event target, and refuses anywhere that is not a message — a date header, or the
+    space below the last row — so a menu can never open acting on a selection the pointer is
+    nowhere near.
+  - **Right-clicking inside a selection keeps it; outside it selects that row first.** What
+    every list on both platforms does, and what stops a menu quietly acting on nine messages
+    when the user meant the one under the cursor.
+  - **Every row calls the shell's existing `actions`**, the same object behind the toolbar and
+    the keyboard shortcuts, rather than reaching into IPC. A third caller would be a third
+    place for the guards to drift — the single-account rule on Move to, the single-selection
+    rule on Reply. The shortcut hints are quoted from `app/shortcuts.ts` for the same reason.
+
+- **A mailbox context menu is not in this change** — see Notes.
+
+- **`MenuSwatchRow`**, a design-system primitive: a horizontal strip of colour swatches inside a
+  menu. Mail puts the flag colours on one row under a "Flag:" label rather than in a submenu,
+  because a colour is picked by eye and seven words read slower than seven dots.
+
+  It is **one** navigable stop rather than eight. If each swatch registered itself with
+  Floating UI's list navigation, Down would step sideways through eight colours before reaching
+  Archive, which is not how a menu behaves anywhere; instead Left/Right move between swatches
+  once the group has focus, like a radio group. Focus is handed straight from the group to a
+  swatch, so what the user sees is a ring around a colour rather than around a strip with no
+  indication which cell is live. It is deliberately given no typeahead label, so pressing "r"
+  in the menu still reaches Reply rather than Red.
+
+- **Block Sender is a two-way switch.** A new `useBlockedSenders` query reads the list back, so
+  the row says "Unblock Sender" for someone already blocked. Both directions say what they did,
+  because blocking is retroactive — it files everything already here from that address as junk
+  — and unblocking is not symmetric: it stops future mail being filed and leaves what was
+  already filed where it is.
+
+- **`RemindMenu` is mounted.** It was a finished component that nothing rendered. Its `trigger`
+  is now optional so it can nest as a submenu, and "Cancel Reminder" is rendered only when
+  something is actually snoozed rather than being permanently present and disabled — a message
+  list can never contain a snoozed message, because the query filters them out.
+
+### Fixed
+
+- **A right-click collapsed a multi-selection before the menu could read it.** `MessageRow`'s
+  `onMouseDown` ran the selection logic on any button, and `mousedown` fires for button 2 as
+  well. So right-clicking nine selected messages threw eight of them away and opened a menu
+  that acted on one. Guarded to the left button. Found by a test written for the menu, and
+  confirmed by reverting the guard and watching that test fail.
+
+- **Edge's context menu no longer appears over the app.** A document-level suppressor, with
+  text fields exempted so Cut, Copy, Paste and the spelling suggestions still work in the
+  composer and the search box — those come from the browser and a page cannot rebuild them.
+
+### Notes
+
+- **Five message rows were left out, because standing rule 18 forbids a menu item that does
+  nothing.** Each is a real gap rather than an oversight:
+
+  - **Open** — there is no window that shows one stored message. The app opens three kinds of
+    second window: compose, an `.eml` file, and settings. Selecting a row already opens it in
+    the reader, which is what the item is for.
+  - **Send Again** — compose can only attach files from disk, and a stored message's
+    attachments live inside its cached `.eml`, decoded on demand. It would send, and quietly
+    drop them.
+  - **Forward as Attachment** — the cheapest of the five, perhaps 120 lines: a fourth reply
+    kind in the core, an attachments field on the reply draft, and a `message/rfc822` row in
+    the MIME table, without which it would go out as `application/octet-stream`.
+  - **Copy to** — there is no copy operation anywhere. The sync layer knows flag, move, delete
+    and append-draft. Duplicating a message row touches the uniqueness constraint, the
+    attachments, the search index, thread membership and the undo stack.
+  - **Unsubscribe** — the `List-Unsubscribe` header is never captured, and following one is a
+    request that confirms the address is live. That is the same thing remote images are blocked
+    by default for, so it is a privacy decision rather than menu wiring.
+
+- **Mute was dropped, and it is the closest call.** `mute_thread` works and does something real
+  — muted conversations stop raising notifications. But nothing can read back whether a thread
+  is muted, so the row could never show a tick, never say "Unmute", and would do the same thing
+  on every click. Worse, unlike snooze and flag it records no undo step, so Ctrl+Z after muting
+  would silently undo whatever came before it. About thirty lines fixes both, and then it ships
+  as a proper checkable toggle.
+
+- **The mailbox menu is not in this change.** Of its nine rows, two have no mechanism behind
+  them at all (New Mailbox — nothing in the app creates a folder, on the server or locally; Add
+  to Favourites — Favourites is a hard-coded list of five with nowhere to store a sixth, and
+  adding one would silently renumber Ctrl+1…9), and two more need new permanent-deletion
+  commands (Erase Deleted Items, Erase Junk Mail) in the part of the codebase that has already
+  lost mail once. Mark All Messages as Read needs a new command too: the only way to enumerate
+  a mailbox from the frontend skips snoozed messages, so a frontend-paged version would leave
+  mail unread and the badge non-zero. Splitting it out rather than half-landing it.
+
+- **The message body still shows Edge's menu.** It renders in a sandboxed frame with its own
+  document, and an event inside it never reaches the suppressor. Its menu ought to be Copy and
+  Open Link rather than either of the others, so it is left whole rather than half-done.
+
+- **No automated test can see that Edge's menu is gone.** It is drawn by the browser and is
+  invisible to Playwright. The six new e2e tests cover the half that is ours — the menu appears
+  on a row, carries eight flag targets, keeps a selection it was opened inside, selects a row it
+  was opened outside, and refuses a date header. The other half is checked by hand.
