@@ -334,3 +334,15 @@ export function visibleRows(nodes: SidebarNode[], collapsed: Set<string>): Sideb
   nodes.forEach(walk)
   return rows
 }
+
+/**
+ * Whether a row can carry the mailbox context menu.
+ *
+ * Exactly one real mailbox in a known account — the same predicate the drop targets use, and
+ * for the same reason. Every row of that menu needs either a single mailbox or a single
+ * account, and containers, unified rows, Flagged and its colours, VIPs and smart mailboxes
+ * have neither.
+ */
+export function canOpenMailboxMenu(node: SidebarNode): boolean {
+  return node.mailboxIds.length === 1 && node.accountId !== undefined
+}

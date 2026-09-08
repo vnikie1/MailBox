@@ -117,6 +117,7 @@ pub fn run() {
             ipc::mail::message_get,
             ipc::mail::thread_get,
             ipc::mail::search,
+            ipc::mail::mailbox_mark_read,
             ipc::mail::msg_set_flags,
             ipc::mail::msg_toggle_read,
             ipc::mail::msg_toggle_flag,

@@ -85,6 +85,12 @@ pub struct ReplyDraft {
     /// The account's signature, already sanitised, and where the window should put it.
     pub signature_html: String,
     pub signature_placement: String,
+    /// Files the draft starts with. Only ever populated by Forward as Attachment.
+    ///
+    /// The same shape the file picker returns, so the compose window draws the chip and sends
+    /// the file by exactly the path it already uses — nothing downstream knows the difference
+    /// between a message the user attached and one this put there.
+    pub attachments: Vec<PickedFile>,
 }
 
 /// How long a message waits in `holding` before it is transmitted.
@@ -261,6 +267,7 @@ pub async fn compose_reply(
         "reply" => reply::Kind::Reply,
         "replyAll" => reply::Kind::ReplyAll,
         "forward" => reply::Kind::Forward,
+        "forwardAsAttachment" => reply::Kind::ForwardAsAttachment,
         other => {
             return Err(AppError {
                 code: "bad-kind".into(),
@@ -294,6 +301,18 @@ pub async fn compose_reply(
     let recipients = reply::recipients(&source.envelope, kind, &mine);
     let signature = signature_for(db.inner(), source.account_id).await;
 
+    // Forward as Attachment is the only kind that carries a file, and it is the only kind that
+    // can fail for a reason the user can act on: the original has to have been downloaded.
+    let attachments = if kind == reply::Kind::ForwardAsAttachment {
+        vec![attach_original(
+            source.account_id,
+            message_id,
+            &source.envelope.subject,
+        )?]
+    } else {
+        Vec::new()
+    };
+
     Ok(ReplyDraft {
         account_id: source.account_id,
         to: recipients.to.iter().map(ComposeAddress::from).collect(),
@@ -304,7 +323,73 @@ pub async fn compose_reply(
         references: reply::references(&source.references, source.envelope.message_id.as_deref()),
         signature_html: signature.html,
         signature_placement: signature.placement,
+        attachments,
     })
+}
+
+/// Copies the cached original out to a file the compose window can attach.
+///
+/// A **copy**, into the temp directory, rather than the cache path itself. The cache is the
+/// app's own store: handing its path to the composer would mean a send reading a file the sync
+/// engine may rewrite underneath it, and a failed send holding a lock on it.
+///
+/// The name comes from the subject because the cache names files by id, and a recipient who
+/// receives `4213.eml` has no idea what it is.
+fn attach_original(
+    account_id: i64,
+    message_id: i64,
+    subject: &str,
+) -> Result<PickedFile, AppError> {
+    let root = crate::db::default_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+
+    let cached = crate::sync::bodies::cache_path(&root, account_id, message_id);
+    let bytes = std::fs::read(&cached).map_err(|_| AppError {
+        code: "not-cached".into(),
+        message: "This message has not been downloaded in full yet, so it cannot be forwarded                   as an attachment. Open it once and try again."
+            .into(),
+    })?;
+
+    let name = attachment_name(subject);
+    let path = std::env::temp_dir().join(format!("halcyon-fwd-{message_id}-{name}"));
+
+    std::fs::write(&path, &bytes).map_err(|error| AppError {
+        code: "write-failed".into(),
+        message: format!("The message could not be prepared for forwarding: {error}"),
+    })?;
+
+    Ok(PickedFile {
+        path: path.to_string_lossy().to_string(),
+        filename: name,
+        size: bytes.len() as i64,
+    })
+}
+
+/// A filename for a forwarded message, from its subject.
+///
+/// Everything Windows forbids in a name is replaced rather than removed, so two subjects that
+/// differ only in punctuation do not collapse to the same file. Trimmed to a length that
+/// leaves room for the prefix and the id within `MAX_PATH`.
+fn attachment_name(subject: &str) -> String {
+    let cleaned: String = subject
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+            c if (c as u32) < 0x20 => '-',
+            c => c,
+        })
+        .collect();
+
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    let short: String = trimmed.chars().take(80).collect();
+
+    if short.is_empty() {
+        "Forwarded message.eml".to_string()
+    } else {
+        format!("{short}.eml")
+    }
 }
 
 /// Queues a message. Returns the outbox id, which is what Undo Send cancels.
@@ -626,6 +711,9 @@ fn mime_for(filename: &str) -> String {
         "webp" => "image/webp",
         "heic" => "image/heic",
         "svg" => "image/svg+xml",
+        // Without this a forwarded message goes out as application/octet-stream and the
+        // recipient's client offers to save it rather than to open it.
+        "eml" => "message/rfc822",
         "txt" | "log" | "md" => "text/plain",
         "csv" => "text/csv",
         "json" => "application/json",
@@ -645,7 +733,9 @@ fn mime_for(filename: &str) -> String {
 }
 
 /// One file the user picked, described for the compose window.
-#[derive(Debug, Clone, Serialize, TS)]
+// Deserialize as well as Serialize: it now travels *into* the window on a ReplyDraft as
+// well as back out of the file picker.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
 pub struct PickedFile {
@@ -872,6 +962,8 @@ pub async fn compose_blank(db: State<'_, Db>, account_id: i64) -> Result<ReplyDr
         references: Vec::new(),
         signature_html: signature.html,
         signature_placement: signature.placement,
+        // A new message starts empty; only Forward as Attachment puts a file on a draft.
+        attachments: Vec::new(),
     })
 }
 

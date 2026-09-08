@@ -173,6 +173,10 @@ export function ComposeWindow() {
         setSubject(draft.subject)
         setQuoted(bodyWithSignature(draft))
         setThreading({ inReplyTo: draft.inReplyTo, references: draft.references })
+        // Forward as Attachment is the only kind that arrives with a file already on it. The
+        // core has already written the copy to disk and named it from the subject, so from
+        // here it is indistinguishable from one the user picked.
+        setAttachments(draft.attachments)
         return
       }
 

@@ -2,11 +2,13 @@ import {
   AlarmClock,
   Archive,
   Ban,
+  BellOff,
   CircleSlash,
   CornerUpLeft,
   FolderInput,
   Forward,
   MailOpen,
+  Paperclip,
   Reply,
   ShieldAlert,
   Trash2,
@@ -30,8 +32,6 @@ import { MenuItem, MenuSeparator, MenuSwatchRow } from '@/ui'
  *    second window (compose, an `.eml` file, settings) and none of them is a reader.
  *  - **Send Again** — compose can only attach files from disk, and a stored message's
  *    attachments live inside its cached `.eml`. It would send, and quietly drop them.
- *  - **Forward as Attachment** — needs a fourth reply kind in the core and a `message/rfc822`
- *    row in the MIME table. Genuinely small; simply not written yet.
  *  - **Copy to** — there is no copy operation anywhere. The sync layer knows flag, move,
  *    delete and append-draft, and duplicating a message row touches the search index, the
  *    thread, the attachments and the undo stack.
@@ -61,8 +61,10 @@ export interface MessageMenuActions {
   reply: () => void
   replyAll: () => void
   forward: () => void
+  forwardAsAttachment: () => void
   redirect: () => void
   toggleRead: () => void
+  mute: (muted: boolean) => void
   markJunk: () => void
   delete: () => void
   archive: () => void
@@ -87,6 +89,10 @@ export function MessageContextMenu({ rows, flagNames, blocked, actions }: Messag
   // no tick rather than claiming a colour none of them share.
   const first = rows[0]?.flagColor ?? null
   const sharedFlag = rows.every((row) => (row.flagColor ?? null) === first) ? first : undefined
+
+  // Every one of them, not any: with a mixed selection the useful verb is the one that makes
+  // them agree, and that is Mute.
+  const allMuted = rows.length > 0 && rows.every((row) => row.muted)
 
   const sender = only?.fromAddr ?? null
   const isBlocked = sender !== null && blocked.has(sender.toLowerCase())
@@ -113,6 +119,14 @@ export function MessageContextMenu({ rows, flagNames, blocked, actions }: Messag
         shortcut="Ctrl+Shift+F"
         disabled={only === undefined}
         onClick={actions.forward}
+      />
+      {/* The original itself, rather than a rendering of it. A quoted forward keeps the text
+          and loses the headers, the attachments, and anything the sanitiser dropped. */}
+      <MenuItem
+        label="Forward as Attachment"
+        icon={Paperclip}
+        disabled={only === undefined}
+        onClick={actions.forwardAsAttachment}
       />
       <MenuItem
         label="Redirect"
@@ -142,6 +156,17 @@ export function MessageContextMenu({ rows, flagNames, blocked, actions }: Messag
         icon={ShieldAlert}
         shortcut="Ctrl+J"
         onClick={actions.markJunk}
+      />
+      {/* A real toggle now: the row carries its thread's muted flag, so this shows a tick and
+          says the opposite thing when the conversation is already muted. It was left out of
+          the first version of this menu precisely because it could do neither. */}
+      <MenuItem
+        label={allMuted ? 'Unmute' : 'Mute'}
+        icon={BellOff}
+        checked={allMuted}
+        onClick={() => {
+          actions.mute(!allMuted)
+        }}
       />
       <MenuItem
         label="Delete"

@@ -483,6 +483,18 @@ export interface SyncActivity {
  * fake one would be a command that returns a plausible shape and does nothing — standing
  * rule 18. The browser store's mail is generated, not synced, and says so.
  */
+/**
+ * Marks everything unread in one mailbox as read. Returns how many changed.
+ *
+ * A command rather than a loop over `messagesPage`, because that query hides snoozed mail —
+ * so a version driven from here would leave those messages unread and the badge non-zero, on
+ * the one action whose whole promise is that the count goes to nought.
+ */
+export async function mailboxMarkRead(mailboxId: number): Promise<number> {
+  if (!runningInTauri) return 0
+  return invoke<number>('mailbox_mark_read', { mailboxId })
+}
+
 export async function syncNow(accountId: number): Promise<void> {
   if (!runningInTauri) return
   await invoke('sync_now', { accountId })

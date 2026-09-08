@@ -23,6 +23,13 @@ pub enum Kind {
     ReplyAll,
     /// To nobody yet; the user chooses.
     Forward,
+    /// The same, but carrying the original as a `.eml` file rather than quoting it inline.
+    ///
+    /// Not cosmetic. A quoted forward is a *rendering* of the original — the quote block keeps
+    /// the text and loses the headers, the attachments and anything the sanitiser dropped. As
+    /// an attachment the recipient gets the message itself, which is what someone forwarding a
+    /// receipt, a bounce or something they want examined actually means.
+    ForwardAsAttachment,
     /// Passed on **unaltered** to someone else, as if they had been on it originally.
     ///
     /// Not a forward. A forward is a new message from the user that quotes the original; a
@@ -158,7 +165,7 @@ pub fn subject(original: &str, kind: Kind) -> String {
     let trimmed = original.trim();
     let prefix = match kind {
         Kind::Reply | Kind::ReplyAll => "Re: ",
-        Kind::Forward => "Fwd: ",
+        Kind::Forward | Kind::ForwardAsAttachment => "Fwd: ",
         // Deliberately none. A redirect is the original message, and rewriting its subject
         // would be the one visible sign that it had been tampered with.
         Kind::Redirect => return trimmed.to_string(),
@@ -169,7 +176,9 @@ pub fn subject(original: &str, kind: Kind) -> String {
         let lowered = trimmed.to_ascii_lowercase();
         match kind {
             Kind::Reply | Kind::ReplyAll => lowered.starts_with("re:"),
-            Kind::Forward => lowered.starts_with("fwd:") || lowered.starts_with("fw:"),
+            Kind::Forward | Kind::ForwardAsAttachment => {
+                lowered.starts_with("fwd:") || lowered.starts_with("fw:")
+            }
             Kind::Redirect => true,
         }
     };

@@ -568,14 +568,51 @@ pub async fn unsnooze(
 pub async fn mute_thread(
     app: AppHandle,
     db: State<'_, Db>,
-    thread_id: i64,
+    stack: State<'_, Arc<Stack>>,
+    ids: Vec<i64>,
     muted: bool,
-) -> Response<()> {
-    db.write(move |tx| vip::mute_thread(tx, thread_id, muted))
+) -> Response<usize> {
+    let affected = ids.clone();
+    let label = if muted { "Mute" } else { "Unmute" };
+
+    let (changed, step) = db
+        .write(move |tx| {
+            // Captured, where it was not before. `Field::Muted` and its restore were both
+            // written and neither was ever called, so muting recorded no step at all — and an
+            // undo stack with a hole in it is worse than no undo: Ctrl+Z after muting silently
+            // undid whatever the user did *before* it.
+            let step = undo::capture(tx, label, &affected, &[Field::Muted])?;
+            let mut changed = 0;
+
+            // By message rather than by thread, because that is what a selection is and what
+            // every other bulk command here takes. Threads repeat across a selection, so the
+            // same one is simply written twice; the value is idempotent.
+            for &id in &affected {
+                let thread_id: Option<i64> = tx
+                    .query_row(
+                        "SELECT thread_id FROM message WHERE id = ?1",
+                        rusqlite::params![id],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(None);
+
+                let Some(thread_id) = thread_id else {
+                    continue;
+                };
+
+                changed += tx.execute(
+                    "UPDATE thread SET muted = ?2 WHERE id = ?1",
+                    rusqlite::params![thread_id, i64::from(muted)],
+                )?;
+            }
+
+            Ok((changed, step))
+        })
         .await?;
 
+    stack.record(step);
     announce(&app, "mailbox:changed");
-    Ok(())
+    Ok(changed)
 }
 
 /// Refreshes the Follow Up marks. Cheap enough to run on every sync.

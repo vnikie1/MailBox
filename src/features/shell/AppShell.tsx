@@ -18,7 +18,17 @@ import {
   useVips,
 } from '@/app/queries'
 import { MessageContextMenu } from '@/features/messageList/MessageContextMenu'
-import { blockSender, flagSet, unblockSender } from '@/lib/organise'
+import { MailboxContextMenu } from '@/features/sidebar/MailboxContextMenu'
+import { AccountInfoSheet } from '@/features/sidebar/AccountInfoSheet'
+import { useAccountsDetail } from '@/features/accounts/queries'
+import {
+  exportPickFolder,
+  exportRun,
+  mailboxMarkRead,
+  onTransferProgress,
+  syncNow,
+} from '@/lib/ipc'
+import { blockSender, flagSet, muteThread, unblockSender } from '@/lib/organise'
 import { useMailStore } from '@/store/mail'
 import { Button, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
@@ -92,6 +102,7 @@ export function AppShell() {
   const { data: smart = [] } = useSmartMailboxes()
   const { data: flagNames = [] } = useFlagNames()
   const { data: blockedSenders = new Set<string>() } = useBlockedSenders()
+  const { data: accountDetails = [] } = useAccountsDetail()
   const { data: vips = [] } = useVips()
   const move = useMoveMessages()
   const remove = useDeleteMessages()
@@ -197,6 +208,73 @@ export function AppShell() {
     return mailboxes.filter((mailbox) => mailbox.accountId === account)
   }, [mailboxes, selectedAccountIds])
 
+  const [accountInfoFor, setAccountInfoFor] = useState<number | null>(null)
+
+  /**
+   * What the mailbox right-click menu does. Separate from `actions` because none of it is on
+   * the toolbar or a shortcut: these are the five rows of that menu and nothing else calls them.
+   */
+  const mailboxActions = useMemo(
+    () => ({
+      exportMailbox: (mailboxId: number, label: string) => {
+        void (async () => {
+          const directory = await exportPickFolder()
+          if (directory === null) return
+
+          // Export returns as soon as the work is *scheduled*, so without listening for the
+          // finish this row would appear to do nothing at all. The Settings pane has its own
+          // listener; this one is for the times the export was started from here.
+          // `finished` is the completion signal — `done` is a running count, not a flag, and
+          // treating it as one would have fired the toast on the first message.
+          let stop: (() => void) | null = null
+          stop = await onTransferProgress((progress) => {
+            const result = progress.finished
+            if (result === null) return
+
+            toast.show({
+              title:
+                result.error === null ? `Exported “${label}”` : `“${label}” could not be exported`,
+              description:
+                result.error ?? `${String(result.messages)} messages written to ${directory}.`,
+            })
+
+            // Unsubscribed here rather than on unmount: this listener exists for one export and
+            // would otherwise fire again for every later transfer, imports included.
+            stop?.()
+          })
+
+          await exportRun([mailboxId], 'mbox', directory)
+        })().catch(failed('That mailbox could not be exported'))
+      },
+
+      markAllRead: (mailboxId: number) => {
+        void mailboxMarkRead(mailboxId)
+          .then((changed) => {
+            toast.show({
+              title:
+                changed === 0 ? 'Nothing was unread' : `Marked ${String(changed)} messages as read`,
+            })
+          })
+          .catch(failed('Those messages could not be marked as read'))
+      },
+
+      synchronise: (accountId: number) => {
+        void syncNow(accountId).catch(failed('That account could not be synchronised'))
+      },
+
+      // The pane, not the account: `settings_open` takes only a pane name and there is no
+      // channel to say which account. Exact with one account, one click away with several.
+      editAccount: () => {
+        openSettings()
+      },
+
+      accountInfo: (accountId: number) => {
+        setAccountInfoFor(accountId)
+      },
+    }),
+    [toast, failed, openSettings],
+  )
+
   const actions = {
     newMessage: useCallback(() => {
       // `composeOpen` opens the window. `composeBlank` -- which this called until now --
@@ -214,6 +292,14 @@ export function AppShell() {
     }, [only, failed]),
     forward: useCallback(() => {
       if (only !== undefined) void composeOpen(only, 'forward').catch(failed('Forward failed'))
+    }, [only, failed]),
+
+    // The original as a file rather than a quote. It can fail for a reason the user can act
+    // on — the message has to have been downloaded in full — and the core says so in words.
+    forwardAsAttachment: useCallback(() => {
+      if (only !== undefined) {
+        void composeOpen(only, 'forwardAsAttachment').catch(failed('Forward failed'))
+      }
     }, [only, failed]),
 
     // Each message goes to its *own* account's Archive, resolved in the core. "All Inboxes"
@@ -278,6 +364,24 @@ export function AppShell() {
         void flagSet(selectedMessageIds, colour).catch(failed('The flag could not be set'))
       },
       [selectedMessageIds, failed],
+    ),
+
+    mute: useCallback(
+      (muted: boolean) => {
+        void muteThread(selectedMessageIds, muted)
+          .then(() => {
+            // Said out loud because muting is invisible otherwise: nothing about the row
+            // changes, and the effect — no notifications — only shows up by not happening.
+            toast.show({
+              title: muted ? 'Conversation muted' : 'Conversation unmuted',
+              description: muted
+                ? 'Replies still arrive, but will not notify you.'
+                : 'Replies will notify you again.',
+            })
+          })
+          .catch(failed('That conversation could not be muted'))
+      },
+      [selectedMessageIds, toast, failed],
     ),
 
     blockSender: useCallback(
@@ -449,7 +553,21 @@ export function AppShell() {
               className={styles.sidebarPane}
               style={breakpoint === 'one' ? undefined : { width: `${String(sidebarWidth)}px` }}
             >
-              <Sidebar onOpenSettings={openSettings} />
+              <Sidebar
+                onOpenSettings={openSettings}
+                contextMenu={(node) => {
+                  const account = accountDetails.find((each) => each.id === node.accountId)
+
+                  return (
+                    <MailboxContextMenu
+                      node={node}
+                      accountName={account?.displayName ?? 'this account'}
+                      syncEnabled={account?.syncEnabled ?? false}
+                      actions={mailboxActions}
+                    />
+                  )
+                }}
+              />
             </div>
             {breakpoint === 'three' && (
               <PaneDivider
@@ -541,6 +659,14 @@ export function AppShell() {
           subject={selectedMessage?.subject ?? ''}
         />
       )}
+
+      <AccountInfoSheet
+        open={accountInfoFor !== null}
+        onOpenChange={(open) => {
+          if (!open) setAccountInfoFor(null)
+        }}
+        account={accountDetails.find((each) => each.id === accountInfoFor)}
+      />
 
       <MailboxPicker
         open={movingTo}

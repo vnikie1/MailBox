@@ -81,6 +81,8 @@ pub struct MessageRow {
     pub flagged: bool,
     pub flag_color: Option<String>,
     pub has_attachment: bool,
+    /// Whether the conversation this belongs to is muted. From `thread`, not `message`.
+    pub muted: bool,
 }
 
 /// A message with its body and recipients, for the reader.

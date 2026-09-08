@@ -96,6 +96,28 @@ const MESSAGE_ROW_COLUMNS: &str = "id, thread_id, mailbox_id, account_id, subjec
      from_addr, date_received, preview, size, flag_seen, flag_answered, flag_flagged, \
      flag_color, has_attachment";
 
+/// Whether the row's conversation is muted.
+///
+/// On the **thread**, not the message, so it is the one part of a row that needs a join. It is
+/// carried on every row because the context menu has to say "Mute" or "Unmute" and show
+/// whether the tick is set — without it the row could only ever offer one direction and do the
+/// same thing on every click, which standing rule 18 rules out.
+///
+/// `COALESCE` over a LEFT join, because a message need not belong to a thread: threading runs
+/// after the message lands, and one that arrives in between has a NULL `thread_id`.
+const MUTED_COLUMN: &str = "COALESCE(thread.muted, 0)";
+
+/// The join `MUTED_COLUMN` needs.
+///
+/// It also forces every other column to be qualified: `thread` carries an `account_id` of its
+/// own, so a bare `account_id` in a query joined to it is ambiguous and SQLite refuses it.
+const THREAD_JOIN: &str = "LEFT JOIN thread ON thread.id = message.thread_id";
+
+/// Every column of a list row, qualified, with the muted flag last.
+fn row_columns() -> String {
+    format!("{}, {MUTED_COLUMN}", qualified(MESSAGE_ROW_COLUMNS))
+}
+
 fn message_row(row: &Row<'_>) -> rusqlite::Result<MessageRow> {
     Ok(MessageRow {
         id: row.get(0)?,
@@ -113,6 +135,7 @@ fn message_row(row: &Row<'_>) -> rusqlite::Result<MessageRow> {
         flagged: row.get::<_, i64>(12)? != 0,
         flag_color: row.get(13)?,
         has_attachment: row.get::<_, i64>(14)? != 0,
+        muted: row.get::<_, i64>(15)? != 0,
     })
 }
 
@@ -140,13 +163,15 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
 
     let in_list = placeholders(query.mailbox_ids.len(), 1);
     let mut sql = format!(
-        "SELECT {MESSAGE_ROW_COLUMNS}
+        "SELECT {}
            FROM message
-          WHERE mailbox_id IN ({in_list})"
+           {THREAD_JOIN}
+          WHERE message.mailbox_id IN ({in_list})",
+        row_columns()
     );
 
     if query.unread_only {
-        sql.push_str(" AND flag_seen = 0");
+        sql.push_str(" AND message.flag_seen = 0");
     }
 
     // Snoozed mail is hidden until it comes due. Without this the whole of Remind Me is a
@@ -160,7 +185,7 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
     // fetch, which is what invalidation already triggers.
     params.push(Box::new(now_seconds()));
     sql.push_str(&format!(
-        " AND (snooze_until IS NULL OR snooze_until <= ?{})",
+        " AND (message.snooze_until IS NULL OR message.snooze_until <= ?{})",
         params.len()
     ));
 
@@ -168,7 +193,7 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
         let date_index = params.len() + 1;
         let id_index = params.len() + 2;
         sql.push_str(&format!(
-            " AND (date_received, id) < (?{date_index}, ?{id_index})"
+            " AND (message.date_received, message.id) < (?{date_index}, ?{id_index})"
         ));
         params.push(Box::new(cursor.date_received));
         params.push(Box::new(cursor.id));
@@ -176,7 +201,7 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
 
     let limit_index = params.len() + 1;
     sql.push_str(&format!(
-        " ORDER BY date_received DESC, id DESC LIMIT ?{limit_index}"
+        " ORDER BY message.date_received DESC, message.id DESC LIMIT ?{limit_index}"
     ));
     // Ask for one more than needed; its presence is the "there is more" signal.
     params.push(Box::new(i64::from(query.limit) + 1));
@@ -447,12 +472,9 @@ pub fn search(conn: &Connection, query: &SearchQuery) -> Result<Vec<MessageRow>,
         "SELECT {}
            FROM message_fts
            JOIN message ON message.id = message_fts.rowid
+           {THREAD_JOIN}
           WHERE message_fts MATCH ?1",
-        MESSAGE_ROW_COLUMNS
-            .split(", ")
-            .map(|column| format!("message.{column}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        row_columns()
     );
 
     if !query.mailbox_ids.is_empty() {
@@ -676,11 +698,12 @@ pub fn messages_matching(
         "SELECT {}
            FROM message
            JOIN mailbox ON mailbox.id = message.mailbox_id
+           {THREAD_JOIN}
           WHERE ({})
             AND (message.snooze_until IS NULL OR message.snooze_until <= ?{})
           ORDER BY message.date_received DESC, message.id DESC
           LIMIT ?{} OFFSET ?{}",
-        qualified(MESSAGE_ROW_COLUMNS),
+        row_columns(),
         compiled.sql,
         compiled.params.len() + 1,
         compiled.params.len() + 2,

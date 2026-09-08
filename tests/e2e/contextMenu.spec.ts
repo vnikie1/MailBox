@@ -109,3 +109,78 @@ test.describe('the message context menu', () => {
     ).toBeVisible()
   })
 })
+
+test.describe('the mailbox context menu', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/')
+    await expect(page.getByRole('tree', { name: 'Mailboxes' })).toBeVisible()
+  })
+
+  function mailboxMenu(page: Page) {
+    return page.getByRole('menu', { name: 'Mailbox actions' })
+  }
+
+  function folderRow(page: Page, account: string, mailbox: string) {
+    return page
+      .getByRole('group', { name: account })
+      .getByRole('treeitem')
+      .filter({ has: page.getByText(mailbox, { exact: true }) })
+      .first()
+  }
+
+  test('opens on a real mailbox', async ({ page }) => {
+    await folderRow(page, 'Northgate', 'Clients').click({ button: 'right' })
+
+    await expect(mailboxMenu(page)).toBeVisible()
+    await expect(mailboxMenu(page).getByRole('menuitem', { name: 'Export Mailbox…' })).toBeVisible()
+    await expect(
+      mailboxMenu(page).getByRole('menuitem', { name: 'Get Account Info' }),
+    ).toBeVisible()
+  })
+
+  test('names the account in the rows that act on it', async ({ page }) => {
+    // Quoted the way Mail writes it, so a menu opened on the wrong account is obvious before
+    // anything happens rather than after.
+    await folderRow(page, 'Northgate', 'Clients').click({ button: 'right' })
+
+    await expect(mailboxMenu(page).getByRole('menuitem', { name: /^Synchronise/ })).toBeVisible()
+    await expect(mailboxMenu(page).getByRole('menuitem', { name: /^Edit/ })).toBeVisible()
+  })
+
+  test('refuses a row that is not one real mailbox', async ({ page }) => {
+    // "All Inboxes" spans accounts, so every row of this menu would have to pick one. Better
+    // to open nothing than to open a menu that acts on an account the user did not name.
+    await page
+      .getByRole('treeitem')
+      .filter({ has: page.getByText('All Inboxes', { exact: true }) })
+      .first()
+      .click({ button: 'right' })
+
+    await expect(mailboxMenu(page)).toBeHidden()
+  })
+
+  test('does not change which mailbox is open', async ({ page }) => {
+    // Unlike the message list, a right-click here must not select: loading a mailbox is real
+    // work and a visible change, far too much to do on the way to a menu that may be closed.
+    const heading = page.getByRole('heading', { level: 1 })
+    const before = await heading.textContent()
+
+    await folderRow(page, 'Northgate', 'Travel').click({ button: 'right' })
+    await expect(mailboxMenu(page)).toBeVisible()
+
+    await expect(heading).toHaveText(before ?? '')
+  })
+
+  test('shows the account information sheet', async ({ page }) => {
+    await folderRow(page, 'Northgate', 'Clients').click({ button: 'right' })
+    await mailboxMenu(page).getByRole('menuitem', { name: 'Get Account Info' }).click()
+
+    const sheet = page.getByRole('dialog', { name: 'Account Information' })
+    await expect(sheet).toBeVisible()
+
+    // Only what the app actually knows. No quota row: there is no IMAP QUOTA support and
+    // nothing sums message sizes, so drawing one would be a claim it cannot back.
+    await expect(sheet.getByText('Incoming (IMAP)')).toBeVisible()
+    await expect(sheet.getByText('Quota')).toHaveCount(0)
+  })
+})

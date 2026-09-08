@@ -5734,3 +5734,111 @@ alongside them.
   invisible to Playwright. The six new e2e tests cover the half that is ours — the menu appears
   on a row, carries eight flag targets, keeps a selection it was opened inside, selects a row it
   was opened outside, and refuses a date header. The other half is checked by hand.
+
+## 2026-09-08 — The mailbox menu, and the three things the message menu could not do
+
+### Added
+
+- **A mailbox context menu**, five rows: Export Mailbox…, Mark All Messages as Read,
+  Synchronise "_account_", Edit "_account_"…, Get Account Info. The account name is quoted the
+  way Mail writes it, so a menu opened on the wrong account is obvious before anything happens
+  rather than after.
+
+  It appears only on a row backed by **exactly one real mailbox in a known account** — the same
+  predicate the drop targets already use. All Inboxes, All Drafts, All Sent, Flagged and its
+  colours, VIPs and the smart mailboxes get no menu, because every row of it needs either a
+  single mailbox or a single account and none of those rows has either.
+
+  Unlike the message list, a right-click here does **not** select the row. Loading a mailbox is
+  real work and a visible change — far too much to do on the way to a menu the user may close
+  again. Every item names its own mailbox, so nothing needs the selection to agree with it.
+
+- **`mailbox_mark_read`**, a new command, because the honest version could not be built in the
+  window. `messages_page` deliberately hides snoozed mail — that is the whole of Remind Me — so
+  a frontend that paged a mailbox and marked what it saw would leave every snoozed message
+  unread and the badge non-zero, on the one action whose entire promise is that the count goes
+  to nought.
+
+  It gathers ids rather than issuing a blanket `UPDATE … WHERE flag_seen = 0`, which would be
+  faster and would take Ctrl+Z away from the operation most likely to need it: undo captures
+  prior state per message, and the server has to be told per UID. On a mailbox with thousands
+  unread this will feel slower than a blanket update. That is the trade, made deliberately.
+
+- **Forward as Attachment.** A fourth reply kind, and worth the distinction: a quoted forward
+  is a _rendering_ of the original — it keeps the text and loses the headers, the attachments,
+  and anything the sanitiser dropped. As an attachment the recipient gets the message itself,
+  which is what someone forwarding a receipt or a bounce actually means.
+
+  Three details that would each have been a defect on their own. `message/rfc822` was added to
+  the MIME table, without which it would have gone out as `application/octet-stream` and the
+  recipient's client would have offered to save it rather than open it. The file is named from
+  the subject, because the cache names files by id and nobody knows what `4213.eml` is. And it
+  is a **copy** into the temp directory rather than the cache path itself — handing the
+  composer the app's own store would mean a send reading a file the sync engine may rewrite
+  underneath it.
+
+- **Get Account Info**, a sheet showing what the app actually knows: name, address, provider,
+  sign-in method, both servers with their ports and security, sync state, and whether a
+  credential is stored. No quota bar and no mailbox size, because there is no IMAP `QUOTA`
+  support in the core and nothing sums `message.size` — an empty quota bar is a claim the app
+  cannot back.
+
+### Fixed
+
+- **Mute recorded no undo step, and could not say what it had done.** Both halves are fixed,
+  and the second is what made the first matter.
+
+  `Field::Muted` and its restore were **both already written** in `undo.rs` and neither was
+  ever called. So muting pushed nothing onto the stack, and Ctrl+Z after muting silently undid
+  whatever the user had done _before_ it — an undo stack with a hole in it is worse than no
+  undo at all. `mute_thread` now captures, like every other mutating command, which the
+  `undo_coverage` test gate now enforces for it.
+
+  And the row now carries its thread's `muted` flag, so the menu shows a tick and says
+  "Unmute". Without that it could only ever offer one direction and do the same thing on every
+  click — which is why it was left out of the first version of this menu rather than shipped
+  half-working.
+
+  The command also takes message ids now rather than a thread id, matching every other bulk
+  action, so it works on a selection.
+
+### Changed
+
+- **`MESSAGE_ROW_COLUMNS` is joined to `thread`** to carry `muted`. Three call sites needed it,
+  and two of them qualify the column list by splitting on commas — so the expression could not
+  live in the constant, which is why there is a `row_columns()` helper and a `THREAD_JOIN`
+  beside it.
+
+  The join also made every bare column in the listing query ambiguous, because `thread` has an
+  `account_id` of its own and SQLite refuses rather than guessing. Six existing tests caught
+  that immediately, which is the case for having them.
+
+### Notes
+
+- **Four mailbox rows are still absent, and each is a real gap.** New Mailbox… — nothing in the
+  app creates a folder, on the server or locally, and it cannot be half-built because Mail puts
+  Rename and Delete in the same menu. Add to Favourites — Favourites is a fixed list of five
+  with nowhere to store a sixth, and adding one would silently renumber Ctrl+1…9 and make the
+  shortcuts sheet wrong. Erase Deleted Items… and Erase Junk Mail… — permanent, undoable by
+  design, and each needs a command of its own for the same snoozed-mail reason as Mark All as
+  Read.
+
+- **Edit "_account_"… opens the Accounts pane but cannot select that account.** `settings_open`
+  takes only a pane name, validated as ASCII lowercase, and there is no channel to say which
+  account. With one account it is exact; with three the user lands one click away. Shipped
+  rather than dropped because it does what it says. The upgrade is an `account: Option<i64>` on
+  `settings_open` plus a `settings:account` event.
+
+- **Export Mailbox… had to grow a listener.** `export_run` returns as soon as the work is
+  _scheduled_, and the only existing listener is the Settings Transfer pane — so without one
+  here the row would have appeared to do nothing at all. It reports on `finished`, not on
+  `done`, which is a running count rather than a flag; treating it as one would have fired the
+  toast on the first message.
+
+- **Two rows remain out of the message menu**: Send Again, and Copy to. Send Again would send
+  and quietly drop the attachments, because compose can only attach files from disk and a
+  stored message's live inside its cached `.eml` — the same obstacle Forward as Attachment
+  works around by extracting a copy first, but doing it per attachment rather than once for the
+  whole message. Copy to has no operation behind it at all: the sync layer knows flag, move,
+  delete and append-draft, and duplicating a message row touches the uniqueness constraint, the
+  attachments, the search index, thread membership and the undo stack.

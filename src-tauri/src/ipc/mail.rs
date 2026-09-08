@@ -496,6 +496,71 @@ pub async fn msg_set_flags(
     Ok(changed)
 }
 
+/// Marks everything unread in one mailbox as read.
+///
+/// ## Why this is a command rather than a loop in the frontend
+///
+/// The window cannot enumerate a mailbox honestly. `messages_page` deliberately hides snoozed
+/// mail — that is the whole of Remind Me — so a frontend that paged the mailbox and marked what
+/// it saw would leave every snoozed message unread, and the unread badge non-zero, on the one
+/// action whose entire promise is that the count goes to nought.
+///
+/// The ids are still gathered rather than a blanket `UPDATE ... WHERE flag_seen = 0`, because
+/// undo captures prior state per message and the server has to be told per UID. A blanket
+/// update would be faster and would take Ctrl+Z away from the operation most likely to need it.
+#[tauri::command]
+pub async fn mailbox_mark_read(
+    app: AppHandle,
+    db: State<'_, Db>,
+    stack: State<'_, std::sync::Arc<crate::undo::Stack>>,
+    mailbox_id: i64,
+) -> Response<usize> {
+    let (changed, mailboxes, step, ids) = db
+        .write(move |tx| {
+            // No snooze filter here, unlike the list query. "Mark all as read" means all.
+            let ids: Vec<i64> = {
+                let mut statement =
+                    tx.prepare("SELECT id FROM message WHERE mailbox_id = ?1 AND flag_seen = 0")?;
+                let rows = statement
+                    .query_map(rusqlite::params![mailbox_id], |row| row.get(0))?
+                    .collect::<rusqlite::Result<Vec<i64>>>()?;
+                rows
+            };
+
+            // No early return for the empty case: capture over no ids yields a step with no
+            // priors, the ops loop finds no groups, and set_flags changes nothing. One path.
+            let step =
+                crate::undo::capture(tx, "Mark All as Read", &ids, &[crate::undo::Field::Seen])?;
+
+            for group in ops::locate(tx, &ids)? {
+                ops::enqueue(
+                    tx,
+                    group.account_id,
+                    &ops::Op::Flag {
+                        mailbox: group.mailbox,
+                        uids: group.uids,
+                        seen: Some(true),
+                        flagged: None,
+                    },
+                )?;
+            }
+
+            let patch = FlagPatch {
+                seen: Some(true),
+                flagged: None,
+            };
+            let changed = write::set_flags(tx, &ids, patch)?;
+            let mailboxes = write::mailboxes_of(tx, &ids)?;
+
+            Ok((changed, mailboxes, step, ids))
+        })
+        .await?;
+
+    stack.record(step);
+    announce(&app, &db, mailboxes, &ids);
+    Ok(changed)
+}
+
 /// Recorded on the undo stack, for the same reason archive is — see `msg_archive`. Moving mail
 /// to the wrong folder is the mistake undo exists for.
 ///

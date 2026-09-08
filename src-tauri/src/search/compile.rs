@@ -80,7 +80,14 @@ fn escape_like(value: &str) -> String {
 const COLUMNS: &str = "message.id, message.thread_id, message.mailbox_id, message.account_id, \
      message.subject, message.from_name, message.from_addr, message.date_received, \
      message.preview, message.size, message.flag_seen, message.flag_answered, \
-     message.flag_flagged, message.flag_color, message.has_attachment";
+     message.flag_flagged, message.flag_color, message.has_attachment,      COALESCE(thread.muted, 0)";
+
+/// The join the muted column needs.
+///
+/// Unconditional, unlike the mailbox join above: muted is on every row, so there is no query
+/// shape that can skip it. It is a LEFT join on a primary key, which is the cheapest join
+/// there is — and a message with no thread yet must not vanish from search because of it.
+const THREAD_JOIN: &str = " LEFT JOIN thread ON thread.id = message.thread_id";
 
 /// Compiles a query into a statement returning message rows, most relevant first.
 ///
@@ -105,13 +112,13 @@ pub fn compile(query: &Query, scope: &[i64], limit: u32, now: i64) -> Compiled {
         format!(
             "SELECT {COLUMNS}, bm25(message_fts) AS relevance
                FROM message_fts
-               JOIN message ON message.id = message_fts.rowid{mailbox_join}
+               JOIN message ON message.id = message_fts.rowid{mailbox_join}{THREAD_JOIN}
               WHERE message_fts MATCH ?1"
         )
     } else {
         format!(
             "SELECT {COLUMNS}, 0.0 AS relevance
-               FROM message{mailbox_join}
+               FROM message{mailbox_join}{THREAD_JOIN}
               WHERE 1 = 1"
         )
     };

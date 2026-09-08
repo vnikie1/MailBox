@@ -1,0 +1,32 @@
+/* A definition list rather than a table: these are label/value pairs, not a grid, and a
+ * <dl> says so to a screen reader without any ARIA. */
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  margin: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: var(--account-info-label) 1fr;
+  gap: var(--sp-4);
+  align-items: baseline;
+}
+
+.label {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+}
+
+/* Selectable, and allowed to wrap: a server name or an "sign in again" line is exactly the
+ * kind of thing that gets copied into a support message. */
+.value {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--label-1);
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  user-select: text;
+}

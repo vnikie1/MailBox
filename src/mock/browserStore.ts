@@ -276,6 +276,9 @@ function toRow(message: StoredMessage): MessageRow {
     flagged: message.flagged,
     flagColor: message.flagColor,
     hasAttachment: message.hasAttachment,
+    // The browser build has no threads table, so nothing here is ever muted. Stated rather
+    // than omitted: the field is part of a row, and a mock that lacks it drifts from the type.
+    muted: false,
   }
 }
 

@@ -1,4 +1,12 @@
-import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react'
+import {
+  useCallback,
+  useMemo,
+  useState,
+  type DragEvent,
+  type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from 'react'
 import { AlertTriangle, ChevronRight, PanelLeft, Settings } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
@@ -13,12 +21,18 @@ import {
   useVips,
 } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
-import { Badge, Button, EmptyState, IconButton, ScrollArea, Tooltip } from '@/ui'
+import { Badge, Button, ContextMenu, EmptyState, IconButton, ScrollArea, Tooltip } from '@/ui'
 
 import { useSyncState } from '@/app/useSync'
 
 import { SyncStatus } from './SyncStatus'
-import { buildSidebar, selectionForNode, visibleRows, type SidebarNode } from './model'
+import {
+  buildSidebar,
+  canOpenMailboxMenu,
+  selectionForNode,
+  visibleRows,
+  type SidebarNode,
+} from './model'
 
 import styles from './Sidebar.module.css'
 
@@ -132,6 +146,9 @@ function SidebarRow({
       aria-level={node.depth + 1}
       tabIndex={selected ? 0 : -1}
       className={cx(styles.row, selected && styles.selected, dropTarget && styles.dropTarget)}
+      // Read by the tree's context menu, which is mounted once around every row rather than
+      // once per row and so has only the event target to work out what was clicked.
+      data-node-id={node.id}
       style={{
         paddingLeft: `calc(var(--sidebar-row-pad-x) + ${String(node.depth)} * var(--sp-8))`,
       }}
@@ -245,9 +262,16 @@ function SidebarRow({
 export interface SidebarProps {
   /** Opens Settings. Optional so the component gallery can render the sidebar alone. */
   onOpenSettings?: (() => void) | undefined
+  /**
+   * The right-click menu, built from the row it will act on.
+   *
+   * A render function for the same reason the message list takes one: only the sidebar knows
+   * which row was clicked, and only the shell knows what the actions are.
+   */
+  contextMenu?: ((node: SidebarNode) => ReactNode) | undefined
 }
 
-export function Sidebar({ onOpenSettings }: SidebarProps) {
+export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
   const accountsQuery = useAccounts()
   const mailboxesQuery = useMailboxes()
 
@@ -263,6 +287,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const moveMessages = useMoveMessages()
 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
+  const [menuNode, setMenuNode] = useState<SidebarNode | null>(null)
 
   // Not "no accounts" — that is first-run, and AccountsGate handles it. This is the query
   // itself failing, which used to render an empty tree and say nothing at all: the sidebar
@@ -284,6 +309,36 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     [accounts, mailboxes, smart, flagNames, vips],
   )
   const collapsed = useMemo(() => new Set(collapsedSections), [collapsedSections])
+
+  /**
+   * Which row a right-click acts on, and whether it may open a menu at all.
+   *
+   * Unlike the message list, this does **not** select the row. Selecting a mailbox loads it,
+   * which is a second or two of work and a change to what the user is looking at — far too
+   * much to do on the way to a menu they may close again. Every item here names its own
+   * mailbox, so the menu does not need the selection to agree with it.
+   */
+  const onContextMenuOpen = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>): boolean => {
+      const element =
+        event.target instanceof Element ? event.target.closest('[data-node-id]') : null
+      if (element === null) return false
+
+      const id = element.getAttribute('data-node-id')
+      const node = sections.flatMap((section) => section.nodes).find((each) => each.id === id)
+
+      // Containers, unified rows, Flagged and its colours, VIPs and smart mailboxes: none has a
+      // single mailbox or a single account, and every row of the menu needs both.
+      if (node === undefined || !canOpenMailboxMenu(node)) {
+        setMenuNode(null)
+        return false
+      }
+
+      setMenuNode(node)
+      return true
+    },
+    [sections],
+  )
 
   const onSelect = (node: SidebarNode) => {
     // Every predicate row was once dead on click: Flagged, all seven flag colours, VIPs, and
@@ -334,45 +389,54 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           }
         />
       ) : (
-        <ScrollArea className={styles.sidebar}>
-          <div role="tree" aria-label="Mailboxes" className={styles.tree}>
-            {sections.map((section) => (
-              <div
-                key={section.id}
-                role="group"
-                aria-label={section.title}
-                className={styles.section}
-              >
-                <h2 className={styles.sectionTitle}>{section.title}</h2>
+        <ContextMenu
+          label="Mailbox actions"
+          onOpen={onContextMenuOpen}
+          menu={menuNode === null ? null : contextMenu?.(menuNode)}
+        >
+          {/* One menu around the whole tree rather than one per row — the same reasoning as
+              the message list. `onOpen` refuses any row that is not a single real mailbox in a
+              known account, which is every container, unified and smart row. */}
+          <ScrollArea className={styles.sidebar}>
+            <div role="tree" aria-label="Mailboxes" className={styles.tree}>
+              {sections.map((section) => (
+                <div
+                  key={section.id}
+                  role="group"
+                  aria-label={section.title}
+                  className={styles.section}
+                >
+                  <h2 className={styles.sectionTitle}>{section.title}</h2>
 
-                {visibleRows(section.nodes, collapsed).map((node) => (
-                  <SidebarRow
-                    key={node.id}
-                    node={node}
-                    selected={node.id === selectedNodeId}
-                    collapsed={collapsed.has(node.id)}
-                    dropTarget={node.id === dropTargetId}
-                    onSelect={onSelect}
-                    onToggle={toggleSection}
-                    onDragOverRow={(target) => {
-                      setDropTargetId(target?.id ?? null)
-                    }}
-                    onDragLeaveRow={(target) => {
-                      // Only the row that is actually lit may put the light out. Moving from
-                      // one row to the next fires enter-then-leave, so an unconditional null
-                      // here would wipe the highlight the new row had just set — which works
-                      // today only by the order those two events happen to arrive in.
-                      setDropTargetId((current) => (current === target.id ? null : current))
-                    }}
-                    onDropRow={(mailboxId, messageIds) => {
-                      moveMessages.mutate({ ids: messageIds, mailboxId })
-                    }}
-                  />
-                ))}
-              </div>
-            ))}
-          </div>
-        </ScrollArea>
+                  {visibleRows(section.nodes, collapsed).map((node) => (
+                    <SidebarRow
+                      key={node.id}
+                      node={node}
+                      selected={node.id === selectedNodeId}
+                      collapsed={collapsed.has(node.id)}
+                      dropTarget={node.id === dropTargetId}
+                      onSelect={onSelect}
+                      onToggle={toggleSection}
+                      onDragOverRow={(target) => {
+                        setDropTargetId(target?.id ?? null)
+                      }}
+                      onDragLeaveRow={(target) => {
+                        // Only the row that is actually lit may put the light out. Moving from
+                        // one row to the next fires enter-then-leave, so an unconditional null
+                        // here would wipe the highlight the new row had just set — which works
+                        // today only by the order those two events happen to arrive in.
+                        setDropTargetId((current) => (current === target.id ? null : current))
+                      }}
+                      onDropRow={(mailboxId, messageIds) => {
+                        moveMessages.mutate({ ids: messageIds, mailboxId })
+                      }}
+                    />
+                  ))}
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </ContextMenu>
       )}
 
       {/* Outside the ScrollArea on purpose: a problem that scrolls out of sight is one the

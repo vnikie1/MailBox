@@ -53,6 +53,10 @@
   --menu-swatch-cell: 20px;
   --menu-swatch-gap: var(--sp-2);
 
+  /* The label column of the account info sheet. Wide enough for "Incoming (IMAP)",
+   * which is the longest label there, so no row wraps its own label. */
+  --account-info-label: 132px;
+
   --drag-card-width: 200px;
   --drag-card-radius: var(--r-md);
   --drag-card-pad-x: var(--sp-4);

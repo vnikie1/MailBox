@@ -45,8 +45,10 @@ fn row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<(MessageRow, f64)> {
             flagged: row.get::<_, i64>(12)? != 0,
             flag_color: row.get(13)?,
             has_attachment: row.get::<_, i64>(14)? != 0,
+            muted: row.get::<_, i64>(15)? != 0,
         },
-        row.get::<_, f64>(15)?,
+        // 16, not 15: the muted column was added ahead of it.
+        row.get::<_, f64>(16)?,
     ))
 }
 

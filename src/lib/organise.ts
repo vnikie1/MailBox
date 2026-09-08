@@ -202,8 +202,8 @@ export async function unsnooze(ids: number[]): Promise<number> {
   return invoke<number>('unsnooze', { ids })
 }
 
-export async function muteThread(threadId: number, muted: boolean): Promise<void> {
-  await invoke('mute_thread', { threadId, muted })
+export async function muteThread(ids: number[], muted: boolean): Promise<number> {
+  return invoke<number>('mute_thread', { ids, muted })
 }
 
 export async function detectFollowUps(): Promise<number> {

@@ -4,4 +4,8 @@
  * One row of the message list. docs/02 §6.3 — everything a row draws and nothing else;
  * bodies are fetched on demand by `message_get`.
  */
-export type MessageRow = { id: number, threadId: number | null, mailboxId: number, accountId: number, subject: string | null, fromName: string | null, fromAddr: string | null, dateReceived: number, preview: string | null, size: number, seen: boolean, answered: boolean, flagged: boolean, flagColor: string | null, hasAttachment: boolean, };
+export type MessageRow = { id: number, threadId: number | null, mailboxId: number, accountId: number, subject: string | null, fromName: string | null, fromAddr: string | null, dateReceived: number, preview: string | null, size: number, seen: boolean, answered: boolean, flagged: boolean, flagColor: string | null, hasAttachment: boolean, 
+/**
+ * Whether the conversation this belongs to is muted. From `thread`, not `message`.
+ */
+muted: boolean, };

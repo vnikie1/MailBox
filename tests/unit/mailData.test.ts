@@ -171,6 +171,7 @@ describe('sortRows', () => {
     flagged: false,
     flagColor: null,
     hasAttachment: false,
+    muted: false,
     ...over,
   })
 
