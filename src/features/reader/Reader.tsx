@@ -5,7 +5,6 @@ import {
   CornerUpRight,
   Forward,
   Mail,
-  Paperclip,
   Reply,
   ReplyAll,
   ShieldAlert,
@@ -14,19 +13,20 @@ import {
 import type { AttachmentRow } from '@/lib/generated/AttachmentRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import { cx } from '@/lib/cx'
-import { formatFileSize, formatReaderDate } from '@/lib/date'
+import { formatReaderDate } from '@/lib/date'
 import { useThread } from '@/app/queries'
 
 import { AttachmentPreview } from './AttachmentPreview'
+import { AttachmentTile } from './AttachmentTile'
 import { JunkBanner } from './JunkBanner'
 import { MessageBody } from './MessageBody'
 import { useMarkRead } from './useMarkRead'
 import { useThreadBodies } from './useBodyPrefetch'
-import { composeOpen, storeNow } from '@/lib/ipc'
+import { attachmentSave, composeOpen, storeNow } from '@/lib/ipc'
 
 import { RedirectSheet } from './RedirectSheet'
 import { useMailStore } from '@/store/mail'
-import { Avatar, EmptyState, IconButton, ScrollArea, Tooltip, TooltipGroup } from '@/ui'
+import { Avatar, EmptyState, IconButton, ScrollArea, Tooltip, TooltipGroup, useToast } from '@/ui'
 import { Toolbar, type ToolbarProps } from '@/features/toolbar/Toolbar'
 
 import styles from './Reader.module.css'
@@ -73,6 +73,7 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
   // conversation should not close one already open on another.
   const [previewing, setPreviewing] = useState<AttachmentRow | null>(null)
   const [redirecting, setRedirecting] = useState(false)
+  const toast = useToast()
   const sender = message.fromName ?? message.fromAddr ?? 'Unknown sender'
 
   return (
@@ -237,28 +238,23 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
           {message.attachments.length > 0 && (
             <div className={styles.attachments}>
               {message.attachments.map((attachment) => (
-                <button
+                <AttachmentTile
                   key={attachment.id}
-                  type="button"
-                  className={styles.attachment}
-                  onClick={() => {
+                  attachment={attachment}
+                  onOpen={() => {
                     setPreviewing(attachment)
                   }}
-                >
-                  <Paperclip
-                    className={styles.attachmentIcon}
-                    aria-hidden="true"
-                    strokeWidth={1.5}
-                  />
-                  <span className={styles.attachmentText}>
-                    <span className={styles.attachmentName}>
-                      {attachment.filename ?? 'Attachment'}
-                    </span>
-                    <span className={styles.attachmentSize}>
-                      {formatFileSize(attachment.size ?? 0)}
-                    </span>
-                  </span>
-                </button>
+                  onSave={() => {
+                    void attachmentSave(attachment.id).catch((error: unknown) => {
+                      // Surfaced rather than swallowed: a save that quietly fails leaves the
+                      // user looking in a folder for a file that was never written.
+                      toast.show({
+                        title: 'That attachment could not be saved',
+                        description: error instanceof Error ? error.message : String(error),
+                      })
+                    })
+                  }}
+                />
               ))}
             </div>
           )}

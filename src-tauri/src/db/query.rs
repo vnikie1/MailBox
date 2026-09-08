@@ -382,11 +382,52 @@ pub fn thread_for_message(conn: &Connection, message_id: i64) -> Result<Vec<Mess
     }
 }
 
+/// A conversation, with each message appearing once.
+///
+/// ## Why one message can be stored twice
+///
+/// Gmail's IMAP presents labels as folders, so a message carrying a label exists both in
+/// `INBOX` and in that label's folder — two IMAP messages, two UIDs, two rows here, and one
+/// actual email. The reader then drew a header for each and the same mail appeared twice in
+/// its own conversation. On the mailbox this was reported from, **107 Message-IDs** were
+/// duplicated within a single account.
+///
+/// Storing both is right: they are genuinely two places the mail lives, and a per-mailbox list
+/// showing the label's copy under the label is correct. It is only the *conversation* that must
+/// not repeat itself, because a conversation is about messages rather than about where they sit.
+///
+/// ## Which copy survives
+///
+/// The one in a mailbox with a `role` — inbox, sent, archive — over one in a folder without,
+/// which is what a Gmail label is. That way the header says "Inbox" rather than "Important",
+/// which is where the user thinks the mail is. Ties break on the lower id, so the choice is
+/// stable across runs rather than depending on what the query planner felt like returning.
+///
+/// Rows with no `Message-Id` at all are never collapsed. They are not known to be the same as
+/// anything, and folding them together on an absent value would hide real mail.
 pub fn thread_get(conn: &Connection, thread_id: i64) -> Result<Vec<MessageFull>, DbError> {
     let sql = format!(
         "SELECT {MESSAGE_FULL_COLUMNS}
            FROM message
           WHERE thread_id = ?1
+            AND id IN (
+                  SELECT id FROM (
+                    SELECT m.id AS id,
+                           ROW_NUMBER() OVER (
+                             PARTITION BY m.account_id, m.message_id
+                             ORDER BY (mb.role IS NULL), m.id
+                           ) AS rn
+                      FROM message m
+                      JOIN mailbox mb ON mb.id = m.mailbox_id
+                     WHERE m.thread_id = ?1
+                       AND m.message_id IS NOT NULL
+                       AND m.message_id <> ''
+                  ) WHERE rn = 1
+                  UNION ALL
+                  SELECT id FROM message
+                   WHERE thread_id = ?1
+                     AND (message_id IS NULL OR message_id = '')
+                )
           ORDER BY date_sent ASC, id ASC"
     );
 

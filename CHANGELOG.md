@@ -5918,3 +5918,64 @@ alongside them.
   window chrome and looks at it. `tests/e2e/stacking.spec.ts` closes the second gap by comparing
   computed z-indexes, which is checkable where a screenshot is not — confirmed by removing the
   fix and watching it fail with "the modal overlay is at z-index 0 and the pane divider at 1".
+
+## 2026-09-08 — One mail, one header; and attachments you can save from the message
+
+### Fixed
+
+- **A conversation showed the same message more than once.** Reported as "why am I seeing
+  multiple heading for the same mail" — the reader said "2 Messages" and drew two headers with
+  the same sender, subject and timestamp, while the list showed one row.
+
+  Gmail presents every label as an IMAP folder, so a message carrying a label exists in `INBOX`
+  _and_ in that label's folder: two IMAP messages, two UIDs, two rows here, one actual email.
+  Read straight out of the reporting machine's own database:
+
+  | row    | mailbox                   | uid    | Message-Id                |
+  | ------ | ------------------------- | ------ | ------------------------- |
+  | 103225 | Inbox (`role = inbox`)    | 106978 | `6a9fe461…@mx.google.com` |
+  | 103226 | Important (`role = NULL`) | 24728  | _identical_               |
+
+  **107 Message-IDs were duplicated inside a single account**, so this was affecting a hundred
+  conversations rather than one.
+
+  Storing both rows is right — they are genuinely two places the mail lives, and the label's
+  list showing its copy is correct. It is only the _conversation_ that must not repeat itself,
+  because a conversation is about messages rather than about where they sit. `thread_get` now
+  returns one row per `Message-Id`, keeping the copy in a mailbox that has a **role** — inbox,
+  sent, archive — over one in a folder without, which is what a Gmail label is. That way the
+  header says "Inbox" rather than "Important", which is where the user thinks the mail is.
+
+  Verified against the real database before and after: thread 103225 went from two rows to one,
+  and across all 102 previously-duplicated threads, zero repeats remain.
+
+### Changed
+
+- **Attachments are cards now, not rows.** A deviation from docs/02 §6.8, which specifies a
+  44px row with a paperclip, a name and a size. Two things were wrong with it in use: every
+  attachment looked identical, because a paperclip only says "attachment"; and saving one meant
+  opening the preview first and finding the button inside it.
+
+  Each card carries an icon for its own file type with the extension under it, the filename over
+  two lines, the size, and a **save button** — so the kind of file is legible before the
+  filename is read, and saving is one click from the message.
+
+  The icon comes from the declared MIME type, then the extension, then a plain document.
+  `application/octet-stream` is explicitly not trusted: it is what a sender writes when their
+  own client did not know either, and for a PDF it is routine.
+
+### Notes
+
+- **Rows with no `Message-Id` are never collapsed.** An absent value is not evidence that two
+  messages are the same one, and folding on it would hide real mail — which is the one outcome
+  worse than showing it twice. There is a test for exactly this.
+
+- **Search can still show both copies.** It runs across mailboxes, so a Gmail-labelled message
+  matches twice. That is arguably right there — the two hits are in two folders the user can go
+  to — but it is the same underlying duplication and worth a decision rather than an accident.
+  Left alone in this change.
+
+- **"Save All" and the paperclip menu are not built.** macOS Mail puts a paperclip in the
+  message's action row that opens Save All / the file list / Quick Look. Saving each file is
+  wired; "Save All" would need a command that takes a folder once rather than prompting per
+  file, which `attachment_save` cannot do. Named rather than half-built.

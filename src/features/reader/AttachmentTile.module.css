@@ -1,0 +1,87 @@
+/**
+ * The attachment card. A deviation from docs/02 §6.8's 44px row, recorded in CHANGELOG.md.
+ *
+ * Sized so two sit side by side in a reader at its default width and wrap after that, which is
+ * what a message carrying a handful of receipts should look like.
+ */
+.tile {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-2);
+  background: var(--bg-raised);
+  border-radius: var(--attachment-tile-radius);
+}
+
+/* The card itself is the preview trigger, so the whole surface is a target. */
+.open {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--sp-4);
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  font-family: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: default;
+}
+
+/* The icon and its label stack, so a glance gives the kind before the name is read. */
+.glyph {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: var(--sp-1);
+  align-items: center;
+  justify-content: center;
+  width: var(--attachment-glyph);
+  height: var(--attachment-glyph);
+  color: var(--label-2);
+}
+
+.icon {
+  width: var(--attachment-tile-icon);
+  height: var(--attachment-tile-icon);
+}
+
+/* Uppercase and tiny: it is a label on an icon, not a word in a sentence. */
+.kind {
+  font-size: var(--t-caption-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: 1;
+  letter-spacing: var(--t-caption-tracking);
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+/* Two lines, then an ellipsis. The filenames that matter here are hex strings from a bank. */
+.name {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.size {
+  color: var(--label-2);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+}
+
+/* Always laid out rather than revealed on hover: docs/01 §5 reveals the header actions that
+ * way because they are a row of five, but a single save button that appears only under a
+ * pointer is one a keyboard user has to know about to find. */
+.save {
+  flex: 0 0 auto;
+}

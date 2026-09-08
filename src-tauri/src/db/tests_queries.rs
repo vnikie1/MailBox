@@ -915,3 +915,116 @@ fn a_parked_message_can_still_be_flagged_on_the_server() {
     assert_eq!(groups[0].mailbox, "Inbox");
     assert_eq!(groups[0].uids, vec![1_u32]);
 }
+
+/// A message that Gmail's IMAP presents twice — once in the Inbox, once under a label.
+///
+/// This is not a contrived case. Gmail exposes every label as a folder, so a labelled message
+/// is two IMAP messages with two UIDs and one `Message-Id`. On the mailbox this was reported
+/// from, 107 Message-IDs were duplicated inside a single account, and the reader drew a header
+/// for each — the same mail, twice, in its own conversation.
+fn gmail_label_fixture() -> Connection {
+    let mut conn = Connection::open_in_memory().expect("open");
+    conn.pragma_update(None, "foreign_keys", "ON").expect("fk");
+    migrate::run(&mut conn).expect("migrate");
+
+    conn.execute(
+        "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+         VALUES (1, 'Gmail', 'me@example.test', 'gmail', 'oAuth2', 'ref')",
+        [],
+    )
+    .expect("account");
+
+    // A label folder has no role. That is the whole difference the query leans on.
+    for (id, name, role) in [
+        (1_i64, "Inbox", Some("inbox")),
+        (2, "Important", None),
+        (3, "Receipts", None),
+    ] {
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (?1, 1, ?2, ?2, ?3)",
+            (id, name, role),
+        )
+        .expect("mailbox");
+    }
+
+    conn.execute(
+        "INSERT INTO thread (id, account_id, subject_base, message_count) VALUES (1, 1, 'advice', 1)",
+        [],
+    )
+    .expect("thread");
+
+    // One email, three rows: Inbox, and two labels. Different UIDs, one Message-Id.
+    for (id, mailbox, uid) in [(10_i64, 1_i64, 100_i64), (11, 2, 200), (12, 3, 300)] {
+        conn.execute(
+            "INSERT INTO message
+               (id, account_id, mailbox_id, thread_id, uid, message_id, subject, from_addr,
+                date_sent, date_received, size, flag_seen)
+             VALUES (?1, 1, ?2, 1, ?3, 'abc@mx.google.com', 'Credit Advice', 'bank@example.test',
+                     500, 500, 1000, 0)",
+            (id, mailbox, uid),
+        )
+        .expect("message");
+    }
+
+    // A second, genuinely different message in the same conversation, with its own id.
+    conn.execute(
+        "INSERT INTO message
+           (id, account_id, mailbox_id, thread_id, uid, message_id, subject, from_addr,
+            date_sent, date_received, size, flag_seen)
+         VALUES (20, 1, 1, 1, 101, 'def@mx.google.com', 'Re: Credit Advice', 'me@example.test',
+                 600, 600, 1000, 1)",
+        [],
+    )
+    .expect("reply");
+
+    conn
+}
+
+#[test]
+fn a_conversation_shows_one_copy_of_each_message() {
+    let conn = gmail_label_fixture();
+    let thread = query::thread_get(&conn, 1).expect("thread");
+
+    // Four rows in the table, two actual emails.
+    assert_eq!(
+        thread.len(),
+        2,
+        "the same mail was shown once per label it carries"
+    );
+}
+
+#[test]
+fn the_copy_kept_is_the_one_in_a_real_mailbox() {
+    // Not merely "one of them": the header names the mailbox, and "Important" is not where the
+    // user thinks the message is. A label folder has no role; the Inbox has one.
+    let conn = gmail_label_fixture();
+    let thread = query::thread_get(&conn, 1).expect("thread");
+
+    let first = thread.first().expect("a message");
+    assert_eq!(
+        first.mailbox_id, 1,
+        "kept the label's copy over the Inbox's"
+    );
+}
+
+#[test]
+fn messages_without_a_message_id_are_never_collapsed() {
+    // The absent value is not evidence that two messages are the same one. Folding on it would
+    // hide real mail, which is the one outcome worse than showing it twice.
+    let conn = gmail_label_fixture();
+    conn.execute("DELETE FROM message", []).expect("clear");
+
+    for id in [30_i64, 31] {
+        conn.execute(
+            "INSERT INTO message
+               (id, account_id, mailbox_id, thread_id, uid, message_id, subject, from_addr,
+                date_sent, date_received, size, flag_seen)
+             VALUES (?1, 1, 1, 1, ?1, NULL, 'No id', 'someone@example.test', 500, 500, 10, 0)",
+            [id],
+        )
+        .expect("message");
+    }
+
+    assert_eq!(query::thread_get(&conn, 1).expect("thread").len(), 2);
+}

@@ -205,6 +205,14 @@
   --attachment-gap: var(--sp-4);
   --attachment-icon: 28px;
 
+  /* The attachment *card*, which replaced that row. A deviation from docs/02 §6.8, recorded
+   * in CHANGELOG.md: the spec describes a list item, and this is the thing at the foot of a
+   * message that a reader reaches for. The glyph box is square so the icon and the little
+   * type label under it centre together whatever the label says. */
+  --attachment-tile-radius: var(--r-md);
+  --attachment-glyph: 40px;
+  --attachment-tile-icon: 24px;
+
   /* ---------- menus and context menus — docs/02 §6.9 ---------- */
   --menu-min-width: 180px;
   --menu-max-height: 60vh;
