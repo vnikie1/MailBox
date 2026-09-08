@@ -1,7 +1,7 @@
 import { StrictMode, type ReactNode } from 'react'
 import { createRoot } from 'react-dom/client'
 
-import { DEFAULT_APPEARANCE, resolveTheme, type Appearance } from './lib/appearance'
+import { DEFAULT_APPEARANCE, applyAppearance, type Appearance } from './lib/appearance'
 import { useSettingsStore } from './store/settings'
 import { App } from './app/App'
 
@@ -25,8 +25,16 @@ const osAppearance: Appearance = {
   theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light',
 }
 
-root.dataset.theme = resolveTheme(osAppearance, preferences)
-root.dataset.density = preferences.density
+// `applyAppearance`, not two assignments. It used to set the theme and the density and stop,
+// which left the accent unset for the first frame — so an app with a pinned accent painted one
+// frame of the CSS fallback blue before correcting itself. Going through the same function the
+// running app uses is what makes the pre-paint frame incapable of disagreeing with the next
+// one, which is the whole point of doing this here.
+//
+// The OS half of `osAppearance` is a real reading; the rest is the default and is corrected a
+// moment later when the core answers. That only matters to a preference set to "system", and
+// for those a frame of the default is what would have been shown anyway.
+applyAppearance(osAppearance, preferences, root)
 
 const container = document.getElementById('root')
 if (!container) throw new Error('#root is missing from index.html')

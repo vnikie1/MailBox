@@ -6,7 +6,7 @@
 
 .divider {
   position: relative;
-  z-index: 1;
+  z-index: var(--z-raised);
   flex: 0 0 var(--hairline);
   align-self: stretch;
   width: var(--hairline);

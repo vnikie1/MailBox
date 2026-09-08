@@ -55,6 +55,19 @@
 
   /* The label column of the account info sheet. Wide enough for "Incoming (IMAP)",
    * which is the longest label there, so no row wraps its own label. */
+
+  /* ---------- stacking order ----------
+   * Raw z-index numbers scattered across files are how the pane dividers came to be drawn on
+   * top of every modal in the app: PaneDivider said `z-index: 1` and Sheet's overlay said
+   * nothing at all, and a positive z-index beats `auto` whatever the DOM order. Naming the
+   * layers puts the whole ordering in one place where it can be read.
+   *
+   * Everything here shares the root stacking context, so these compare directly. */
+  --z-raised: 1; /* pane dividers, sticky headers — chrome inside the window */
+  --z-floating: 2; /* menus, popovers, tooltips — anchored to something in the window */
+  --z-modal: 3; /* sheets, and the scrim that blocks the window behind them */
+  --z-toast: 4; /* above the modal: a send failure has to be readable over a sheet */
+
   --account-info-label: 132px;
 
   --drag-card-width: 200px;

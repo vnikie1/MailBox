@@ -13,7 +13,7 @@
 
   /* Above the panes, and level with the toast stack: neither outranks the other, and they
      occupy different corners anyway. */
-  z-index: 2;
+  z-index: var(--z-raised);
   display: flex;
   flex-direction: column;
   gap: var(--outbox-banner-gap);

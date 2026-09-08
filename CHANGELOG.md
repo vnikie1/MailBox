@@ -5842,3 +5842,79 @@ alongside them.
   whole message. Copy to has no operation behind it at all: the sync layer knows flag, move,
   delete and append-draft, and duplicating a message row touches the uniqueness constraint, the
   attachments, the search index, thread membership and the undo stack.
+
+## 2026-09-08 — The settings that were written and never kept
+
+### Fixed
+
+- **A chosen accent came back as the Windows one on every restart, and the cause was not in the
+  app's code.** Reported as "it falls back to the old orange theme". The read path was correct
+  the whole way through — the browser build restores a pinned accent perfectly, every time.
+
+  The value never reached it. WebView2 keeps `localStorage` in a LevelDB write-ahead log, and
+  on the reporting machine that log is corrupt. LevelDB says so itself, on every launch:
+
+  ```
+  19:50:33  dropping 3428 bytes; Corruption: checksum mismatch   (8503-byte file → cut at 5075)
+  19:54:34  dropping 3706 bytes; Corruption: checksum mismatch   (8781-byte file → cut at 5075)
+  ```
+
+  The same cut point twice, and the directory holds no `.ldb` files at all — LevelDB has never
+  compacted, so the damaged record is never rewritten. "Reusing old log" reopens the file for
+  append at its _physical_ end, past the corruption, so every run writes into the region the
+  next run discards. Every preference the user set was faithfully written and silently lost.
+
+  The symptom was oddly precise and is the thing that gives the diagnosis away: **the theme came
+  back and the accent did not.** The newest record that survived recovery was written before the
+  accent field existed — `{"theme":"dark","density":"default","transparency":"system"}` — so a
+  shallow merge left `accent` at its default. The default is `'system'`, which resolves to the
+  Windows accent, which on that machine is `#F7630C`. Orange.
+
+  **Display preferences now live in the `setting` table in the database**, which is what
+  `store/settings.ts` had said the plan was since Phase 3. `localStorage` is kept, demoted to
+  what it can actually be trusted to be: a cache that lets the first frame paint before an IPC
+  round trip could answer. The database value arrives a moment later and corrects it — which is
+  also what heals an install whose WebView storage has already lost them.
+
+- **The first frame did not carry the accent.** `main.tsx` set the theme and the density and
+  stopped, so an app with a pinned accent painted one frame of the CSS fallback blue before
+  correcting itself. It now goes through `applyAppearance`, the same function the running app
+  uses, which is what makes the pre-paint frame incapable of disagreeing with the next one.
+
+- **Two vertical lines ran down every modal in the app.** Reported on the attachment preview.
+  They were the **pane dividers, painted on top of the sheet**: `PaneDivider` declares
+  `z-index: 1` and Floating UI's `FloatingOverlay` supplies `position: fixed` and no z-index at
+  all, so the modal sat at `auto` — and a positive z-index beats `auto` however late in the DOM
+  the portal is mounted.
+
+  Measured from the reported screenshot rather than guessed: the sheet reads exactly
+  `rgb(44,44,46)` = `--bg-menu-opaque` across all three pane regions behind it, so it was never
+  a translucency problem; the two lines are `rgb(70,70,71)`, which is `--separator` over that
+  surface, at device-x 466 and 1188 — the two pane boundaries — running the sheet's full height.
+
+### Changed
+
+- **The stacking order is a named scale now.** `--z-raised`, `--z-floating`, `--z-modal`,
+  `--z-toast`, all in `component.css`. The bug was a raw `1` in one file having to beat a raw
+  `1` in another, with nothing anywhere saying which should win. Menus, popovers and tooltips
+  were only clearing the dividers by being later in the DOM, which is not a rule anyone stated.
+
+### Notes
+
+- **An install that already lost its preferences needs them set once more.** The database has
+  never held a value on such a machine, so the first launch after this change still has nothing
+  to restore. Set the accent once and it will survive from then on, whatever the WebView's
+  storage does.
+
+- **`badge_paint` now logs the resolved accent.** It is the one place the resolved colour
+  crosses out of the WebView, which makes it the only way to see from outside what the window
+  actually chose — and a theme that has fallen back to the OS accent looks identical to one
+  that was never set. Added while diagnosing this and kept, because that ambiguity is what made
+  the bug hard to see.
+
+- **This is the second time this session that a green test suite sat over a real defect**, and
+  in both cases for the same reason: the failure was in a layer the tests cannot reach. The
+  browser build cannot see WebView2's storage, and no test of any kind renders a modal over the
+  window chrome and looks at it. `tests/e2e/stacking.spec.ts` closes the second gap by comparing
+  computed z-indexes, which is checkable where a screenshot is not — confirmed by removing the
+  fix and watching it fail with "the modal overlay is at z-index 0 and the pane divider at 1".

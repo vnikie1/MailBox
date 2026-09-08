@@ -1019,6 +1019,34 @@ export async function setBadgePaint(fill: number, ink: number): Promise<void> {
   await invoke('badge_paint', { fill, ink })
 }
 
+/**
+ * The display preferences as the database holds them, or null if none were ever stored.
+ *
+ * The database, not `localStorage`, is the source of truth for these. On this machine the
+ * WebView's own storage turned out to be unreliable — LevelDB reported `dropping 3706 bytes;
+ * Corruption: checksum mismatch` on every launch and discarded every preference ever written —
+ * so what the window remembers between runs cannot rest on it. See `ipc/window.rs`.
+ */
+export async function displayPreferencesGet(): Promise<DisplayPreferences | null> {
+  if (!runningInTauri) return null
+
+  const stored = await invoke<string | null>('display_preferences_get')
+  if (stored === null) return null
+
+  try {
+    return JSON.parse(stored) as DisplayPreferences
+  } catch {
+    // A value that will not parse is a value that cannot be honoured. Falling back to whatever
+    // the window already has beats refusing to start.
+    return null
+  }
+}
+
+export async function displayPreferencesSet(preferences: DisplayPreferences): Promise<void> {
+  if (!runningInTauri) return
+  await invoke('display_preferences_set', { value: JSON.stringify(preferences) })
+}
+
 export async function broadcastDisplayPreferences(preferences: DisplayPreferences): Promise<void> {
   if (!runningInTauri) {
     // Same-origin tabs, which is what the browser path's second window is.

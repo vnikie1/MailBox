@@ -83,7 +83,11 @@ describe('display preferences across windows', () => {
 
   it('announces a change made here', async () => {
     const broadcast = vi.fn().mockResolvedValue(undefined)
-    vi.doMock('@/lib/ipc', () => ({ broadcastDisplayPreferences: broadcast }))
+    const store = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('@/lib/ipc', () => ({
+      broadcastDisplayPreferences: broadcast,
+      displayPreferencesSet: store,
+    }))
 
     const { useSettingsStore } = await import('@/store/settings')
     useSettingsStore.getState().setTheme('dark')
@@ -98,13 +102,27 @@ describe('display preferences across windows', () => {
       transparency: 'system',
       accent: 'system',
     })
+
+    // And written where it will still be there next time. localStorage is a cache: on one
+    // machine WebView2's copy of it was silently dropping every write, and the user's accent
+    // came back as the Windows one on every launch. The database is what is believed.
+    expect(store).toHaveBeenCalledWith({
+      theme: 'dark',
+      density: 'default',
+      transparency: 'system',
+      accent: 'system',
+    })
   })
 
   it('does not re-announce a change made elsewhere', async () => {
     // The loop. Without a separate entry point, window A tells B, B applies it and tells A,
     // A applies it and tells B, and neither window ever stops repainting.
     const broadcast = vi.fn().mockResolvedValue(undefined)
-    vi.doMock('@/lib/ipc', () => ({ broadcastDisplayPreferences: broadcast }))
+    const store = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('@/lib/ipc', () => ({
+      broadcastDisplayPreferences: broadcast,
+      displayPreferencesSet: store,
+    }))
 
     const { useSettingsStore } = await import('@/store/settings')
     useSettingsStore
@@ -112,6 +130,9 @@ describe('display preferences across windows', () => {
       .applyRemote({ theme: 'dark', density: 'compact', transparency: 'reduce', accent: 'system' })
 
     expect(broadcast).not.toHaveBeenCalled()
+    // Nor written back. `applyRemote` is how a window takes in what another window or the
+    // database already holds; writing it again would be a second round trip saying nothing.
+    expect(store).not.toHaveBeenCalled()
     expect(useSettingsStore.getState().density).toBe('compact')
   })
 })

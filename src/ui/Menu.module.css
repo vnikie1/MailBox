@@ -7,7 +7,7 @@
 
 .menu {
   composes: materialMenu from global;
-  z-index: 1;
+  z-index: var(--z-floating);
   display: flex;
   flex-direction: column;
   min-width: var(--menu-min-width);

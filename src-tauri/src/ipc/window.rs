@@ -5,10 +5,12 @@
 //! things the WebView genuinely cannot answer for itself: what appearance Windows is in, and
 //! the opening of a second top-level window.
 
-use tauri::WebviewWindow;
+use rusqlite::OptionalExtension;
+use tauri::{State, WebviewWindow};
 
 use super::mail::AppError;
 
+use crate::db::Db;
 use crate::platform::appearance::{self, Appearance};
 
 /// The current OS appearance. The UI calls this once on mount; every subsequent change
@@ -16,6 +18,63 @@ use crate::platform::appearance::{self, Appearance};
 #[tauri::command]
 pub fn appearance_get(window: WebviewWindow) -> Appearance {
     appearance::compute(&window)
+}
+
+/// The key display preferences are stored under.
+///
+/// One row holding the whole object rather than a row per field: it is written and read as a
+/// unit, and a partial write is the one failure that would be worse than none.
+const DISPLAY_PREFERENCES_KEY: &str = "display.preferences";
+
+/// The user's display preferences, as stored. `None` before they have ever changed one.
+///
+/// ## Why these are in the database rather than in the WebView
+///
+/// They used to live only in `localStorage`, and on this machine that turned out not to be
+/// storage at all. WebView2 keeps it in a LevelDB write-ahead log, and that log became corrupt:
+/// LevelDB's own diagnostic says `dropping 3706 bytes; Corruption: checksum mismatch` on every
+/// single launch, always at the same offset, and it discards everything written after that
+/// point. Because the directory had never been compacted, each run appended past the damage
+/// into the region the next run would throw away — so every preference the user set was
+/// faithfully written and silently lost, for ever.
+///
+/// The visible symptom was oddly specific and worth recording: the *theme* came back and the
+/// *accent* did not. The last record that survived recovery predated the accent feature, so it
+/// carried a theme and no accent key at all, and a shallow merge left the accent at its
+/// default — which resolves to the Windows accent, which on that machine is orange.
+///
+/// The database is the right place for this regardless: it is what the rest of the app's state
+/// is already trusted to, it is backed up with everything else, and SQLite has real durability
+/// guarantees where a webview's cache has none. `localStorage` is still written, but only as a
+/// cache that lets the first frame paint before this can be read — see `store/settings.ts`.
+#[tauri::command]
+pub async fn display_preferences_get(db: State<'_, Db>) -> Result<Option<String>, AppError> {
+    db.read(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT value FROM setting WHERE key = ?1",
+                rusqlite::params![DISPLAY_PREFERENCES_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?)
+    })
+    .await
+    .map_err(AppError::from)
+}
+
+/// Stores them. The value is opaque here: the shape belongs to the window that wrote it.
+#[tauri::command]
+pub async fn display_preferences_set(db: State<'_, Db>, value: String) -> Result<(), AppError> {
+    db.write(move |tx| {
+        tx.execute(
+            "INSERT INTO setting (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![DISPLAY_PREFERENCES_KEY, value],
+        )?;
+        Ok(())
+    })
+    .await
+    .map_err(AppError::from)
 }
 
 /// The colour the taskbar badge is drawn in, pushed from the UI.
@@ -30,6 +89,15 @@ pub fn appearance_get(window: WebviewWindow) -> Appearance {
 /// button in the app its `--accent-fg`, and a badge that picked its own would drift from it.
 #[tauri::command]
 pub async fn badge_paint(app: tauri::AppHandle, fill: u32, ink: u32) -> Result<(), AppError> {
+    // Logged because this is the one place the *resolved* accent crosses out of the WebView,
+    // which makes it the only way to see from outside what colour the window actually chose.
+    // A theme that silently falls back to the OS accent looks identical to one that was never
+    // set, and this line is what tells the two apart.
+    tracing::info!(
+        fill = format!("#{fill:06X}"),
+        ink = format!("#{ink:06X}"),
+        "accent resolved"
+    );
     crate::platform::badge::set_paint(fill, ink);
     crate::platform::tray::repaint(&app).await;
     Ok(())

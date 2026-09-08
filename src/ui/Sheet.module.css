@@ -1,6 +1,10 @@
 /* The modal counterpart to Popover. Ordered by ascending specificity. */
 
 .overlay {
+  /* Without this the overlay sits at `auto` and the pane dividers, at --z-raised, paint over
+     the sheet — two full-height lines down every modal in the app. `FloatingOverlay` supplies
+     `position: fixed` and nothing else, so the stacking is ours to state. */
+  z-index: var(--z-modal);
   display: grid;
   place-items: center;
   background: var(--scrim);

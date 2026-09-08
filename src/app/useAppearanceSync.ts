@@ -10,6 +10,7 @@ import {
   rgbNumber,
 } from '@/lib/appearance'
 import {
+  displayPreferencesGet,
   getAppearance,
   onAppearanceChanged,
   onDisplayPreferencesChanged,
@@ -63,6 +64,17 @@ export function useAppearanceSync(): void {
     void onAppearanceChanged(setAppearance).then(keep)
 
     void onDisplayPreferencesChanged(applyRemote).then(keep)
+
+    // The stored preferences, which outrank the localStorage cache the store started from.
+    //
+    // This is what heals an install whose WebView storage has lost them: the cache paints the
+    // first frame, and whatever the database holds corrects it a moment later. `applyRemote`
+    // rather than the setters, because this is not a change the user just made and must not be
+    // announced to the other windows — they are reading the same row for themselves.
+    void displayPreferencesGet().then((stored) => {
+      if (cancelled || stored === null) return
+      applyRemote(stored)
+    })
 
     void onWindowFocusChanged((focused) => {
       setWindowActive(focused)

@@ -2,7 +2,7 @@
 
 .tooltip {
   composes: materialMenu from global;
-  z-index: 1;
+  z-index: var(--z-floating);
   max-width: var(--tooltip-max-width);
   padding: var(--tooltip-pad-y) var(--tooltip-pad-x);
   color: var(--label-1);

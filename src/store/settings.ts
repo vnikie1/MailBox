@@ -9,19 +9,31 @@ import {
   type ThemePreference,
   type TransparencyPreference,
 } from '@/lib/appearance'
-import { broadcastDisplayPreferences } from '@/lib/ipc'
+import { broadcastDisplayPreferences, displayPreferencesSet } from '@/lib/ipc'
 
 /**
  * User settings.
  *
- * Persisted to the WebView's localStorage, which in the packaged app lives under the
- * bundle identifier's data directory and survives restart. Phase 3 moves this into the
- * `settings` table so it is backed up and synced with everything else; the shape here is
- * chosen to make that a straight port rather than a rewrite.
+ * ## Two stores, and which one is believed
  *
- * Reading it synchronously at module load matters: main.tsx applies the persisted theme
- * and density before the first paint, and an async rehydration would show one frame of
- * the wrong appearance — which is the flash docs/02 §8 rules out.
+ * The `setting` table in the database is the **source of truth**. `localStorage` is a cache,
+ * kept only so the first frame can paint before an IPC round trip could answer.
+ *
+ * It was the other way round, and it lost the user's settings. WebView2 keeps localStorage in
+ * a LevelDB write-ahead log, and on one machine that log became corrupt: LevelDB reported
+ * `dropping 3706 bytes; Corruption: checksum mismatch` at the same offset on every launch and
+ * discarded everything written past it. The directory had never been compacted, so each run
+ * appended into the region the next run would drop — every preference written, none kept.
+ *
+ * The symptom was precise enough to be worth remembering: the theme came back and the accent
+ * did not, because the newest record that survived recovery predated the accent field, and a
+ * shallow merge left the accent at its default. A default accent means "use the OS one", which
+ * is why it looked like the app was ignoring the choice rather than losing it.
+ *
+ * Reading the cache synchronously at module load still matters: main.tsx applies the theme
+ * and density before the first paint, and an async read would show one frame of the wrong
+ * appearance — which is the flash docs/02 §8 rules out. The database value arrives a moment
+ * later and corrects the cache if they disagree.
  *
  * ## Two ways in, and why
  *
@@ -45,7 +57,13 @@ export const useSettingsStore = create<SettingsState>()(
       /** Applies a change here and tells every other window about it. */
       const change = (patch: Partial<DisplayPreferences>) => {
         set(patch)
-        void broadcastDisplayPreferences(displayPreferences(get()))
+        const next = displayPreferences(get())
+
+        // Written to the database as well as to localStorage, and the database is the one that
+        // is trusted on the next run. `persist` below keeps localStorage in step, but only as
+        // a cache for the first frame — see the note on the store.
+        void displayPreferencesSet(next)
+        void broadcastDisplayPreferences(next)
       }
 
       return {
