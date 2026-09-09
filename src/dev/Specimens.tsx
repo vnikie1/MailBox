@@ -27,6 +27,8 @@ import {
   MenuSeparator,
   Popover,
   ScrollArea,
+  Segmented,
+  Select,
   Sheet,
   Skeleton,
   TextField,
@@ -103,6 +105,8 @@ export function Specimens() {
   const [text, setText] = useState('')
   const [filled, setFilled] = useState('ada@example.com')
   const [search, setSearch] = useState('')
+  const [popup, setPopup] = useState('10')
+  const [segment, setSegment] = useState<'light' | 'dark' | 'system'>('system')
   const [sheetOpen, setSheetOpen] = useState(false)
   const [flagged, setFlagged] = useState(true)
   const [tokens, setTokens] = useState<Token[]>([
@@ -224,6 +228,81 @@ export function Specimens() {
             onClear={() => {
               setSearch('')
             }}
+          />
+        </Row>
+      </Section>
+
+      <Section title="Select">
+        <Row label="Chosen">
+          <Select
+            label="Undo send delay"
+            options={[
+              { value: '0', label: 'Off' },
+              { value: '10', label: '10 seconds' },
+              { value: '30', label: '30 seconds' },
+            ]}
+            value={popup}
+            onValueChange={setPopup}
+          />
+        </Row>
+        <Row label="Loading">
+          {/* Nothing selected: the stored value has not arrived, and the control says so by
+              showing nothing rather than by showing the first option. */}
+          <Select
+            label="Account"
+            options={[{ value: 'a', label: 'ada@example.com' }]}
+            value={null}
+            onValueChange={() => undefined}
+          />
+        </Row>
+        <Row label="Described">
+          <Select
+            label="Save as"
+            options={[
+              { value: 'mbox', label: 'One mbox file per mailbox' },
+              { value: 'eml', label: 'A folder of .eml files' },
+            ]}
+            value="mbox"
+            description="Read by Thunderbird, Apple Mail and most other programs."
+            onValueChange={() => undefined}
+          />
+        </Row>
+      </Section>
+
+      <Section title="Segmented">
+        <Row label="Three">
+          <Segmented
+            label="Theme"
+            options={[
+              { value: 'system', label: 'Follow Windows' },
+              { value: 'light', label: 'Light' },
+              { value: 'dark', label: 'Dark' },
+            ]}
+            value={segment}
+            onValueChange={setSegment}
+          />
+        </Row>
+        <Row label="Two">
+          <Segmented
+            label="Placement"
+            options={[
+              { value: 'above', label: 'Above the quote' },
+              { value: 'below', label: 'Below the quote' },
+            ]}
+            value="above"
+            onValueChange={() => undefined}
+          />
+        </Row>
+        <Row label="Disabled">
+          <Segmented
+            label="Density"
+            options={[
+              { value: 'compact', label: 'Compact' },
+              { value: 'default', label: 'Default' },
+            ]}
+            value="default"
+            disabled
+            onValueChange={() => undefined}
           />
         </Row>
       </Section>

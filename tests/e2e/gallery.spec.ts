@@ -54,6 +54,8 @@ test.describe('component gallery', () => {
       'Button',
       'IconButton',
       'TextField',
+      'Select',
+      'Segmented',
       'TokenField',
       'Chip',
       'Avatar',
