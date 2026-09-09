@@ -257,10 +257,20 @@
   line-height: var(--t-footnote-leading);
 }
 
-/* Small dim text inside a row — a byte count, an address above a group of choices. */
+/**
+ * Small dim text at the end of a row — a byte count beside a crash report or a folder.
+ *
+ * Held to one line and refused permission to shrink. Both rows it appears in are flex, with a
+ * truncating summary on the left and this on the right, and without these two declarations
+ * flex shrinks *this* — so "10 KB" broke across two lines while the summary beside it, which
+ * has an ellipsis precisely so it can give way, kept its full width. In the narrower control
+ * column the form put these lists in, that happened to every row at once.
+ */
 .name {
+  flex: 0 0 auto;
   color: var(--label-2);
   font-size: var(--t-footnote-size);
+  white-space: nowrap;
 }
 
 /* A short list of plain statements — the Privacy pane. Bulleted rather than a paragraph

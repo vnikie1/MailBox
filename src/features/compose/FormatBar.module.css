@@ -1,5 +1,14 @@
 /* The compose format bar. docs/01 §6. */
 
+/**
+ * Fourteen buttons that do not shrink, so somewhere they will not fit.
+ *
+ * Scrolled rather than clipped. In a compose window this bar has never run out of room; in the
+ * Signatures pane of Settings it does the moment the window is dragged towards its minimum, and
+ * a clipped bar loses its last button silently — the horizontal rule, with nothing to say it
+ * was ever there. Scrolling keeps every button reachable at any width, and at the widths where
+ * it fits there is no scrollbar and nothing changes.
+ */
 .bar {
   display: flex;
   flex: 0 0 auto;
@@ -7,6 +16,7 @@
   align-items: center;
   height: var(--compose-format-bar-height);
   padding: 0 var(--compose-header-pad-x);
+  overflow-x: auto;
   border-bottom: var(--hairline) solid var(--separator);
 }
 

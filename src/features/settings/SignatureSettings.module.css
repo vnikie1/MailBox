@@ -5,23 +5,16 @@
   max-width: var(--settings-picker-width);
 }
 
-/* The editor spans the form, but keeps the control column's left edge — so the box starts
-   where every other control on the pane starts rather than under the labels. */
-.editorRow {
-  padding-left: calc(var(--settings-label-col) + var(--settings-form-col-gap));
-}
-
-/* Where the form collapses to one column there is no control column to line up with, and the
-   indent would just be a margin the editor does not need. Same breakpoint as
-   settings.module.css; see the note there for where the number comes from. */
-@media (width < 680px) {
-  .editorRow {
-    padding-left: 0;
-  }
-}
-
-/* The compose editor, boxed. It has no border of its own — in a compose window it fills the
-   body area and the window is the frame. Here it sits among other controls and needs one. */
+/**
+ * The compose editor, boxed. It has no border of its own — in a compose window it fills the
+ * body area and the window is the frame. Here it sits among other controls and needs one.
+ *
+ * It takes the whole width of the pane rather than lining its left edge up with the control
+ * column, which is what it did first and looked tidier. The format bar underneath it needs
+ * 388px for its fourteen buttons and does not shrink, so an indent of the label column's width
+ * left it 379 in a 780px window and clipped the last one clean off. A row that needs the whole
+ * width is what `FullRow` is for; wanting the indent as well was having it both ways.
+ */
 .editor {
   display: flex;
   flex-direction: column;

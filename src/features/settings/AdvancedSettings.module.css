@@ -43,8 +43,11 @@
   outline-offset: calc(var(--hairline) * -1);
 }
 
-/* The panic message. One line — the whole report is in the block below when it is opened. */
+/* The panic message. One line — the whole report is in the block below when it is opened, and
+   it is the part of the row that gives way when there is not enough space for both. */
 .summary {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   font-size: var(--t-subhead-size);
   white-space: nowrap;

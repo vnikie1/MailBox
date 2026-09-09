@@ -6346,6 +6346,21 @@ is the shape this session put in.
   sit directly under the buttons that trigger them, and a line that grows into place moves them.
   Standing rule 6.
 
+### Fixed — found by walking the panes in the packaged app
+
+- **A byte count broke across two lines in every crash-report and folder row.** Both are flex
+  rows with a truncating summary and a size at the end, and the size was the item flex chose
+  to shrink — so "10 KB" wrapped while the summary beside it, which carries an ellipsis
+  precisely so it can give way, kept its full width. Invisible in the browser and invisible
+  before the form put those lists in a narrower column. `.name` is `flex: 0 0 auto` and
+  `white-space: nowrap` now, and `.summary` is the item that gives way.
+- **The signature editor’s format bar lost its last button.** Fourteen buttons need 388px and
+  do not shrink; indenting the editor to the control column left it 379 in a 780px window, so
+  the horizontal-rule button was clipped clean off with nothing to say it had been there. The
+  editor takes the full pane width now — wanting the indent as well was having it both ways —
+  and the bar scrolls rather than clips, so no width loses a button. That second half also
+  covers the compose window, which has the same bar and can also be dragged narrow.
+
 ### Removed
 
 - `.group`, `.legend` and `.account` from `settings.module.css`, and `.progress`, `.clientRow`,

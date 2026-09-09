@@ -137,10 +137,9 @@ export function SignatureSettings() {
           />
         </Field>
 
-        {/* The editor takes the full width. A rich-text box in the control column would be
-            about two thirds of a settings window wide, which is narrower than the messages
-            the signature ends up in. */}
-        <FullRow className={pane.editorRow}>
+        {/* The editor takes the full width of the pane — see `.editor` for why it is not
+            indented to the control column like everything else here. */}
+        <FullRow>
           {signature === null ? (
             <p className={styles.hint}>Loading…</p>
           ) : (
