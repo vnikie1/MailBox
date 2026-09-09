@@ -6212,3 +6212,46 @@ alongside them.
   feature lives in the layer only the packaged app reaches, which is how a window that could not
   be closed shipped at all. The behaviour is pinned by a component test instead, confirmed by
   removing the fix and watching Delete and Save as Draft fail.
+
+### Fixed
+
+- **The real reason a compose window could not be closed: a missing capability.** The webview
+  was denied `core:window|destroy` by the ACL, and denied it _in the webview_ — the core never
+  saw the call, nothing reached the log, and the only trace was a console message inside a
+  window nobody had devtools open on. Found by attaching to the running app over CDP and
+  reading its console; it says, in full:
+
+  ```
+  core:window|destroy not allowed by ACL
+  ```
+
+  `capabilities/default.json` granted `core:window:allow-close` and not
+  `core:window:allow-destroy`, and those are two different calls: `close()` **asks**, and a
+  window whose `onCloseRequested` handler allows the close is then shut by `destroy`. So every
+  path out of a compose window — Delete, Save as Draft, Send — put its question and then
+  refused to go. The permission that looked like the relevant one was already there.
+
+  `CLAUDE.md` names this trap: "Without an entry there, webview calls are denied _silently_."
+  This is the second time it has bitten, and the first time it reached a release.
+
+- **`src-tauri/tests/capabilities.rs`**, so it cannot be the third. It reads the shipped file
+  and holds the pairings where one permission without its partner produces a feature that half
+  works — `close` without `destroy` chief among them — plus that every window the app opens is
+  covered, and that the list has not been widened to `core:default`. Confirmed by removing the
+  permission and watching the first test fail.
+
+  It cannot prove the list is _complete_; only the running app can do that. It holds the shapes
+  that are known to break.
+
+### Notes
+
+- **The close loop fixed alongside this was real but masked.** With `destroy` denied, `close()`
+  never got far enough to re-enter the handler. Granting the permission without the flag would
+  have turned "nothing happens" into "the sheet reappears for ever", which is the same bug
+  wearing a different face — both fixes are needed and neither is sufficient.
+
+- **An incident: I verified against a stale build twice in this session.** Both times I acted on
+  a completed-build notification and installed while a _later_ build was still running, then
+  spent time diagnosing a fix that was not in the binary. The tell each time was the installed
+  exe being older than `dist/`. Comparing those two timestamps before testing is now the habit;
+  it is the same class of error as trusting a green suite over a running app.
