@@ -375,6 +375,35 @@ export function useMailEvents(): void {
           void client.invalidateQueries({ queryKey: keys.message(id) })
         }
 
+        // The open conversation, which is where attachments live.
+        //
+        // Reported from using the app: "a mail with attachment doesn't load the attachment on
+        // the first load of the mail. I have to go to other mails first and do a back and forth
+        // and then after some time it loads."
+        //
+        // A message's attachments do not exist until its body has been downloaded and parsed —
+        // `sync::bodies::persist` writes the body and the attachment rows in one transaction,
+        // and until then the row is real but its attachment list is empty. Bodies are fetched
+        // lazily, so a message opened the moment it arrives is routinely read *before* that
+        // happens. The reader takes its attachments from `MessageFull` on this query, and
+        // nothing here invalidated it — so the tile never appeared.
+        //
+        // "After some time" was the giveaway: `mailbox:changed` above *does* invalidate
+        // `['thread']`, so the next sync tick fixed it by accident. That is what made this look
+        // intermittent rather than deterministic.
+        //
+        // Matched on the cached rows rather than the key. The key is the *selected* message id,
+        // while the data holds every message in the conversation — so a body arriving for the
+        // second message of an open thread has an id that appears nowhere in the key.
+        const changed = new Set(ids)
+        void client.invalidateQueries({
+          queryKey: ['thread'],
+          predicate: (query) => {
+            const thread = query.state.data as MessageFull[] | undefined
+            return thread?.some((message) => changed.has(message.id)) ?? false
+          },
+        })
+
         // The rendered body too. A message is selected before its body has downloaded —
         // that is the whole point of fetching lazily — so the reader renders an empty
         // frame first and needs telling when the content actually arrives. Without this

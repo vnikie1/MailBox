@@ -6078,3 +6078,38 @@ alongside them.
   carry remote images, so no banner can appear there at all — an e2e test would have skipped
   itself and looked like coverage. Confirmed the tests bite by restoring the old wording and
   watching the assertion fail on "remote image".
+
+### Fixed
+
+- **A message opened before its body arrived never showed its attachments.** Reported as "a mail
+  with attachment doesn't load the attachment on the first load of the mail — I have to go to
+  other mails first and do a back and forth and then after some time it loads".
+
+  Attachments do not exist until a body has been downloaded and parsed: `sync::bodies::persist`
+  writes the body and the attachment rows in a single transaction, and until then the message
+  row is real and its attachment list is empty. Bodies are fetched lazily, deliberately, so a
+  message opened as it arrives is routinely read _before_ that happens.
+
+  The reader takes its attachments from `MessageFull` on the thread query, and
+  `messages:updated` invalidated the list, the message and the rendered body — and not the
+  thread. So the body appeared and the attachment did not, and nothing ever corrected it.
+
+  **"After some time" is what identified it.** `mailbox:changed` _does_ invalidate `['thread']`,
+  so the next sync tick fixed it by accident — which is what made a deterministic bug look
+  intermittent, and why going back and forth appeared to help. It was not the navigation; it was
+  the sync that happened to land during it.
+
+  The invalidation matches on the **cached rows, not the key**. The key is the message the
+  reader has selected, while the data holds every message in the conversation — so a body
+  arriving for the second message of an open thread has an id that appears nowhere in the key,
+  and matching by key would have missed it. It is also narrow on purpose: the commonest
+  `messages:updated` of all is a message being marked read 700ms after it opens, and refetching
+  every cached conversation on that would undo the work done earlier to stop exactly that waste.
+
+### Notes
+
+- **The test drives the real hook.** The obvious version reimplements the invalidation in the
+  test file and asserts that _that_ works — which proves TanStack behaves and would still pass
+  with the fix deleted from the app. This one captures the handler `useMailEvents` actually
+  registers and calls it, so the thing under test is the shipped code. Confirmed by removing the
+  fix and watching all three fail.
