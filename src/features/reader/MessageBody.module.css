@@ -52,3 +52,12 @@
   padding: var(--sp-5) 0;
   color: var(--label-3);
 }
+
+/* The banner's controls. A row of its own so the primary action and the durable one sit
+ * together at the end of the sentence rather than the second wrapping under the text. */
+.bannerActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  align-items: center;
+}

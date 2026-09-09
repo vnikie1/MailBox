@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, ImageOff } from 'lucide-react'
+import { AlertTriangle, Eye, EyeOff, ImageOff } from 'lucide-react'
 
 import { useMessageBody } from '@/app/queries'
-import { remoteImagesEnabled } from '@/lib/ipc'
+import { remoteImagesEnabled, setRemoteImagesEnabled } from '@/lib/ipc'
 import { Button, EmptyState } from '@/ui'
 
 import { MessageFrame } from './MessageFrame'
@@ -101,23 +101,44 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
 
   return (
     <div className={className}>
+      {/* Nothing has been fetched yet, so this is the one banner where a decision is still
+          open. It says what loading would cost rather than merely that images exist — "3
+          remote images were not loaded" told the user a number and nothing they could act on. */}
       {rendered.blockedRemote > 0 && (
         <div className={styles.banner} role="status">
-          <ImageOff className={styles.bannerIcon} aria-hidden />
+          <EyeOff className={styles.bannerIcon} aria-hidden />
           <span className={styles.bannerText}>
-            {rendered.blockedRemote === 1
-              ? '1 remote image was not loaded.'
-              : `${String(rendered.blockedRemote)} remote images were not loaded.`}{' '}
-            Loading them tells the sender you opened this message.
+            This email keeps its {rendered.blockedRemote === 1 ? 'image' : 'images'} on the
+            sender&rsquo;s own server. Loading {rendered.blockedRemote === 1 ? 'it' : 'them'} tells
+            them you opened this, and when.
           </span>
-          <Button
-            variant="bordered"
-            onClick={() => {
-              setOverride(true)
-            }}
-          >
-            Load Images
-          </Button>
+
+          <span className={styles.bannerActions}>
+            <Button
+              variant="bordered"
+              onClick={() => {
+                setOverride(true)
+              }}
+            >
+              Show Images
+            </Button>
+
+            {/* Only when the *setting* is what is holding them back. If this message was
+                blocked by hand a moment ago, offering to change the setting for every future
+                message would be answering a question the user did not ask. */}
+            {preference === false && (
+              <Button
+                variant="plain"
+                onClick={() => {
+                  setOverride(true)
+                  setPreference(true)
+                  void setRemoteImagesEnabled(true)
+                }}
+              >
+                Always Show
+              </Button>
+            )}
+          </span>
         </div>
       )}
 
@@ -126,37 +147,60 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
           images *on* and a few unreachable showed "Loading them tells the sender you opened
           this message" beside "Remote images loaded" — two banners contradicting each other,
           over a Load Images button that would have done nothing. No button here, because there
-          is nothing for the user to decide. */}
+          is nothing for the user to decide.
+
+          It deliberately claims nothing about what the sender learned. The request left this
+          machine and went unanswered; whether it reached them first is not knowable from here,
+          and "nothing was shared" would be a comforting sentence the app cannot stand behind. */}
       {rendered.failedRemote > 0 && (
         <div className={styles.banner} role="status">
           <ImageOff className={styles.bannerIcon} aria-hidden />
           <span className={styles.bannerText}>
-            {rendered.failedRemote === 1
-              ? '1 image could not be downloaded.'
-              : `${String(rendered.failedRemote)} images could not be downloaded.`}{' '}
-            The sender&rsquo;s server did not answer.
+            {rendered.failedRemote === 1 ? '1 image' : `${String(rendered.failedRemote)} images`}{' '}
+            could not be loaded. The sender&rsquo;s server did not answer.
           </span>
         </div>
       )}
 
-      {/* The other direction, and it only appears when images *did* load. Someone who opens a
-          message from a stranger and realises what that just told them needs a way to stop it
-          for the rest of the thread — and with the setting on by default, this is the only
-          per-message control they have. */}
+      {/* Images did load, so this is a report rather than a question — but the user still has
+          two things they may want to do about it, and before this they had one.
+
+          Written in the past tense and about *this* sender, because that is what actually
+          happened. "Remote images loaded, which tells the sender you opened this" described a
+          mechanism; what someone wants to know is who now knows what, and how to stop it. */}
       {loadRemote && rendered.loadedRemote > 0 && (
         <div className={styles.banner} role="status">
-          <ImageOff className={styles.bannerIcon} aria-hidden />
+          <Eye className={styles.bannerIcon} aria-hidden />
           <span className={styles.bannerText}>
-            Remote images loaded, which tells the sender you opened this.
+            This sender can now tell you opened this email, and roughly when — their images loaded
+            from their own server.
           </span>
-          <Button
-            variant="bordered"
-            onClick={() => {
-              setOverride(false)
-            }}
-          >
-            Block Images
-          </Button>
+
+          <span className={styles.bannerActions}>
+            <Button
+              variant="bordered"
+              onClick={() => {
+                setOverride(false)
+              }}
+            >
+              Hide Images
+            </Button>
+
+            {/* The durable answer. Someone who reads that sentence and does not like it wants
+                to change the rule, not to keep pressing the button on every message. */}
+            {preference !== false && (
+              <Button
+                variant="plain"
+                onClick={() => {
+                  setOverride(false)
+                  setPreference(false)
+                  void setRemoteImagesEnabled(false)
+                }}
+              >
+                Always Ask First
+              </Button>
+            )}
+          </span>
         </div>
       )}
 

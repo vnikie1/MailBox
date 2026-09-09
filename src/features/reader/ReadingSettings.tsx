@@ -33,13 +33,17 @@ export function ReadingSettings() {
             void setRemoteImagesEnabled(event.target.checked)
           }}
         />
-        Load images in messages automatically
+        Show images in messages automatically
       </label>
 
+      {/* The two states are described in the same terms the banners use, because this setting
+          and those buttons are the same decision reached from two places. Concrete about what
+          is disclosed and what is not: "improves your privacy" tells a user nothing they can
+          weigh, and the honest answer here is short enough to just say. */}
       <p className={styles.hint}>
         {images === true
-          ? 'The sender learns you opened the message, roughly when, and the IP address you opened it from. They do not learn which app you use or which message it was, and nothing is remembered between senders. Any message can be blocked from its banner.'
-          : 'Messages show a banner instead, and images load only when you ask. Nothing tells the sender you opened the message.'}
+          ? 'Most marketing email keeps its images on the sender’s own server, so showing them tells that sender you opened the message, roughly when, and the IP address you read it from. They do not learn which app you use, and nothing is shared between senders. Any message can be stopped from its own banner.'
+          : 'Nothing is fetched until you ask. Messages with images show a banner and a Show Images button, so no sender learns you opened anything. Some email will look plainer until you show them.'}
       </p>
     </section>
   )

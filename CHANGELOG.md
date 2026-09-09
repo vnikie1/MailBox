@@ -6030,3 +6030,51 @@ alongside them.
   the page and outside Playwright. What the tests cover is that the controls exist, are
   reachable and name the right things; the filename-collision arithmetic — the part that could
   silently destroy a file — is pure and is tested directly in Rust.
+
+## 2026-09-09 — The image banners say who learned what
+
+### Changed
+
+- **The remote-image banners were rewritten to be about the user's privacy rather than about
+  the mechanism.** They were accurate and useless: "Remote images loaded, which tells the sender
+  you opened this" names a thing the reader has no word for, states a fact already in the past,
+  and offers one button. What someone wants to know is who now knows what, and what they can do
+  about it.
+
+  |          | before                                                                                    | now                                                                                                             |
+  | -------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+  | shown    | "Remote images loaded, which tells the sender you opened this."                           | "This sender can now tell you opened this email, and roughly when — their images loaded from their own server." |
+  | withheld | "3 remote images were not loaded. Loading them tells the sender you opened this message." | "This email keeps its images on the sender's own server. Loading them tells them you opened this, and when."    |
+  | failed   | "10 images could not be downloaded. The sender's server did not answer."                  | unchanged in substance, and deliberately so — see Notes                                                         |
+
+- **Each banner now carries the durable answer as well as the immediate one.** "Hide Images"
+  still handles this message; **"Always Ask First"** changes the setting, because someone who
+  reads that sentence and dislikes it wants to change the rule, not press a button on every
+  message for the rest of their life. The withheld banner gets the mirror image, **"Always
+  Show"**.
+
+  The second button appears only when it means something. On a message blocked by hand a moment
+  ago, offering to change the global setting would be answering a question the user did not ask,
+  so it is shown only when the _setting_ is what is withholding them.
+
+- **The Settings copy was rewritten in the same terms**, since the toggle and those buttons are
+  the same decision reached from two places. It says what is disclosed and what is not —
+  "improves your privacy" gives a user nothing to weigh, and the honest answer is short enough
+  to simply state.
+
+### Notes
+
+- **Showing images is still the default, deliberately.** Blocking by default is what macOS Mail
+  does, and it makes ordinary mail look broken on first run. The point of this change is to put
+  the choice in front of the user in terms they can act on, not to make it for them. There is a
+  test asserting the default, so it cannot be quietly reversed.
+
+- **The failure banner still claims nothing about what the sender learned**, and that is a
+  decision rather than an omission. The request left this machine and went unanswered; whether
+  it arrived first is not knowable from here, and "nothing was shared with them" would be a
+  comforting sentence the app cannot stand behind. It says what happened and stops.
+
+- **Tested against the component, not end to end.** The browser build's seeded bodies never
+  carry remote images, so no banner can appear there at all — an e2e test would have skipped
+  itself and looked like coverage. Confirmed the tests bite by restoring the old wording and
+  watching the assertion fail on "remote image".
