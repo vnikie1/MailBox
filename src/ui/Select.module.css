@@ -1,0 +1,77 @@
+/* The popup button. Ordered by ascending specificity — see Button.module.css. */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.label {
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+}
+
+/* The chevron is laid over the select rather than put beside it, so the whole width of the
+   control opens the menu — a chevron in a sibling box is a dead 16px at the end of every
+   popup in the window. */
+.control {
+  position: relative;
+  display: flex;
+  min-width: 0;
+}
+
+.select {
+  width: 100%;
+  min-width: var(--select-min-width);
+  height: var(--field-height);
+
+  /* Room for the chevron on the trailing edge, so a long option name stops before it rather
+     than running underneath it. */
+  padding: 0 calc(var(--field-pad-x) * 2 + var(--select-chevron)) 0 var(--field-pad-x);
+  color: var(--label-1);
+  font-family: inherit;
+  font-size: var(--t-body-size);
+  line-height: var(--t-body-leading);
+  letter-spacing: var(--t-body-tracking);
+  text-overflow: ellipsis;
+  background: var(--fill-hover);
+  border: 0;
+  border-radius: var(--field-radius);
+  cursor: default;
+  appearance: none;
+}
+
+.chevron {
+  position: absolute;
+  top: 50%;
+  right: var(--field-pad-x);
+  width: var(--select-chevron);
+  height: var(--select-chevron);
+  color: var(--label-2);
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.description {
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+.select:disabled {
+  color: var(--label-3);
+}
+
+.select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.select:hover:not(:disabled) {
+  background: var(--fill-pressed);
+}

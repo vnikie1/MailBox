@@ -26,6 +26,8 @@ export {
 } from './Menu'
 export { Popover, type PopoverProps } from './Popover'
 export { ScrollArea, type ScrollAreaProps } from './ScrollArea'
+export { Segmented, type SegmentedOption, type SegmentedProps } from './Segmented'
+export { Select, type SelectOption, type SelectProps } from './Select'
 export { Sheet, type SheetProps } from './Sheet'
 export { Skeleton, type SkeletonProps } from './Skeleton'
 export { TextField, type TextFieldProps } from './TextField'

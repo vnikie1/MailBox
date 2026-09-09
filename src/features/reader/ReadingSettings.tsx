@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 
+import { Field, Form } from '@/features/settings/SettingsForm'
 import { remoteImagesEnabled, setRemoteImagesEnabled } from '@/lib/ipc'
 
 import styles from '@/features/settings/settings.module.css'
@@ -20,31 +21,38 @@ export function ReadingSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Reading</h3>
+      <h2 className={styles.heading}>Reading</h2>
 
-      <label className={styles.choice}>
-        <input
-          type="checkbox"
-          className={styles.checkbox}
-          checked={images === true}
-          disabled={images === null}
-          onChange={(event) => {
-            setImages(event.target.checked)
-            void setRemoteImagesEnabled(event.target.checked)
-          }}
-        />
-        Show images in messages automatically
-      </label>
-
-      {/* The two states are described in the same terms the banners use, because this setting
-          and those buttons are the same decision reached from two places. Concrete about what
-          is disclosed and what is not: "improves your privacy" tells a user nothing they can
-          weigh, and the honest answer here is short enough to just say. */}
-      <p className={styles.hint}>
-        {images === true
-          ? 'Most marketing email keeps its images on the sender’s own server, so showing them tells that sender you opened the message, roughly when, and the IP address you read it from. They do not learn which app you use, and nothing is shared between senders. Any message can be stopped from its own banner.'
-          : 'Nothing is fetched until you ask. Messages with images show a banner and a Show Images button, so no sender learns you opened anything. Some email will look plainer until you show them.'}
-      </p>
+      <Form>
+        {/* The two states are described in the same terms the banners use, because this
+            setting and those buttons are the same decision reached from two places. Concrete
+            about what is disclosed: "improves your privacy" tells a user nothing they can
+            weigh. Cut to two sentences from five — the detail that survived is what somebody
+            deciding actually needs, and the rest was reassurance about what is *not*
+            disclosed, which nobody was worried about until we raised it. */}
+        <Field
+          label="Remote images"
+          hint={
+            images === true
+              ? 'A sender who hosts their images learns that you opened the message, roughly when, and the IP address you read it from. Any single message can be stopped from its own banner.'
+              : 'Nothing is fetched until you ask, so no sender learns you opened anything. Messages with images show a banner and a Show Images button.'
+          }
+        >
+          <label className={styles.choice}>
+            <input
+              type="checkbox"
+              className={styles.checkbox}
+              checked={images === true}
+              disabled={images === null}
+              onChange={(event) => {
+                setImages(event.target.checked)
+                void setRemoteImagesEnabled(event.target.checked)
+              }}
+            />
+            Show images in messages automatically
+          </label>
+        </Field>
+      </Form>
     </section>
   )
 }

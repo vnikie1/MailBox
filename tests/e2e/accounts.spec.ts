@@ -23,7 +23,9 @@ import { expect, test, type Page } from '@playwright/test'
  */
 async function openSettings(page: Page) {
   await page.goto('/?settings=1&pane=accounts')
-  await expect(page.getByRole('heading', { name: 'Accounts' })).toBeVisible()
+  // Level 1: the pane's own title. 'Mail accounts' is the section heading under it, and an
+  // unqualified name match finds both.
+  await expect(page.getByRole('heading', { level: 1, name: 'Accounts' })).toBeVisible()
 }
 
 test.describe('accounts settings', () => {

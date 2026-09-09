@@ -160,6 +160,23 @@
   --search-width: 200px;
   --search-width-focused: 320px;
 
+  /* ---------- popup button ----------
+   * The same surface and height as a text field, because they stand in the same form column
+   * and a popup a pixel taller than the field above it makes the whole column look crooked.
+   * The minimum width is what stops "Off" collapsing to a button narrower than its own
+   * chevron when it shares a row with nothing. */
+  --select-min-width: 132px;
+  --select-chevron: 14px;
+
+  /* ---------- segmented control ----------
+   * A hair taller than a field: the track has to hold a chip *and* the gap around it, and a
+   * 28px track leaves the chip 24px, which is shorter than every other control on the pane. */
+  --segmented-height: 26px;
+  --segmented-gap: var(--sp-1);
+  --segmented-radius: var(--r-lg);
+  --segmented-segment-radius: var(--r-md);
+  --segmented-min-width: 76px;
+
   /* ---------- recipient token field — docs/02 §6.7 ---------- */
   --tokenfield-row-height: 30px;
   --tokenfield-label-width: 60px;
@@ -393,15 +410,48 @@
   --settings-nav-row-radius: var(--r-md);
   --settings-nav-icon: 16px;
   --settings-nav-pad: var(--sp-3);
-  --settings-pane-pad: var(--sp-6);
-  --settings-pane-gap: var(--sp-7);
+  --settings-pane-pad: var(--sp-8);
+  --settings-pane-gap: var(--sp-9);
   --settings-report-max-height: 260px;
   --settings-signature-min-height: 200px;
 
-  /* The accent swatches. Sized like a touch target rather than a dot: eleven colours in a
-   * row have to be distinguishable and clickable, and a 16px circle is neither. */
-  --settings-swatch: 28px;
-  --settings-swatch-gap: var(--sp-4);
+  /* The two-column form. Mail's settings are a form, not a stack: a quiet right-aligned label
+   * in a fixed column, the control in the next one, every control on the same axis down the
+   * pane. The label column is sized for the longest label in the window — "In a reply, place
+   * the signature" — which wraps to two lines rather than widening the column past the point
+   * where the controls have room. */
+  --settings-label-col: 156px;
+  --settings-form-col-gap: var(--sp-6);
+  --settings-form-row-gap: var(--sp-6);
+
+  /* A form row's label sits on the first line of its control. The control is --field-height
+   * and the label is one line of subhead, so this is the nudge that puts the two on the same
+   * line. Derived rather than measured: --font-size-base moves with the density, so a fixed
+   * number would be right at Default and wrong at the other two. */
+  --settings-label-offset: calc(
+    (var(--field-height) - var(--t-subhead-size) * var(--t-subhead-leading)) / 2
+  );
+
+  /* The widest a pane's content is allowed to get. Wider than --measure-prose because a form
+   * row is a label plus a control rather than a line of text, and 60ch of *that* leaves the
+   * controls stranded halfway across a maximised window. */
+  --settings-content-width: 620px;
+
+  /* One line of footnote, at whatever the density makes that. A status line that collapses
+   * when it has nothing to say drags the rest of the pane up and down as it saves.
+   * Standing rule 6. */
+  --settings-status-height: calc(var(--t-footnote-size) * var(--t-footnote-leading));
+
+  /* A popup that holds an email address without stretching to the width of the pane. */
+  --settings-picker-width: 280px;
+
+  /* The accent swatches. Sized like a touch target rather than a dot: twelve circles in a
+   * row have to be distinguishable and clickable, and a 16px circle is neither. The gap is
+   * tight because the row has to fit the control column at the default window width — at 28px
+   * and an 8px gap it did not, and the twelfth swatch wrapped onto a line of its own, which
+   * reads as a rendering fault rather than a palette. */
+  --settings-swatch: 26px;
+  --settings-swatch-gap: var(--sp-2);
   --settings-swatch-ring: 2px;
   --settings-swatch-selected-ring: 3px;
   --transfer-list-max-height: 220px;

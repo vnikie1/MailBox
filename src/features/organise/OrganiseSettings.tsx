@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { useMailboxes } from '@/app/queries'
+import { Field, Form } from '@/features/settings/SettingsForm'
 import { Button } from '@/ui'
 
 import { RulesEditor } from './RulesEditor'
@@ -25,31 +26,37 @@ export function OrganiseSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Organising</h3>
+      <h2 className={styles.heading}>Organising</h2>
 
-      <div className={styles.row}>
-        <Button
-          variant="bordered"
-          onClick={() => {
-            setRulesOpen(true)
-          }}
+      {/* One row each rather than two buttons side by side under one note: they open two
+          different editors and the note that used to sit under them described both, so
+          neither button had an explanation you could read next to it. */}
+      <Form>
+        <Field
+          label="Rules"
+          hint="Rules act on mail as it arrives, and can be run over a selection at any time with Alt+Ctrl+L."
         >
-          Rules…
-        </Button>
-        <Button
-          variant="bordered"
-          onClick={() => {
-            setSmartOpen(true)
-          }}
-        >
-          Smart Mailboxes…
-        </Button>
-      </div>
+          <Button
+            variant="bordered"
+            onClick={() => {
+              setRulesOpen(true)
+            }}
+          >
+            Edit Rules…
+          </Button>
+        </Field>
 
-      <p className={styles.hint}>
-        Rules act on mail as it arrives, and can be run over a selection at any time with
-        Alt+Ctrl+L. Smart mailboxes are saved searches — they gather mail without moving it.
-      </p>
+        <Field label="Smart mailboxes" hint="Saved searches. They gather mail without moving it.">
+          <Button
+            variant="bordered"
+            onClick={() => {
+              setSmartOpen(true)
+            }}
+          >
+            Edit Smart Mailboxes…
+          </Button>
+        </Field>
+      </Form>
 
       <RulesEditor
         open={rulesOpen}

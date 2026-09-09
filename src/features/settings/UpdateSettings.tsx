@@ -5,6 +5,7 @@ import type { UpdateStatus } from '@/lib/generated/UpdateStatus'
 import { updateCheck, updateInstall } from '@/lib/ipc'
 import { Button } from '@/ui'
 
+import { Field, Form } from './SettingsForm'
 import styles from './settings.module.css'
 
 /**
@@ -91,75 +92,75 @@ export function UpdateSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Updates</h3>
+      <h2 className={styles.heading}>Updates</h2>
 
-      {status !== null && !status.supported ? (
-        <p className={styles.hint}>
-          This copy came from the Microsoft Store, which installs updates for you.
-        </p>
-      ) : (
-        <>
-          <div className={styles.row}>
-            <Button variant="bordered" disabled={checking || installing} onClick={check}>
-              <RefreshCw size={16} aria-hidden />
-              {checking ? 'Checking…' : 'Check for updates'}
-            </Button>
-
-            {status?.available === true && (
-              <Button
-                variant="filled"
-                disabled={installing}
-                onClick={() => {
-                  setInstalling(true)
-                  setInstallError(null)
-                  void updateInstall().catch((error: unknown) => {
-                    setInstalling(false)
-                    setInstallError(describeInstallFailure(error))
-                  })
-                }}
-              >
-                {installing ? 'Installing…' : `Install ${status.version ?? ''}`}
-              </Button>
-            )}
-          </div>
-
-          <p className={styles.hint} aria-live="polite">
-            {checking
-              ? 'Asking whether there is a newer version…'
-              : status === null
-                ? ''
-                : status.error !== null
-                  ? // Being offline is not a fault. Saying so plainly beats a red banner that
-                    // teaches people to ignore the one that matters.
-                    'Could not reach the update server. This is usually just being offline.'
-                  : status.available
-                    ? `Version ${status.version ?? 'unknown'} is available.`
-                    : 'Halcyon is up to date.'}
-          </p>
-
-          {installError !== null && (
-            <p className={styles.hint} role="alert">
-              {installError}
-            </p>
-          )}
-
-          {status?.available === true && status.notes !== null && (
-            <p className={styles.hint}>{status.notes}</p>
-          )}
-
-          <p className={styles.hint}>
-            Checking asks GitHub for a small file listing the latest version. It sends nothing about
-            you or your mail. Updates are signed, and one that is not is refused.
-          </p>
-
-          {installing && (
+      <Form>
+        {status !== null && !status.supported ? (
+          <Field label="Updates">
             <p className={styles.hint}>
-              Halcyon will restart when this finishes. Your accounts, mail and settings stay where
-              they are.
+              This copy came from the Microsoft Store, which installs updates for you.
             </p>
-          )}
-        </>
-      )}
+          </Field>
+        ) : (
+          <Field
+            label="Updates"
+            hint="Checking asks GitHub for a small file listing the latest version. It sends nothing about you or your mail. Updates are signed, and one that is not is refused."
+          >
+            <div className={styles.row}>
+              <Button variant="bordered" disabled={checking || installing} onClick={check}>
+                <RefreshCw size={16} aria-hidden />
+                {checking ? 'Checking…' : 'Check for updates'}
+              </Button>
+
+              {status?.available === true && (
+                <Button
+                  variant="filled"
+                  disabled={installing}
+                  onClick={() => {
+                    setInstalling(true)
+                    setInstallError(null)
+                    void updateInstall().catch((error: unknown) => {
+                      setInstalling(false)
+                      setInstallError(describeInstallFailure(error))
+                    })
+                  }}
+                >
+                  {installing ? 'Installing…' : `Install ${status.version ?? ''}`}
+                </Button>
+              )}
+            </div>
+
+            {/* Reserved from the start rather than appearing when there is something to say:
+                this line sits directly under the buttons, and a line that grows into place
+                moves them. Standing rule 6. */}
+            <p className={styles.status} aria-live="polite">
+              {checking
+                ? 'Asking whether there is a newer version…'
+                : installing
+                  ? 'Halcyon will restart when this finishes. Your accounts, mail and settings stay where they are.'
+                  : status === null
+                    ? ''
+                    : status.error !== null
+                      ? // Being offline is not a fault. Saying so plainly beats a red banner
+                        // that teaches people to ignore the one that matters.
+                        'Could not reach the update server. This is usually just being offline.'
+                      : status.available
+                        ? `Version ${status.version ?? 'unknown'} is available.`
+                        : 'Halcyon is up to date.'}
+            </p>
+
+            {installError !== null && (
+              <p className={styles.hint} role="alert">
+                {installError}
+              </p>
+            )}
+
+            {status?.available === true && status.notes !== null && (
+              <p className={styles.hint}>{status.notes}</p>
+            )}
+          </Field>
+        )}
+      </Form>
     </section>
   )
 }

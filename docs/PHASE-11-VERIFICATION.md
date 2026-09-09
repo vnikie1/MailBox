@@ -345,3 +345,44 @@ time, which a user pays once after installing and never again.
 is roughly twice the budget, and no amount of averaging makes that not true; it is reported as its
 own number rather than folded into a mean. This is also still not a *cold machine* — measuring
 that needs a reboot between runs.
+
+---
+
+## 9. Settings, laid out as a form (2026-09-09)
+
+### 9.1 Two primitives docs/02 §6 does not list
+
+§6 specs ten components and neither a popup button nor a segmented control is among them.
+Both were added: `src/ui/Select.tsx` and `src/ui/Segmented.tsx`.
+
+The reason is not that the doc is wrong but that it was written before there was a settings
+window to lay out. §6's list covers the mailbox — toolbar, sidebar row, list row, reader header,
+buttons, search field, token field, attachment chip, menus, empty states — and none of those
+holds a *value the user picks from a small set*. Settings is nothing but that, and the only
+control the app had for it was a stack of radio buttons: six of them, twenty rows, in a window
+580px tall.
+
+Both new primitives are built on the existing token layer and add no colour of their own. The
+segmented control's chosen chip is `--bg-content` over a `--fill-hover` track with a hairline,
+not an accent fill, because three of them appear on the General pane at once and three accent
+bars would be the loudest thing in a window whose job is to be scanned.
+
+### 9.2 What was verified, and how
+
+| Claim | How |
+| --- | --- |
+| Every control cell in a pane shares one left edge | e2e, measures `getBoundingClientRect().left` across all of them and requires one distinct value |
+| Arrow keys walk the pane list, focus following | e2e, on the running page |
+| Arrow keys move a segmented control | e2e, asserting `data-theme` on `<html>` after each press |
+| A popup is announced once, not twice | Read back from the DOM: `select.labels` and `aria-label` agree, one each, on all four popups |
+| Twelve accent swatches fit one row at the default window size | Screenshot at 780×580, both themes |
+| The full gate | `npm run verify` clean; 261 unit tests, 96 e2e |
+
+### 9.3 What is still open
+
+- **The Composing pane holds one control.** Layout has taken it as far as it goes; the app has
+  exactly one composing setting. See the note in the changelog for why `previewLines` and the
+  classic layout were not moved here to fill it.
+- **`assets/reference/` still has no macOS Mail *settings* capture.** The form shape here is
+  from the description in docs/01 and from the platform convention both macOS and Windows
+  settings follow, not from a measured reference. No claim of pixel fidelity is made.

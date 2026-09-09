@@ -7,9 +7,12 @@ import {
   type ThemePreference,
   type TransparencyPreference,
 } from '@/lib/appearance'
+import { cx } from '@/lib/cx'
 import { useAppearanceStore } from '@/store/appearance'
 import { useSettingsStore } from '@/store/settings'
+import { Segmented, Select, type SegmentedOption, type SelectOption } from '@/ui'
 
+import { Field, Form } from './SettingsForm'
 import styles from './settings.module.css'
 
 /**
@@ -25,24 +28,35 @@ import styles from './settings.module.css'
  * Every option here has a **System** setting and it is the default, because Windows already
  * knows the answer for two of the three and asking again is how an app ends up in dark mode
  * when the desktop is light.
+ *
+ * ## Why two different controls
+ *
+ * Theme and density are segmented controls; translucency is a popup. The rule is whether seeing
+ * the alternatives is worth the width: Light against Dark is a comparison, and three words of
+ * "Always translucent / Never translucent / Follow Windows" is a paragraph laid sideways. This
+ * section used to be four stacks of radios — twelve rows, four legends, and a pane that
+ * scrolled to hold four answers.
  */
 
-const THEMES: { id: ThemePreference; label: string }[] = [
-  { id: 'system', label: 'Follow Windows' },
-  { id: 'light', label: 'Light' },
-  { id: 'dark', label: 'Dark' },
+const THEMES: SegmentedOption<ThemePreference>[] = [
+  { value: 'system', label: 'Follow Windows' },
+  { value: 'light', label: 'Light' },
+  { value: 'dark', label: 'Dark' },
 ]
 
-const DENSITIES: { id: Density; label: string; hint: string }[] = [
-  { id: 'compact', label: 'Compact', hint: 'More messages on screen.' },
-  { id: 'default', label: 'Default', hint: 'What Mail uses.' },
-  { id: 'comfortable', label: 'Comfortable', hint: 'Larger text and taller rows.' },
+const DENSITIES: (SegmentedOption<Density> & { hint: string })[] = [
+  { value: 'compact', label: 'Compact', hint: 'More messages on screen.' },
+  // Not "What Mail uses." — that named the app this one is modelled on, in the settings window
+  // of the app the reader is actually running, where "Mail" is at best the Windows app of that
+  // name. A hint has to describe the effect, not the provenance.
+  { value: 'default', label: 'Default', hint: 'The standard row height.' },
+  { value: 'comfortable', label: 'Comfortable', hint: 'Larger text and taller rows.' },
 ]
 
-const TRANSPARENCIES: { id: TransparencyPreference; label: string }[] = [
-  { id: 'system', label: 'Follow Windows' },
-  { id: 'full', label: 'Always translucent' },
-  { id: 'reduce', label: 'Never translucent' },
+const TRANSPARENCIES: SelectOption<TransparencyPreference>[] = [
+  { value: 'system', label: 'Follow Windows' },
+  { value: 'full', label: 'Always translucent' },
+  { value: 'reduce', label: 'Never translucent' },
 ]
 
 /**
@@ -112,112 +126,92 @@ export function AppearanceSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Appearance</h3>
+      <h2 className={styles.heading}>Appearance</h2>
 
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>Theme</legend>
+      <Form>
+        <Field label="Theme" labelId="theme-label">
+          <Segmented
+            label="Theme"
+            labelledBy="theme-label"
+            options={THEMES}
+            value={theme}
+            onValueChange={setTheme}
+          />
+        </Field>
 
-        {THEMES.map((choice) => (
-          <label key={choice.id} className={styles.choice}>
-            <input
-              type="radio"
-              name="theme"
-              className={styles.radio}
-              checked={theme === choice.id}
-              onChange={() => {
-                setTheme(choice.id)
-              }}
-            />
-            {choice.label}
-          </label>
-        ))}
-      </fieldset>
+        <Field
+          label="Accent colour"
+          labelId="accent-label"
+          hint={
+            accent === 'system'
+              ? 'Following the accent colour Windows is set to.'
+              : `Using ${ACCENT_LABELS[accent] ?? accent} instead of the Windows accent colour.`
+          }
+        >
+          <div className={styles.swatches} role="radiogroup" aria-labelledby="accent-label">
+            {ACCENT_OPTIONS.map((option) => (
+              <label
+                key={option.id}
+                className={cx(styles.swatch, option.id === 'system' && styles.swatchSystem)}
+                title={option.label}
+              >
+                <input
+                  type="radio"
+                  name="accent"
+                  className={styles.swatchInput}
+                  aria-label={option.label}
+                  checked={accent === option.id}
+                  onChange={() => {
+                    setAccent(option.id)
+                  }}
+                />
+                {/*
+                  The colour arrives as an inline style rather than from a token, and that is
+                  deliberate. Standing rule 1 keeps raw colour out of components because a
+                  component should not invent one — but this is not the component choosing a
+                  colour, it is rendering a value the user is picking from, and the values are
+                  the same eleven pairs primitive.css holds. tests/unit/accentPalette.test.ts
+                  fails if the two ever disagree.
+                */}
+                <span
+                  className={styles.swatchFill}
+                  style={option.preview === null ? undefined : { background: option.preview }}
+                  aria-hidden="true"
+                />
+              </label>
+            ))}
+          </div>
+        </Field>
 
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>Density</legend>
+        <Field
+          label="Density"
+          labelId="density-label"
+          hint={DENSITIES.find((choice) => choice.value === density)?.hint}
+        >
+          <Segmented
+            label="Density"
+            labelledBy="density-label"
+            options={DENSITIES}
+            value={density}
+            onValueChange={setDensity}
+          />
+        </Field>
 
-        {DENSITIES.map((choice) => (
-          <label key={choice.id} className={styles.choice}>
-            <input
-              type="radio"
-              name="density"
-              className={styles.radio}
-              checked={density === choice.id}
-              onChange={() => {
-                setDensity(choice.id)
-              }}
-            />
-            {choice.label}
-          </label>
-        ))}
-      </fieldset>
-
-      <p className={styles.hint}>{DENSITIES.find((choice) => choice.id === density)?.hint}</p>
-
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>Accent colour</legend>
-
-        <div className={styles.swatches}>
-          {ACCENT_OPTIONS.map((option) => (
-            <label key={option.id} className={styles.swatch} title={option.label}>
-              <input
-                type="radio"
-                name="accent"
-                className={styles.swatchInput}
-                aria-label={option.label}
-                checked={accent === option.id}
-                onChange={() => {
-                  setAccent(option.id)
-                }}
-              />
-              {/*
-                The colour arrives as an inline style rather than from a token, and that is
-                deliberate. Standing rule 1 keeps raw colour out of components because a
-                component should not invent one — but this is not the component choosing a
-                colour, it is rendering a value the user is picking from, and the values are
-                the same eleven pairs primitive.css holds. tests/unit/accentPalette.test.ts
-                fails if the two ever disagree.
-              */}
-              <span
-                className={styles.swatchFill}
-                style={option.preview === null ? undefined : { background: option.preview }}
-                aria-hidden="true"
-              />
-            </label>
-          ))}
-        </div>
-      </fieldset>
-
-      <p className={styles.hint}>
-        {accent === 'system'
-          ? 'Halcyon is using the accent colour from Windows.'
-          : `Halcyon is using ${ACCENT_LABELS[accent] ?? accent}, whatever Windows is set to.`}
-      </p>
-
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>Translucency</legend>
-
-        {TRANSPARENCIES.map((choice) => (
-          <label key={choice.id} className={styles.choice}>
-            <input
-              type="radio"
-              name="transparency"
-              className={styles.radio}
-              checked={transparency === choice.id}
-              onChange={() => {
-                setTransparency(choice.id)
-              }}
-            />
-            {choice.label}
-          </label>
-        ))}
-      </fieldset>
-
-      <p className={styles.hint}>
-        The sidebar and the toolbar pick up a tint of whatever is behind the window. Turning it off
-        costs nothing in appearance terms and can help on a machine where the effect is expensive to
-        draw.
-      </p>
+        <Field
+          label="Translucency"
+          htmlFor="translucency"
+          hint="The sidebar and toolbar pick up a tint of whatever is behind the window. Turning it off costs nothing in appearance terms and can help where the effect is expensive to draw."
+        >
+          <Select
+            id="translucency"
+            label="Translucency"
+            hideLabel
+            options={TRANSPARENCIES}
+            value={transparency}
+            onValueChange={setTransparency}
+          />
+        </Field>
+      </Form>
     </section>
   )
 }

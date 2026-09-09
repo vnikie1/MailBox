@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 
+import { Field, Form } from '@/features/settings/SettingsForm'
 import type { JunkStatus } from '@/lib/generated/JunkStatus'
 import { junkStatus, junkTrainingMode, setJunkTrainingMode } from '@/lib/organise'
 
@@ -34,29 +35,34 @@ export function JunkSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Junk</h3>
+      <h2 className={styles.heading}>Junk</h2>
 
-      <label className={styles.choice}>
-        <input
-          type="checkbox"
-          className={styles.checkbox}
-          checked={training === true}
-          disabled={training === null}
-          onChange={(event) => {
-            setTraining(event.target.checked)
-            void setJunkTrainingMode(event.target.checked)
-          }}
-        />
-        Mark junk without moving it
-      </label>
-
-      <p className={styles.hint}>
-        {status === null
-          ? 'Checking what the filter has learned…'
-          : status.ready
-            ? `Trained on ${String(status.cleanExamples)} ordinary and ${String(status.junkExamples)} junk messages.`
-            : `Not enough examples yet — ${String(status.needed)} of each are needed, and there are ${String(status.cleanExamples)} ordinary and ${String(status.junkExamples)} junk. Until then nothing is filed automatically.`}
-      </p>
+      <Form>
+        <Field
+          label="Junk filter"
+          hint={
+            status === null
+              ? 'Checking what the filter has learned…'
+              : status.ready
+                ? `Trained on ${String(status.cleanExamples)} ordinary and ${String(status.junkExamples)} junk messages.`
+                : `Not trained yet. It needs ${String(status.needed)} of each and has ${String(status.cleanExamples)} ordinary and ${String(status.junkExamples)} junk, so nothing is filed automatically until then.`
+          }
+        >
+          <label className={styles.choice}>
+            <input
+              type="checkbox"
+              className={styles.checkbox}
+              checked={training === true}
+              disabled={training === null}
+              onChange={(event) => {
+                setTraining(event.target.checked)
+                void setJunkTrainingMode(event.target.checked)
+              }}
+            />
+            Mark junk without moving it
+          </label>
+        </Field>
+      </Form>
     </section>
   )
 }

@@ -4,54 +4,141 @@
  * their own, byte-identical apart from one class. That is how a settings window ends up with
  * sections that do not line up: a spacing change made in one copy and not the others is
  * invisible until the two sections are finally shown side by side, which is exactly what the
- * paned window does. One file, imported by all of them. */
+ * paned window does. One file, imported by all of them.
+ *
+ * ## The form
+ *
+ * Mail's settings are a *form*, not a stack. A quiet label, right-aligned in a fixed column;
+ * the control in the next column; every control in the window on the same vertical axis. What
+ * was here before stacked label-above-control at one indentation, which means nothing lines up
+ * with anything and the eye has no column to run down — and it spent a full row of height on
+ * every label. `.form` is that column pair, and `SettingsForm.tsx` is the two components that
+ * put rows into it.
+ */
+
+/* --------------------------------------------------------------------- the pane */
+
+/* The pane's own title, matching the nav entry that opened it. Every pane has one now: General
+   used to open on a heading that said "Appearance", so the one word telling you where you were
+   was in the window's title bar and nowhere else. */
+.title {
+  margin: 0;
+  color: var(--label-1);
+  font-size: var(--t-title2-size);
+  font-weight: var(--t-title2-weight);
+  line-height: var(--t-title2-leading);
+  letter-spacing: var(--t-title2-tracking);
+}
 
 .section {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-6);
 }
 
 .heading {
   margin: 0;
   color: var(--label-1);
   font-size: var(--t-headline-size);
+  font-weight: var(--t-headline-weight);
   line-height: var(--t-headline-leading);
 }
 
-.group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-3);
-  padding: 0;
+/* A section's own note, above its rows and across the full width. Distinct from `.hint`, which
+   belongs to one control and sits in the control column under it. */
+.intro {
+  max-width: var(--measure-prose);
   margin: 0;
-  border: 0;
-}
-
-/**
- * The legend carries the separation between one group of choices and the next.
- *
- * `.section` spaces its children by `--sp-4` and `.group` spaces its radios by `--sp-3` —
- * eight pixels against six. Two numbers that close read as one rhythm, so "Density" sat as
- * near to the Theme radios above it as those radios sat to each other, and every legend looked
- * like the last line of the group before it rather than the first line of its own.
- *
- * Put here rather than as a bigger `.section` gap because a hint belongs *tight* to the group
- * it explains: widening the section would have pushed "What Mail uses." away from Density and
- * towards the next legend, which is the same confusion the other way round.
- */
-.legend {
-  padding: 0;
   color: var(--label-2);
   font-size: var(--t-subhead-size);
   line-height: var(--t-subhead-leading);
 }
 
-/* On the fieldset, not on its legend. A <legend> is laid out specially inside a fieldset and
- * Chromium ignores a margin on it — the rule was there first, looked right, and moved nothing. */
-.group:not(:first-of-type) {
-  margin-top: var(--sp-5);
+/* --------------------------------------------------------------------- the form */
+
+.form {
+  display: grid;
+  grid-template-columns: var(--settings-label-col) minmax(0, 1fr);
+  column-gap: var(--settings-form-col-gap);
+  row-gap: var(--settings-form-row-gap);
+  align-items: start;
 }
+
+/**
+ * The label column. Right-aligned against the controls, and quieter than them.
+ *
+ * The nudge down is what puts a one-line label on the same baseline as the control beside it:
+ * a `--field-height` control centres its text, a label does not, and without this every label
+ * in the window sits a few pixels high — which is visible precisely because the column makes
+ * them all sit high by the same amount.
+ */
+.label {
+  min-width: 0;
+  padding-top: var(--settings-label-offset);
+  color: var(--label-2);
+  font-size: var(--t-subhead-size);
+  line-height: var(--t-subhead-leading);
+  letter-spacing: var(--t-subhead-tracking);
+  text-align: right;
+
+  /* An email address is one unbroken word and the Notifications rows use one as a label. A
+     right-aligned label wider than its column does not clip, it paints out of the left of the
+     grid — over the pane's padding first and the nav after that. Wrapping keeps it inside. */
+  overflow-wrap: anywhere;
+}
+
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: start;
+  min-width: 0;
+}
+
+/* A row whose content needs the whole width: the signature editor, a folder list, a crash
+   report. Still inside the form, so it keeps the row rhythm. */
+.full {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+/**
+ * Narrow: one column, label above control.
+ *
+ * The window can be dragged down to 560px (`settings_open` sets the minimum), and at that width
+ * the label column plus the pane's padding leave about 160px for the control — while a
+ * three-segment control needs 236 and will not shrink below it. So Dark ran off the right edge
+ * of the window and could not be clicked at all. Below the width where both columns fit, the
+ * form stops being two columns.
+ *
+ * The threshold is derived from that arithmetic rather than picked: 176 of nav, 40 of padding,
+ * a scrollbar gutter, 156 of label column and its gap leaves 250px of control at 680px, which
+ * is the narrowest a segmented control is comfortable in.
+ */
+@media (width < 680px) {
+  .form {
+    grid-template-columns: minmax(0, 1fr);
+
+    /* Tight between a label and its own control; the separation between one field and the next
+       is carried by the label's margin below, the same trick a legend used to play. */
+    row-gap: var(--sp-2);
+  }
+
+  .label {
+    padding-top: 0;
+    text-align: left;
+  }
+
+  .label:not(:first-child) {
+    margin-top: var(--sp-6);
+  }
+
+  .full {
+    grid-column: 1;
+  }
+}
+
+/* --------------------------------------------------------------------- controls */
 
 .choice {
   display: flex;
@@ -62,7 +149,16 @@
 
 .radio,
 .checkbox {
+  flex: none;
   accent-color: var(--accent);
+}
+
+/* A row of buttons, or of a control and its label. */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+  align-items: center;
 }
 
 /* The accent picker. Real radios, drawn as swatches — see AppearanceSettings.tsx for why the
@@ -84,6 +180,18 @@
   height: var(--settings-swatch);
   border-radius: var(--r-pill);
   cursor: pointer;
+}
+
+/**
+ * "Follow Windows", held apart from the eleven fixed colours.
+ *
+ * It draws whatever Windows is currently set to, so on a machine with a blue accent it is a
+ * blue circle sitting next to the circle called Blue — two swatches that look identical and
+ * mean different things. The gap is the cheapest honest signal that the first one is not a
+ * colour; the sentence under the row says which is in use.
+ */
+.swatchSystem {
+  margin-right: var(--sp-5);
 }
 
 /* Transparent and full-size rather than display:none. A hidden input is not focusable, and
@@ -117,30 +225,39 @@
     0 0 0 var(--settings-swatch-selected-ring) var(--accent);
 }
 
+/* --------------------------------------------------------------------- text */
+
+/**
+ * A note about the control above it.
+ *
+ * Footnote size and `--label-2`, and it stays that way. Every pane in this window used to end
+ * in two or three lines of prose set nearly as loud as the controls, so the paragraphs were
+ * the first thing the eye landed on and the settings were the second — in a window whose only
+ * job is to be scanned for a control.
+ */
 .hint {
+  max-width: var(--measure-prose);
   margin: 0;
   color: var(--label-2);
   font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
+  line-height: var(--t-footnote-leading);
+  letter-spacing: var(--t-footnote-tracking);
+}
+
+/* A live status line — "Saved.", "Checking…", the junk filter's counts. Same size as a hint
+   and given a minimum height, so a pane does not shift under the cursor when one appears.
+   Standing rule 6. */
+.status {
+  min-height: var(--settings-status-height);
+  margin: 0;
+  color: var(--label-2);
+  font-size: var(--t-footnote-size);
+  font-weight: var(--t-footnote-weight);
   line-height: var(--t-footnote-leading);
 }
 
-/* A row of buttons, or of a control and its label. */
-.row {
-  display: flex;
-  gap: var(--sp-3);
-  align-items: center;
-}
-
-/* One block per account, indented so the per-account choices read as belonging to the address
- * above them rather than as a flat list of nine checkboxes. */
-.account {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding-left: var(--sp-4);
-  border-left: var(--hairline) solid var(--separator);
-}
-
+/* Small dim text inside a row — a byte count, an address above a group of choices. */
 .name {
   color: var(--label-2);
   font-size: var(--t-footnote-size);
@@ -151,8 +268,8 @@
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  padding-left: var(--sp-5);
+  gap: var(--sp-3);
+  padding-left: var(--sp-7);
   margin: 0;
   color: var(--label-1);
   font-size: var(--t-subhead-size);

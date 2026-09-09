@@ -1,18 +1,23 @@
 /* Settings → Signatures. docs/06 Phase 11. */
 
+/* Wide enough for a full address without becoming the widest thing on the pane. */
 .picker {
-  height: var(--field-height);
-  padding: 0 var(--field-pad-x);
-  color: var(--label-1);
-  font: inherit;
-  background: var(--bg-content);
-  border: var(--hairline) solid var(--separator);
-  border-radius: var(--field-radius);
+  max-width: var(--settings-picker-width);
 }
 
-.picker:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--hairline);
+/* The editor spans the form, but keeps the control column's left edge — so the box starts
+   where every other control on the pane starts rather than under the labels. */
+.editorRow {
+  padding-left: calc(var(--settings-label-col) + var(--settings-form-col-gap));
+}
+
+/* Where the form collapses to one column there is no control column to line up with, and the
+   indent would just be a margin the editor does not need. Same breakpoint as
+   settings.module.css; see the note there for where the number comes from. */
+@media (width < 680px) {
+  .editorRow {
+    padding-left: 0;
+  }
 }
 
 /* The compose editor, boxed. It has no border of its own — in a compose window it fills the

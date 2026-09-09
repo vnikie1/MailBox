@@ -11,6 +11,7 @@ import {
 } from '@/lib/ipc'
 import { Button, useToast } from '@/ui'
 
+import { Field, Form } from './SettingsForm'
 import { TransferSettings } from './TransferSettings'
 
 import styles from './settings.module.css'
@@ -68,75 +69,78 @@ function Diagnostics() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Diagnostics</h3>
+      <h2 className={styles.heading}>Diagnostics</h2>
 
-      <p className={styles.hint}>
-        Halcyon keeps a log and, if it ever stops unexpectedly, a report of what it was doing. Both
-        stay on this machine. Nothing is uploaded.
-      </p>
-
-      <div className={styles.row}>
-        <Button
-          variant="bordered"
-          onClick={() => {
-            void diagnosticsReveal()
-          }}
+      <Form>
+        <Field
+          label="Logs"
+          hint="Halcyon keeps a log and, if it ever stops unexpectedly, a report of what it was doing. Both stay on this machine. Nothing is uploaded."
         >
-          <FolderOpen size={16} aria-hidden />
-          Open the diagnostics folder
-        </Button>
+          <div className={styles.row}>
+            <Button
+              variant="bordered"
+              onClick={() => {
+                void diagnosticsReveal()
+              }}
+            >
+              <FolderOpen size={16} aria-hidden />
+              Open the diagnostics folder
+            </Button>
 
-        {reports !== null && reports.length > 0 && (
-          <Button
-            variant="bordered"
-            onClick={() => {
-              void crashReportsClear().then((removed) => {
-                toast.show({
-                  title: removed === 1 ? '1 report deleted' : `${String(removed)} reports deleted`,
-                })
-                setOpen(null)
-                refresh()
-              })
-            }}
-          >
-            Delete all reports
-          </Button>
-        )}
-      </div>
-
-      <h4 className={styles.legend}>Crash reports</h4>
-
-      {reports === null ? (
-        <p className={styles.hint}>Looking…</p>
-      ) : reports.length === 0 ? (
-        <p className={styles.hint}>
-          {runningInTauri
-            ? 'None. Halcyon has not crashed on this machine.'
-            : 'Crash reports are written by the app, so there are none in a browser.'}
-        </p>
-      ) : (
-        <ul className={pane.reports}>
-          {reports.map((report) => (
-            <li key={report.name} className={pane.report}>
-              <button
-                type="button"
-                className={pane.rowButton}
-                aria-expanded={open === report.name}
+            {reports !== null && reports.length > 0 && (
+              <Button
+                variant="bordered"
                 onClick={() => {
-                  show(report)
+                  void crashReportsClear().then((removed) => {
+                    toast.show({
+                      title:
+                        removed === 1 ? '1 report deleted' : `${String(removed)} reports deleted`,
+                    })
+                    setOpen(null)
+                    refresh()
+                  })
                 }}
               >
-                <span className={pane.summary}>{report.summary}</span>
-                <span className={styles.name}>{formatSize(report.bytes)}</span>
-              </button>
+                Delete all reports
+              </Button>
+            )}
+          </div>
+        </Field>
 
-              {open === report.name && (
-                <pre className={pane.detail}>{text === '' ? 'Reading…' : text}</pre>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+        <Field label="Crash reports">
+          {reports === null ? (
+            <p className={styles.hint}>Looking…</p>
+          ) : reports.length === 0 ? (
+            <p className={styles.hint}>
+              {runningInTauri
+                ? 'None. Halcyon has not crashed on this machine.'
+                : 'Crash reports are written by the app, so there are none in a browser.'}
+            </p>
+          ) : (
+            <ul className={pane.reports}>
+              {reports.map((report) => (
+                <li key={report.name} className={pane.report}>
+                  <button
+                    type="button"
+                    className={pane.rowButton}
+                    aria-expanded={open === report.name}
+                    onClick={() => {
+                      show(report)
+                    }}
+                  >
+                    <span className={pane.summary}>{report.summary}</span>
+                    <span className={styles.name}>{formatSize(report.bytes)}</span>
+                  </button>
+
+                  {open === report.name && (
+                    <pre className={pane.detail}>{text === '' ? 'Reading…' : text}</pre>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Field>
+      </Form>
     </section>
   )
 }

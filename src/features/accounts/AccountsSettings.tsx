@@ -10,6 +10,7 @@ import {
   oauthClientSet,
   syncAll,
 } from '@/lib/ipc'
+import { Field, Form } from '@/features/settings/SettingsForm'
 import { cx } from '@/lib/cx'
 import { Avatar, Button, IconButton, Sheet, TextField, useToast } from '@/ui'
 
@@ -17,6 +18,7 @@ import { AccountAssistant } from './AccountAssistant'
 import { useAccountsDetail, useOAuthClient, useProviders } from './queries'
 import { useAccountsChanged } from './useAccountsChanged'
 import styles from './AccountsSettings.module.css'
+import settings from '@/features/settings/settings.module.css'
 
 /** The flag palette, which is the only colour set docs/02 §2 allows outside the accent. */
 const COLORS: { id: string; label: string }[] = [
@@ -69,7 +71,7 @@ export function AccountsSettings() {
   return (
     <div className={styles.wrap}>
       <header className={styles.header}>
-        <h2 className={styles.title}>Accounts</h2>
+        <h2 className={settings.heading}>Mail accounts</h2>
         <Button
           variant="bordered"
           icon={Plus}
@@ -143,85 +145,99 @@ function AccountRow({
     })
   }, [account.id, account.displayName, name, accountsChanged])
 
+  /**
+   * Three lines, not one.
+   *
+   * The avatar, an editable name, a sign-in button, seven colour dots, two reorder arrows and
+   * a delete used to share a single row about 700px wide. The address lost — it was the one
+   * thing in the row with no natural length, so it truncated to "vnikie1…" while the name
+   * field beside it sat at a width narrower than the word in it. Nothing there was optional,
+   * so the row had to become taller rather than the contents smaller.
+   *
+   * Name and the destructive actions on the first line; the address, whole, on the second; the
+   * colour and the sign-in on the third, which is where the things you touch rarely belong.
+   */
   return (
     <li className={styles.row}>
       <Avatar name={account.displayName} email={account.email} size="md" />
 
       <div className={styles.identity}>
-        <TextField
-          label="Description"
-          hideLabel
-          className={styles.nameField}
-          value={name}
-          onChange={(event) => {
-            setName(event.currentTarget.value)
-          }}
-          onBlur={commit}
-        />
-        {/* Titled, because the row is narrow enough that the address is often elided:
-            the avatar, the name field, a sign-in button, seven colour dots, two reorder
-            buttons and a delete all share it. */}
-        <span className={styles.email} title={account.email}>
-          {account.email}
-        </span>
-      </div>
+        <div className={styles.topLine}>
+          <TextField
+            label="Description"
+            hideLabel
+            className={styles.nameField}
+            value={name}
+            onChange={(event) => {
+              setName(event.currentTarget.value)
+            }}
+            onBlur={commit}
+          />
 
-      {/* docs/03 §7 — an account with no stored credential cannot connect, and saying so
-          here is the difference between "broken" and "sign in again".
+          <div className={styles.rowActions}>
+            <IconButton
+              icon={ChevronUp}
+              label={`Move ${account.displayName} up`}
+              disabled={first}
+              onClick={() => {
+                onMove(-1)
+              }}
+            />
+            <IconButton
+              icon={ChevronDown}
+              label={`Move ${account.displayName} down`}
+              disabled={last}
+              onClick={() => {
+                onMove(1)
+              }}
+            />
+            <IconButton icon={Trash2} label={`Remove ${account.displayName}`} onClick={onRemove} />
+          </div>
+        </div>
 
-          It said it and offered no way to do it: this was a `<span>`, and there was no command
-          behind it either. A stored credential that the *server* refuses does not clear
-          `hasCredential` at all, so for the common case — an expired refresh token — even the
-          words were absent. The button is offered for every OAuth account, and only wears the
-          warning colour when the credential is actually missing. */}
-      {account.authKind === 'oAuth2' && (
-        <Button
-          variant="bordered"
-          className={account.hasCredential ? undefined : styles.reauth}
-          disabled={signingIn}
-          onClick={() => {
-            setSigningIn(true)
-            accountReauth(account.id)
-              .then(() => {
-                toast.show({ title: `Signed in to ${account.email}` })
-                return syncAll()
-              })
-              .catch((cause: unknown) => {
-                toast.show({
-                  title: 'That sign-in did not complete',
-                  description: cause instanceof Error ? cause.message : String(cause),
-                })
-              })
-              .finally(() => {
-                setSigningIn(false)
-              })
-          }}
-        >
-          {!account.hasCredential && <AlertTriangle className={styles.reauthIcon} aria-hidden />}
-          {signingIn ? 'Signing in…' : 'Sign in again'}
-        </Button>
-      )}
+        <span className={styles.email}>{account.email}</span>
 
-      <ColorPicker account={account} />
+        <div className={styles.bottomLine}>
+          <ColorPicker account={account} />
 
-      <div className={styles.rowActions}>
-        <IconButton
-          icon={ChevronUp}
-          label={`Move ${account.displayName} up`}
-          disabled={first}
-          onClick={() => {
-            onMove(-1)
-          }}
-        />
-        <IconButton
-          icon={ChevronDown}
-          label={`Move ${account.displayName} down`}
-          disabled={last}
-          onClick={() => {
-            onMove(1)
-          }}
-        />
-        <IconButton icon={Trash2} label={`Remove ${account.displayName}`} onClick={onRemove} />
+          {/* docs/03 §7 — an account with no stored credential cannot connect, and saying so
+              here is the difference between "broken" and "sign in again".
+
+              It said it and offered no way to do it: this was a `<span>`, and there was no
+              command behind it either. A stored credential that the *server* refuses does not
+              clear `hasCredential` at all, so for the common case — an expired refresh token —
+              even the words were absent. The button is offered for every OAuth account, and
+              only wears the warning colour when the credential is actually missing. */}
+          {account.authKind === 'oAuth2' && (
+            <Button
+              variant="plain"
+              className={account.hasCredential ? styles.signIn : styles.reauth}
+              disabled={signingIn}
+              onClick={() => {
+                setSigningIn(true)
+                accountReauth(account.id)
+                  .then(() => {
+                    toast.show({ title: `Signed in to ${account.email}` })
+                    return syncAll()
+                  })
+                  .catch((cause: unknown) => {
+                    toast.show({
+                      title: 'That sign-in did not complete',
+                      description: cause instanceof Error ? cause.message : String(cause),
+                    })
+                  })
+                  .finally(() => {
+                    setSigningIn(false)
+                  })
+              }}
+            >
+              {!account.hasCredential && (
+                <AlertTriangle className={styles.reauthIcon} aria-hidden />
+              )}
+              {signingIn ? 'Signing in…' : 'Sign in again'}
+            </Button>
+          )}
+        </div>
       </div>
     </li>
   )
@@ -323,21 +339,23 @@ function OAuthClientPanel() {
 
   return (
     <section className={styles.advanced}>
-      <h3 className={styles.advancedTitle}>Sign-in applications</h3>
-      <p className={styles.advancedNote}>
+      <h2 className={settings.heading}>Sign-in applications</h2>
+      <p className={settings.intro}>
         Google and Microsoft require each app to register its own sign-in application. Halcyon ships
         without one, so you register yours and paste the client ID here. It is not a secret — it
         appears in the address bar when you sign in.
       </p>
 
-      {oauthProviders.map((provider) => (
-        <OAuthClientFields
-          key={provider.id}
-          provider={provider.id}
-          label={provider.displayName}
-          requiresSecret={provider.requiresClientSecret}
-        />
-      ))}
+      <Form>
+        {oauthProviders.map((provider) => (
+          <OAuthClientFields
+            key={provider.id}
+            provider={provider.id}
+            label={provider.displayName}
+            requiresSecret={provider.requiresClientSecret}
+          />
+        ))}
+      </Form>
     </section>
   )
 }
@@ -359,10 +377,26 @@ function OAuthClientFields({
 
   const value = clientId ?? status.data?.clientId ?? ''
 
+  /**
+   * The provider's name is the form label; the two fields and the Save sit in the control
+   * column under it.
+   *
+   * They used to be three columns of their own — "Google client ID", "Google client secret"
+   * and a Save button — inside a settings window whose every other control lines up on one
+   * axis. Only Google's secret carries a description, so that field was a line and a half
+   * taller than its neighbour and the Save button, offset by hand to clear a label, landed
+   * level with nothing in the Microsoft row underneath. Stacking them puts every one of these
+   * controls on the same left edge as the rest of the window.
+   */
   return (
-    <div className={styles.clientRow}>
+    <Field label={label} htmlFor={`${provider}-client-id`}>
+      {/* Short label, long name. The visible text does not need to repeat the provider — it is
+          the row's own label, a column to the left — but two fields both announced as "Client
+          ID" would be two controls a screen reader cannot tell apart. */}
       <TextField
-        label={`${label} client ID`}
+        id={`${provider}-client-id`}
+        label="Client ID"
+        aria-label={`${label} client ID`}
         className={styles.clientField}
         value={value}
         onChange={(event) => {
@@ -375,7 +409,8 @@ function OAuthClientFields({
           optional for Google is a lie whose cost arrives an hour later, as a refresh failure
           that reads exactly like a rejected password. */}
       <TextField
-        label={`${label} client secret${requiresSecret ? '' : ' (optional)'}`}
+        label={`Client secret${requiresSecret ? '' : ' (optional)'}`}
+        aria-label={`${label} client secret`}
         type="password"
         className={styles.clientField}
         value={clientSecret}
@@ -394,7 +429,6 @@ function OAuthClientFields({
 
       <Button
         variant="bordered"
-        className={styles.clientSave}
         onClick={() => {
           void oauthClientSet(provider, value, clientSecret === '' ? undefined : clientSecret).then(
             () => {
@@ -416,6 +450,6 @@ function OAuthClientFields({
       >
         Save
       </Button>
-    </div>
+    </Field>
   )
 }

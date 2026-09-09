@@ -63,16 +63,26 @@
   height: var(--settings-nav-icon);
 }
 
+/**
+ * The pane.
+ *
+ * `scrollbar-gutter` because the General pane is the one that scrolls, and without the gutter
+ * its scrollbar was drawn *over* the accent swatches at the right of the content — the column
+ * moved sideways by the width of a scrollbar the moment the pane grew tall enough to need one,
+ * and only that pane moved.
+ */
 .pane {
+  padding: var(--settings-pane-pad);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* The content column, held to a readable width and pinned left rather than centred: a form
+   whose label column slides towards the middle of a widened window is a form you have to find
+   again after every resize. */
+.content {
   display: flex;
   flex-direction: column;
   gap: var(--settings-pane-gap);
-  padding: var(--settings-pane-pad);
-  overflow-y: auto;
-}
-
-/* Prose in a settings pane has the same reason to be measured as prose anywhere else: a hint
-   running the full width of a wide window is hard to track back to the start of the next line. */
-.pane > * {
-  max-width: var(--measure-prose);
+  max-width: var(--settings-content-width);
 }

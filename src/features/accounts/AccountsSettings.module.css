@@ -3,8 +3,7 @@
 .wrap {
   display: flex;
   flex-direction: column;
-  gap: var(--assistant-gap);
-  padding: var(--sheet-pad);
+  gap: var(--settings-pane-gap);
 }
 
 .header {
@@ -12,12 +11,6 @@
   gap: var(--sp-5);
   align-items: center;
   justify-content: space-between;
-}
-
-.title {
-  margin: 0;
-  font-size: 1.15em;
-  font-weight: 600;
 }
 
 .empty {
@@ -28,57 +21,83 @@
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  margin: 0;
+  gap: var(--sp-3);
   padding: 0;
+  margin: 0;
   list-style: none;
 }
 
+/**
+ * One account, three lines.
+ *
+ * Boxed rather than separated by a hairline. Two accounts one under the other, each three
+ * lines tall, read as six lines of one list unless something says where one ends — and the
+ * name field inside the row is itself a filled box, so a rule between rows was competing with
+ * the fields rather than grouping them.
+ */
 .row {
   display: flex;
   gap: var(--account-row-gap);
-  align-items: center;
-  min-height: var(--account-row-height);
-  padding: var(--sp-3) var(--sp-4);
+  align-items: start;
+  padding: var(--sp-5) var(--sp-6);
+  border: var(--hairline) solid var(--separator);
   border-radius: var(--account-row-radius);
-}
-
-.row:hover {
-  background: var(--fill-hover);
 }
 
 .identity {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.topLine {
+  display: flex;
+  gap: var(--sp-5);
+  align-items: center;
+}
+
+/**
+ * The description field takes the line, less what the buttons at its end need.
+ *
+ * Without this the input sat at its intrinsic width, which in the running app collapsed
+ * "Northgate" to "North" in a box narrower than the word — invisible in every test, obvious
+ * the moment the window opened.
+ */
+.nameField {
+  flex: 1 1 auto;
   min-width: 0;
 }
 
 /**
- * The description field fills the column it is in. Without this the input sits at its
- * intrinsic width, which in the running app collapsed "Northgate" to "North" in a box
- * narrower than the word — invisible in every test, obvious the moment the window opened.
- */
-.nameField {
-  width: 100%;
-}
-
-/**
- * Truncated, because the address is the one thing in this row with no natural length.
+ * The address, whole.
  *
- * `.identity` already has `min-width: 0` so the column can shrink, but a span with nothing
- * said about overflow paints outside its box anyway — so a long address ran straight under the
- * "Sign in again" button beside it, and the two were drawn on top of each other. Ellipsis is
- * the honest answer: the full address is in the title, and the row is not where anyone reads
- * it character by character.
+ * It used to share a row with six other things and truncated to "vnikie1…", with the full
+ * text available only in a tooltip. It has its own line now, so there is nothing to truncate
+ * against — the ellipsis stays as the answer for an address longer than the window, which is
+ * a different and much rarer thing.
  */
 .email {
   overflow: hidden;
   color: var(--label-2);
-  font-size: 0.9em;
+  font-size: var(--t-subhead-size);
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.bottomLine {
+  display: flex;
+  gap: var(--sp-6);
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* A quiet action, because for most accounts most of the time there is nothing wrong and this
+   is just a button that happens to be there. It gets loud below when there is. */
+.signIn {
+  flex: 0 0 auto;
+  font-size: var(--t-footnote-size);
 }
 
 /**
@@ -92,7 +111,7 @@
   gap: var(--sp-2);
   align-items: center;
   color: var(--flag-orange);
-  font-size: 0.9em;
+  font-size: var(--t-footnote-size);
 }
 
 .reauthIcon {
@@ -181,50 +200,14 @@
 .advanced {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-5);
-  padding-top: var(--assistant-gap);
+  gap: var(--sp-6);
+  padding-top: var(--settings-pane-gap);
   border-top: var(--hairline) solid var(--separator);
 }
 
-.advancedTitle {
-  margin: 0;
-  font-size: 1em;
-  font-weight: 600;
-}
-
-.advancedNote {
-  max-width: var(--measure-prose);
-  margin: 0;
-  color: var(--label-2);
-}
-
-/**
- * The client id and secret, side by side.
- *
- * Aligned to the **top**, not the bottom. Bottom alignment looks equivalent and is not: only
- * Google's secret carries a description ("Required. Google will not refresh this account
- * without it."), so that field is a line and a half taller than its neighbour, and aligning
- * their bottoms pushed the id field's label and input down by exactly that much. The Google
- * row was visibly stepped while the Microsoft row beside it — neither field described — lined
- * up perfectly, which is what made it look like a rendering fault rather than a rule.
- */
-.clientRow {
-  display: flex;
-  gap: var(--sp-4);
-  align-items: start;
-}
-
-/**
- * The Save button has no label above it, so top alignment would sit it level with the labels
- * rather than with the inputs it belongs to. Offset by exactly what a field puts above its
- * control — the label's line box plus `TextField`'s own gap — so it lines up by construction
- * rather than by a number that happens to look right.
- */
-.clientSave {
-  margin-top: calc(var(--t-subhead-leading) + var(--sp-2));
-}
-
+/* Held to a field's own width. A client ID is a long unbroken token and the box does not have
+   to be as wide as the window to hold enough of one to check it. */
 .clientField {
-  flex: 1 1 auto;
-  min-width: 0;
+  width: 100%;
+  max-width: var(--settings-picker-width);
 }

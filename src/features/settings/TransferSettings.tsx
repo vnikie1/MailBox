@@ -14,8 +14,9 @@ import {
   onTransferProgress,
   runningInTauri,
 } from '@/lib/ipc'
-import { Button } from '@/ui'
+import { Button, Select, type SelectOption } from '@/ui'
 
+import { Field, Form } from './SettingsForm'
 import styles from './settings.module.css'
 import pane from './TransferSettings.module.css'
 
@@ -52,6 +53,24 @@ function formatSize(bytes: number): string {
  */
 function count(n: number, singular: string, plural = `${singular}s`): string {
   return `${String(n)} ${n === 1 ? singular : plural}`
+}
+
+/**
+ * The two export formats.
+ *
+ * The name of the format is the option; what it is *for* is the hint underneath. As two
+ * radios, each label carried its own explanation — "One mbox file per mailbox — for
+ * Thunderbird, Apple Mail and most other programs" — which is a sentence pretending to be a
+ * label, and it wrapped to two lines in a settings window this narrow.
+ */
+const FORMATS: SelectOption<'mbox' | 'eml'>[] = [
+  { value: 'mbox', label: 'One mbox file per mailbox' },
+  { value: 'eml', label: 'A folder of .eml files' },
+]
+
+const FORMAT_HINTS: Record<'mbox' | 'eml', string> = {
+  mbox: 'Read by Thunderbird, Apple Mail and most other programs.',
+  eml: 'One file per message, readable in Windows and Outlook.',
 }
 
 export function TransferSettings() {
@@ -165,160 +184,145 @@ export function TransferSettings() {
   }
 
   return (
-    <section className={styles.section}>
-      <h3 className={styles.heading}>Import and export</h3>
+    <>
+      <section className={styles.section}>
+        <h2 className={styles.heading}>Import</h2>
 
-      <h4 className={styles.legend}>Import</h4>
+        <Form>
+          <Field
+            label="From Thunderbird"
+            hint={
+              folders.length === 0
+                ? undefined
+                : 'Everything you choose is copied into a local account called “On My PC”. Your existing accounts are not touched.'
+            }
+          >
+            {!runningInTauri ? (
+              <p className={styles.hint}>
+                Importing reads files from this machine, so it needs the app.
+              </p>
+            ) : sources === null ? (
+              <p className={styles.hint}>Looking…</p>
+            ) : folders.length === 0 && maildirFolders > 0 ? (
+              // Not the same thing as finding nothing, and the user was being told it was. A
+              // profile stored as maildir — one file per message rather than one per folder —
+              // produced an empty folder list, which reads as "you have no mail" to somebody
+              // looking at a perfectly good archive.
+              <p className={styles.hint}>
+                Found, but its mail is stored one file per message
+                {maildirFolders === 1 ? ' in 1 folder' : ` in ${String(maildirFolders)} folders`},
+                which Halcyon cannot read yet. In Thunderbird, Account Settings → Server Settings →
+                Message Store Type can be switched to &ldquo;File per folder (mbox)&rdquo;.
+              </p>
+            ) : folders.length === 0 ? (
+              <p className={styles.hint}>None found on this machine.</p>
+            ) : (
+              <>
+                <ul className={pane.folders}>
+                  {folders.map((folder) => (
+                    <li key={folder.file}>
+                      <label className={styles.choice}>
+                        <input
+                          type="checkbox"
+                          className={styles.checkbox}
+                          checked={chosen.has(folder.file)}
+                          disabled={running}
+                          onChange={() => {
+                            toggle(folder.file)
+                          }}
+                        />
+                        <span className={pane.folderName}>
+                          {folder.profile}/{folder.path}
+                        </span>
+                        <span className={styles.name}>{formatSize(folder.bytes)}</span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
 
-      {!runningInTauri ? (
-        <p className={styles.hint}>Importing reads files from this machine, so it needs the app.</p>
-      ) : sources === null ? (
-        <p className={styles.hint}>Looking for mail from other programs…</p>
-      ) : folders.length === 0 && maildirFolders > 0 ? (
-        // Not the same thing as finding nothing, and the user was being told it was. A profile
-        // stored as maildir — one file per message rather than one per folder — produced an
-        // empty folder list, which reads as "you have no mail" to somebody looking at a perfectly
-        // good archive.
-        <p className={styles.hint}>
-          Thunderbird was found, but its mail is stored one file per message
-          {maildirFolders === 1 ? ' in 1 folder' : ` in ${String(maildirFolders)} folders`}, which
-          Halcyon cannot read yet. In Thunderbird, Account Settings → Server Settings → Message
-          Store Type can be switched to &ldquo;File per folder (mbox)&rdquo;, or you can choose an
-          exported mbox file below.
-        </p>
-      ) : folders.length === 0 ? (
-        <p className={styles.hint}>
-          No Thunderbird mail was found on this machine. You can still choose files yourself — an
-          mbox file, or an Outlook .pst.
-        </p>
-      ) : (
-        <>
-          <p className={styles.hint}>
-            Found in Thunderbird. Everything you choose is copied into a local account called
-            &ldquo;On My PC&rdquo; — your existing accounts are not touched.
-          </p>
+                <Button
+                  variant="bordered"
+                  disabled={running || chosen.size === 0}
+                  onClick={startImport}
+                >
+                  <Download size={16} aria-hidden />
+                  Import {chosen.size > 0 ? `${String(chosen.size)} folders` : 'selected'}
+                </Button>
+              </>
+            )}
+          </Field>
 
-          <ul className={pane.folders}>
-            {folders.map((folder) => (
-              <li key={folder.file}>
-                <label className={styles.choice}>
-                  <input
-                    type="checkbox"
-                    className={styles.checkbox}
-                    checked={chosen.has(folder.file)}
-                    disabled={running}
-                    onChange={() => {
-                      toggle(folder.file)
-                    }}
-                  />
-                  <span className={pane.folderName}>
-                    {folder.profile}/{folder.path}
-                  </span>
-                  <span className={styles.name}>{formatSize(folder.bytes)}</span>
-                </label>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
+          {/* Six lines of prose about .pst became two. What was cut was the reassurance —
+              which folders, dates and senders survive — and what was kept is the part
+              somebody has to know *before* choosing a file: attachments do not come across. */}
+          <Field
+            label="From a file"
+            hint="An mbox file, or an Outlook .pst. From a .pst, folders, dates, senders and read state come across; attachments do not, and a few older messages arrive without their body. Both are counted when the import finishes."
+          >
+            <Button variant="bordered" disabled={running} onClick={startFileImport}>
+              <FolderOpen size={16} aria-hidden />
+              Choose files…
+            </Button>
+          </Field>
 
-      <div className={styles.row}>
-        <Button variant="bordered" disabled={running || chosen.size === 0} onClick={startImport}>
-          <Download size={16} aria-hidden />
-          Import {chosen.size > 0 ? `${String(chosen.size)} folders` : 'selected'}
-        </Button>
+          <Field hint="Importing the same mail twice adds it twice — there is nothing in an mbox file that reliably identifies a message, so nothing can tell it has seen one before." />
+        </Form>
+      </section>
 
-        <Button variant="bordered" disabled={running} onClick={startFileImport}>
-          <FolderOpen size={16} aria-hidden />
-          Choose files…
-        </Button>
-      </div>
+      <section className={styles.section}>
+        <h2 className={styles.heading}>Export</h2>
 
-      <p className={styles.hint}>
-        Importing the same mail twice adds it twice. There is nothing in an mbox file that reliably
-        identifies a message, so nothing can tell that it has seen one before.
-      </p>
+        <Form>
+          <Field label="Save as" htmlFor="export-format" hint={FORMAT_HINTS[format]}>
+            <Select
+              id="export-format"
+              label="Save as"
+              hideLabel
+              options={FORMATS}
+              value={format}
+              disabled={running}
+              onValueChange={setFormat}
+            />
+          </Field>
 
-      <p className={styles.hint}>
-        <strong>Outlook .pst files can be imported</strong> — choose one with the button above.
-        Folders, dates, senders and which messages you had read all come across. Two things do not:
-        <strong> attachments are not extracted</strong>, and a few older messages store their text
-        in a format that cannot be read here, so those arrive with their subject and sender but no
-        body. Both are counted and reported when the import finishes.
-      </p>
+          <Field hint="Only messages that have been downloaded can be exported. A message whose contents were never fetched is an entry in a list and nothing more.">
+            <Button
+              variant="bordered"
+              disabled={running || mailboxes.length === 0}
+              onClick={startExport}
+            >
+              <Upload size={16} aria-hidden />
+              Export all mail…
+            </Button>
+          </Field>
 
-      <h4 className={styles.legend}>Export</h4>
-
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>Save as</legend>
-
-        <label className={styles.choice}>
-          <input
-            type="radio"
-            name="export-format"
-            className={styles.radio}
-            checked={format === 'mbox'}
-            disabled={running}
-            onChange={() => {
-              setFormat('mbox')
-            }}
-          />
-          One mbox file per mailbox — for Thunderbird, Apple Mail and most other programs
-        </label>
-
-        <label className={styles.choice}>
-          <input
-            type="radio"
-            name="export-format"
-            className={styles.radio}
-            checked={format === 'eml'}
-            disabled={running}
-            onChange={() => {
-              setFormat('eml')
-            }}
-          />
-          A folder of .eml files — one file per message, readable in Windows and Outlook
-        </label>
-      </fieldset>
-
-      <div className={styles.row}>
-        <Button
-          variant="bordered"
-          disabled={running || mailboxes.length === 0}
-          onClick={startExport}
-        >
-          <Upload size={16} aria-hidden />
-          Export all mail…
-        </Button>
-      </div>
-
-      <p className={styles.hint}>
-        Only messages that have been downloaded can be exported. A message whose contents were never
-        fetched is an entry in a list and nothing more, and writing it out would produce a file that
-        looked like your mail and was not.
-      </p>
-
-      {progress !== null && (
-        <p className={pane.progress} aria-live="polite">
-          {progress.finished === null
-            ? `Working… ${String(progress.done)} of ${String(progress.total)}${
-                progress.label === '' ? '' : ` — ${progress.label}`
-              }`
-            : progress.finished.error !== null
-              ? `Finished with a problem: ${progress.finished.error}. ${String(
-                  progress.finished.messages,
-                )} messages were handled.`
-              : `Done. ${count(progress.finished.messages, 'message')} in ${count(
-                  progress.finished.folders,
-                  'mailbox',
-                  'mailboxes',
-                )}${
-                  progress.finished.skipped > 0
-                    ? `, ${String(progress.finished.skipped)} skipped`
-                    : ''
-                }.`}
-        </p>
-      )}
-    </section>
+          {/* Reserved rather than appearing, because it reports both jobs and sits directly
+              under the buttons that start them. Standing rule 6. */}
+          <Field label={progress === null ? undefined : 'Progress'}>
+            <p className={styles.status} aria-live="polite">
+              {progress === null
+                ? ''
+                : progress.finished === null
+                  ? `Working… ${String(progress.done)} of ${String(progress.total)}${
+                      progress.label === '' ? '' : ` — ${progress.label}`
+                    }`
+                  : progress.finished.error !== null
+                    ? `Finished with a problem: ${progress.finished.error}. ${String(
+                        progress.finished.messages,
+                      )} messages were handled.`
+                    : `Done. ${count(progress.finished.messages, 'message')} in ${count(
+                        progress.finished.folders,
+                        'mailbox',
+                        'mailboxes',
+                      )}${
+                        progress.finished.skipped > 0
+                          ? `, ${String(progress.finished.skipped)} skipped`
+                          : ''
+                      }.`}
+            </p>
+          </Field>
+        </Form>
+      </section>
+    </>
   )
 }

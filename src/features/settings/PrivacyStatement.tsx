@@ -16,7 +16,7 @@ import styles from './settings.module.css'
 export function PrivacyStatement() {
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>What Halcyon sends</h3>
+      <h2 className={styles.heading}>What Halcyon sends</h2>
 
       <ul className={styles.list}>
         <li>Mail goes to your provider, over TLS. Nothing else leaves this machine.</li>

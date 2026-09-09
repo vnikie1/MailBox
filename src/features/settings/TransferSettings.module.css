@@ -7,6 +7,11 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
+
+  /* The control column is a flex column with `align-items: start`, so anything in it is
+     shrink-to-fit unless it says otherwise — and a shrink-to-fit list is as wide as its
+     longest path, which is the one thing `.folderName` exists to truncate. */
+  width: 100%;
   max-height: var(--transfer-list-max-height);
   padding: var(--sp-2);
   margin: 0;
@@ -25,13 +30,4 @@
   text-align: left;
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.progress {
-  padding: var(--sp-3) var(--sp-4);
-  margin: 0;
-  color: var(--label-1);
-  font-size: var(--t-subhead-size);
-  background: var(--fill-hover);
-  border-radius: var(--r-md);
 }

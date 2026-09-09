@@ -6255,3 +6255,112 @@ alongside them.
   spent time diagnosing a fix that was not in the binary. The tell each time was the installed
   exe being older than `dist/`. Comparing those two timestamps before testing is now the habit;
   it is the same class of error as trusting a green suite over a running app.
+
+---
+
+## 2026-09-09 — Settings, laid out as a form
+
+The Settings window worked and did not look like it. Every pane stacked _label above control_
+at one indentation, so nothing lined up with anything; six settings were vertical stacks of
+radio buttons, which cost twenty rows to hold six answers; and the explanatory prose was set
+almost as loud as the controls, so the paragraphs were the first thing the eye landed on in a
+window whose only job is to be scanned for a switch.
+
+Mail's own settings are a **form**: a quiet, right-aligned label in a fixed column, the control
+in the next column, every control down the pane on one axis, and help text small and rare. That
+is the shape this session put in.
+
+### Added
+
+- **`Select`** (`src/ui/Select.tsx`) — a popup button. A native `<select>` with the house field
+  surface and a chevron laid over it; the list itself is drawn by Windows. A hand-built listbox
+  would be a keyboard trap that draws a near-copy of the OS menu, and `color-scheme` on `:root`
+  already makes the native popup follow the app's theme.
+- **`Segmented`** (`src/ui/Segmented.tsx`) — a segmented control for two or three exclusive
+  options where seeing the alternatives is the point. Light against Dark is a comparison; four
+  words of "Always translucent" is a paragraph laid sideways, and that is what `Select` is for.
+  Buttons with `role="radio"`, one tab stop, arrows move and choose, Home and End jump.
+- **`SettingsForm.tsx`** — `Form`, `Field` and `FullRow`. `Field` renders its label and its
+  control cell as _siblings_ of the grid rather than wrapping them: a wrapper per row would make
+  each row its own formatting context, and the column widths would then be whatever each row's
+  own content wanted, which is a stack again drawn with more markup. The alignment is the whole
+  feature, so the grid has to own it.
+- **A pane title in every pane.** It was in the window's title bar and nowhere else, so General
+  opened on a heading that read "Appearance" and nothing on screen said which of the seven panes
+  you were in.
+- **Keyboard navigation for the pane list** — Up, Down, Home, End, with focus following the
+  selection, and the seven buttons collapsed to one tab stop. It could previously only be
+  operated by clicking.
+- Four e2e tests: the pane title, the arrow-key walk of the pane list, the arrow-key walk of a
+  segmented control, and one that measures every control cell in a pane and fails if their left
+  edges are not identical — which is the property the whole change exists to create.
+
+### Changed
+
+- **Every pane rebuilt on the form.** General (Appearance, Notifications, Updates), Accounts,
+  Composing, Signatures, Rules, Privacy, Advanced (Import, Export, Diagnostics).
+- **Six radio stacks became four popups and three segmented controls.** Theme, density and
+  signature placement are segmented; translucency, undo-send delay and export format are popups.
+  General used to scroll to hold four answers and now does not.
+- **Copy cut.** The .pst note went from six lines to two — what was cut is the reassurance about
+  what _does_ come across, and what was kept is the thing you have to know before choosing a
+  file: attachments do not. The remote-images note went from five sentences to two, losing the
+  part that reassured the reader about what is _not_ disclosed, which nobody was worried about
+  until we raised it.
+- **"What Mail uses." is gone** from under the density control. It named the app this one is
+  modelled on, inside the settings window of the app the reader is actually running, where
+  "Mail" is at best the Windows app of that name. It now says "The standard row height."
+- **The accent hint no longer says "Halcyon is using Yellow, whatever Windows is set to."**
+- **An account row became three lines instead of one.** The avatar, an editable name, a sign-in
+  button, seven colour dots, two reorder arrows and a delete shared a row about 700px wide, and
+  the address lost: it truncated to "vnikie1…" while the name field beside it sat narrower than
+  the word in it. Name and the destructive actions on line one, the address whole on line two,
+  colour and sign-in on line three. Each account is boxed, because three-line rows one under
+  another read as one long list otherwise.
+- **The sign-in application fields stack under the provider's name** rather than sitting in
+  three columns of their own. Only Google's secret carries a description, so that field was a
+  line and a half taller than its neighbour, and the Save button — offset by hand to clear a
+  label — lined up with nothing in the Microsoft row underneath.
+- **Notifications label each group with the account's name, not its address.** An address is one
+  unbroken word and the label column is 156px; "vishal.singh@gmail.example" wrapped mid-domain.
+  The address moved to the note under the choices, where it has the whole control column.
+- `scrollbar-gutter: stable` on the pane. General is the pane that scrolls, and its scrollbar
+  was drawn over the accent swatches — so that one pane's content shifted sideways the moment it
+  grew tall enough to need one.
+- The accent swatches went from 28px with an 8px gap to 26px with a 4px one, and "Follow
+  Windows" is held apart from the eleven fixed colours by a wider gap. At the old size twelve
+  circles did not fit the control column and the twelfth wrapped to a line of its own, which
+  reads as a rendering fault rather than a palette. The gap is because "Follow Windows" draws
+  whatever Windows is set to — on a blue machine it is a blue circle beside the circle called
+  Blue.
+
+### Fixed
+
+- **A popup announced its own name twice.** `Select` rendered a visually-hidden `<label>` even
+  when the form row already supplied one, and two labels for one control are _concatenated_ by
+  the accessible-name computation — so the translucency popup was announced as "Translucency
+  Translucency". It now drops the element entirely when `hideLabel` is set and names the control
+  with `aria-label`, which also settles precedence: `aria-label` outranks a native label, so the
+  name is one string whether or not a form row supplied another.
+- Status lines under the update, signature and transfer controls have a reserved height. They
+  sit directly under the buttons that trigger them, and a line that grows into place moves them.
+  Standing rule 6.
+
+### Removed
+
+- `.group`, `.legend` and `.account` from `settings.module.css`, and `.progress`, `.clientRow`,
+  `.clientSave`, `.advancedTitle` and `.advancedNote` from the panes — the vocabulary the
+  stacked layout needed and the form does not.
+
+### Notes
+
+- **The Composing pane holds one control and now looks deliberate rather than abandoned, which
+  is as far as layout can take it.** The app has exactly one composing setting. Mail's own
+  Composing pane carries message format, spell-checking and auto-Cc; none of those exist in this
+  core, and inventing settings to fill a pane is worse than a short pane. `previewLines` and the
+  classic layout _are_ real stored settings with no home in this window, but they live in
+  `useLayoutStore` — localStorage, per-window — so surfacing them here would need cross-window
+  sync before it would work at all. Left alone deliberately, not overlooked.
+- **The pane count is fixed at seven by more than habit**: `panes.ts`, the guard in
+  `ipc/window.rs` and a test on each side all hold the same list, so merging or splitting a pane
+  is a three-file change and a deliberate one.

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 
+import { Field, Form } from '@/features/settings/SettingsForm'
 import { getUndoSeconds, setUndoSeconds } from '@/lib/ipc'
+import { Select, type SelectOption } from '@/ui'
 
 import styles from '@/features/settings/settings.module.css'
 
@@ -13,11 +15,11 @@ import styles from '@/features/settings/settings.module.css'
  */
 
 /** Mail's choices exactly. `0` is Off. */
-const CHOICES: { seconds: number; label: string }[] = [
-  { seconds: 0, label: 'Off' },
-  { seconds: 10, label: '10 seconds' },
-  { seconds: 20, label: '20 seconds' },
-  { seconds: 30, label: '30 seconds' },
+const CHOICES: SelectOption<number>[] = [
+  { value: 0, label: 'Off' },
+  { value: 10, label: '10 seconds' },
+  { value: 20, label: '20 seconds' },
+  { value: 30, label: '30 seconds' },
 ]
 
 export function ComposingSettings() {
@@ -44,37 +46,31 @@ export function ComposingSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Composing</h3>
+      <h2 className={styles.heading}>Sending</h2>
 
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>Undo send delay</legend>
-
-        {CHOICES.map((choice) => (
-          <label key={choice.seconds} className={styles.choice}>
-            <input
-              type="radio"
-              name="undo-seconds"
-              className={styles.radio}
-              value={choice.seconds}
-              // Nothing is checked until the stored value has loaded, rather than defaulting to
-              // one and flicking to another a moment later — which reads as the app changing
-              // the setting by itself.
-              checked={seconds === choice.seconds}
-              disabled={seconds === null}
-              onChange={() => {
-                choose(choice.seconds)
-              }}
-            />
-            {choice.label}
-          </label>
-        ))}
-      </fieldset>
-
-      <p className={styles.hint}>
-        {seconds === 0
-          ? 'Messages are sent as soon as you press Send.'
-          : 'A message waits this long in the outbox, so it can be taken back before it goes.'}
-      </p>
+      <Form>
+        <Field
+          label="Undo send delay"
+          htmlFor="undo-seconds"
+          hint={
+            seconds === 0
+              ? 'Messages are sent as soon as you press Send.'
+              : 'A message waits this long in the outbox, so it can be taken back before it goes.'
+          }
+        >
+          {/* Nothing is selected until the stored value has loaded, rather than defaulting to
+              one and moving to another a moment later — which reads as the app changing the
+              setting by itself. `Select` does that from `value={null}`. */}
+          <Select
+            id="undo-seconds"
+            label="Undo send delay"
+            hideLabel
+            options={CHOICES}
+            value={seconds}
+            onValueChange={choose}
+          />
+        </Field>
+      </Form>
     </section>
   )
 }

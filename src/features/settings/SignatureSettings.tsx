@@ -4,7 +4,9 @@ import { useAccounts } from '@/app/queries'
 import { Editor } from '@/features/compose/Editor'
 import type { Signature } from '@/lib/generated/Signature'
 import { signatureGet, signatureSet } from '@/lib/ipc'
+import { Segmented, Select, type SegmentedOption } from '@/ui'
 
+import { Field, Form, FullRow } from './SettingsForm'
 import styles from './settings.module.css'
 import pane from './SignatureSettings.module.css'
 
@@ -25,6 +27,12 @@ import pane from './SignatureSettings.module.css'
 
 /** How long after the last keystroke the signature is stored. */
 const SAVE_AFTER_MS = 800
+
+/** The two halves of `Signature['placement']`, in the order a reply is read. */
+const PLACEMENTS: SegmentedOption<Signature['placement']>[] = [
+  { value: 'above', label: 'Above the quote' },
+  { value: 'below', label: 'Below the quote' },
+]
 
 type Status = 'loading' | 'ready' | 'saving' | 'saved'
 
@@ -104,7 +112,7 @@ export function SignatureSettings() {
   if (accounts.length === 0) {
     return (
       <section className={styles.section}>
-        <h3 className={styles.heading}>Signatures</h3>
+        <h2 className={styles.heading}>Signature</h2>
         <p className={styles.hint}>
           A signature belongs to an account. Add one under Accounts and it will appear here.
         </p>
@@ -114,70 +122,67 @@ export function SignatureSettings() {
 
   return (
     <section className={styles.section}>
-      <h3 className={styles.heading}>Signatures</h3>
+      <h2 className={styles.heading}>Signature</h2>
 
-      <label className={styles.row}>
-        <span className={styles.name}>Account</span>
-        <select
-          className={pane.picker}
-          value={accountId ?? ''}
-          onChange={(event) => {
-            setAccountId(Number(event.target.value))
-          }}
-        >
-          {accounts.map((account) => (
-            <option key={account.id} value={account.id}>
-              {account.email}
-            </option>
-          ))}
-        </select>
-      </label>
+      <Form>
+        <Field label="Account" htmlFor="signature-account">
+          <Select
+            id="signature-account"
+            label="Account"
+            hideLabel
+            className={pane.picker}
+            options={accounts.map((account) => ({ value: account.id, label: account.email }))}
+            value={accountId}
+            onValueChange={setAccountId}
+          />
+        </Field>
 
-      {signature === null ? (
-        <p className={styles.hint}>Loading…</p>
-      ) : (
-        <div className={pane.editor}>
-          {/* Keyed by account. The editor takes its initial HTML once and then owns its own
-              state — without the key, switching account would leave the previous account's
-              signature on screen and save it over the new one on the next keystroke. */}
-          <Editor
-            key={accountId ?? 'none'}
-            initialHtml={signature.html}
-            ariaLabel="Signature"
-            onChange={(next) => {
-              store({ ...signature, html: next })
+        {/* The editor takes the full width. A rich-text box in the control column would be
+            about two thirds of a settings window wide, which is narrower than the messages
+            the signature ends up in. */}
+        <FullRow className={pane.editorRow}>
+          {signature === null ? (
+            <p className={styles.hint}>Loading…</p>
+          ) : (
+            <div className={pane.editor}>
+              {/* Keyed by account. The editor takes its initial HTML once and then owns its
+                  own state — without the key, switching account would leave the previous
+                  account's signature on screen and save it over the new one on the next
+                  keystroke. */}
+              <Editor
+                key={accountId ?? 'none'}
+                initialHtml={signature.html}
+                ariaLabel="Signature"
+                onChange={(next) => {
+                  store({ ...signature, html: next })
+                }}
+              />
+            </div>
+          )}
+        </FullRow>
+
+        <Field label="In a reply" labelId="placement-label">
+          <Segmented
+            label="In a reply, place the signature"
+            labelledBy="placement-label"
+            options={PLACEMENTS}
+            value={signature?.placement ?? null}
+            disabled={signature === null}
+            onValueChange={(placement) => {
+              if (signature !== null) store({ html: html.current, placement })
             }}
           />
-        </div>
-      )}
 
-      <fieldset className={styles.group}>
-        <legend className={styles.legend}>In a reply, place the signature</legend>
-
-        {['above', 'below'].map((placement) => (
-          <label key={placement} className={styles.choice}>
-            <input
-              type="radio"
-              name="placement"
-              className={styles.radio}
-              checked={signature?.placement === placement}
-              disabled={signature === null}
-              onChange={() => {
-                if (signature !== null) store({ html: html.current, placement })
-              }}
-            />
-            {placement === 'above' ? 'Above the quoted text' : 'Below the quoted text'}
-          </label>
-        ))}
-      </fieldset>
-
-      <p className={styles.hint} aria-live="polite">
-        {status === 'saving'
-          ? 'Saving…'
-          : status === 'saved'
-            ? 'Saved. It will be added to new messages from this account.'
-            : 'Added to the bottom of every message sent from this account.'}
-      </p>
+          {/* Height reserved, so the pane does not jog as it saves. Standing rule 6. */}
+          <p className={styles.status} aria-live="polite">
+            {status === 'saving'
+              ? 'Saving…'
+              : status === 'saved'
+                ? 'Saved. It will be added to new messages from this account.'
+                : 'Added to the bottom of every message sent from this account.'}
+          </p>
+        </Field>
+      </Form>
     </section>
   )
 }

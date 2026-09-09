@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { useAppearanceSync } from '@/app/useAppearanceSync'
@@ -19,6 +19,7 @@ import { SignatureSettings } from './SignatureSettings'
 import { UpdateSettings } from './UpdateSettings'
 import { PANES, paneFrom } from './panes'
 import styles from './SettingsWindow.module.css'
+import settings from './settings.module.css'
 
 /**
  * Settings, in a window of its own. docs/06 Phase 11.
@@ -91,11 +92,56 @@ function Panes() {
     void setWindowTitle(title)
   }, [pane])
 
+  const current = PANES.find((entry) => entry.id === pane)
+
+  /**
+   * Up and Down walk the pane list, Home and End jump to its ends.
+   *
+   * A settings sidebar that can only be operated by clicking is a settings sidebar half the
+   * people who need it cannot reach. Both Windows' own Settings and Mail's pane list move the
+   * selection with the arrows, and focus follows — so the pane changes as you walk it, which
+   * is what makes walking it useful.
+   */
+  const walk = (event: KeyboardEvent<HTMLElement>) => {
+    const keys = ['ArrowDown', 'ArrowUp', 'Home', 'End']
+    if (!keys.includes(event.key)) return
+
+    const index = PANES.findIndex((entry) => entry.id === pane)
+    const last = PANES.length - 1
+
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? last
+          : event.key === 'ArrowUp'
+            ? (index + last) % PANES.length
+            : (index + 1) % PANES.length
+
+    const target = PANES[next]
+    if (target === undefined) return
+
+    event.preventDefault()
+    setPane(target.id)
+
+    // Held in a local, because `currentTarget` is only meaningful while the event is being
+    // dispatched — React clears it before the frame this runs in.
+    const list = event.currentTarget
+
+    // Read back from the DOM after React has committed, rather than kept in an array of refs:
+    // the entry that has just become current is the one carrying `aria-current`.
+    requestAnimationFrame(() => {
+      list.querySelector<HTMLButtonElement>('[aria-current="true"]')?.focus()
+    })
+  }
+
   return (
     <div className={styles.window}>
-      <nav className={styles.nav} aria-label="Settings">
+      <nav className={styles.nav} aria-label="Settings" onKeyDown={walk}>
         {PANES.map((entry) => {
           const Icon = entry.icon
+          const chosen = pane === entry.id
+
           return (
             <button
               key={entry.id}
@@ -104,7 +150,10 @@ function Panes() {
               // `aria-current` rather than `aria-selected`: these are navigation, not a
               // listbox, and a screen reader announces "current page" — which is what they
               // are — instead of an option in a set the user is choosing between.
-              aria-current={pane === entry.id}
+              aria-current={chosen}
+              // One tab stop for the list, as a navigation list should be — seven stops to
+              // walk past the sidebar on the way to the pane is seven too many.
+              tabIndex={chosen ? 0 : -1}
               onClick={() => {
                 setPane(entry.id)
               }}
@@ -116,30 +165,40 @@ function Panes() {
         })}
       </nav>
 
-      <main className={styles.pane} aria-live="polite">
-        {pane === 'general' && (
-          <>
-            <AppearanceSettings />
-            <NotificationSettings />
-            <UpdateSettings />
-          </>
-        )}
-        {pane === 'accounts' && <AccountsSettings />}
-        {pane === 'composing' && <ComposingSettings />}
-        {pane === 'signatures' && <SignatureSettings />}
-        {pane === 'rules' && (
-          <>
-            <OrganiseSettings />
-            <JunkSettings />
-          </>
-        )}
-        {pane === 'privacy' && (
-          <>
-            <ReadingSettings />
-            <PrivacyStatement />
-          </>
-        )}
-        {pane === 'advanced' && <AdvancedSettings />}
+      {/* Keyed by pane, so switching panes rebuilds the scroller rather than reconciling one
+          pane's sections against the next one's. General is tall enough to scroll and the
+          others are not, and a reconciled scroller keeps the scrollTop it had — which would
+          leave a short pane opening part-way down itself. */}
+      <main key={pane} className={styles.pane}>
+        <div className={styles.content}>
+          {/* The pane's name, said in the pane. It used to be in the title bar and nowhere
+              else, so General opened on a heading that read "Appearance". */}
+          <h1 className={settings.title}>{current?.label ?? 'Settings'}</h1>
+
+          {pane === 'general' && (
+            <>
+              <AppearanceSettings />
+              <NotificationSettings />
+              <UpdateSettings />
+            </>
+          )}
+          {pane === 'accounts' && <AccountsSettings />}
+          {pane === 'composing' && <ComposingSettings />}
+          {pane === 'signatures' && <SignatureSettings />}
+          {pane === 'rules' && (
+            <>
+              <OrganiseSettings />
+              <JunkSettings />
+            </>
+          )}
+          {pane === 'privacy' && (
+            <>
+              <ReadingSettings />
+              <PrivacyStatement />
+            </>
+          )}
+          {pane === 'advanced' && <AdvancedSettings />}
+        </div>
       </main>
     </div>
   )
