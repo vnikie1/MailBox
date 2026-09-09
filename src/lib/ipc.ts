@@ -25,6 +25,29 @@ import {
 
 export const runningInTauri: boolean = isTauri()
 
+/**
+ * The sentence out of whatever the core rejected a command with.
+ *
+ * A rejected Tauri command arrives as `{ code, message }` — `AppError` in `ipc/mail.rs` is a
+ * plain `#[derive(Serialize)]` struct, not an `Error` — so the reflex
+ * `cause instanceof Error ? cause.message : String(cause)` renders every one of them as
+ * "[object Object]": the exact error class the catch was written for is the one it cannot
+ * read.
+ *
+ * This lived in `app/queries.ts` and was not exported, so the Settings window — a separate
+ * React root that reaches the same commands — could not use it, and the one `.catch()` in the
+ * accounts pane used the broken idiom instead. It belongs here, with the module that knows
+ * what a rejection from the core looks like.
+ */
+export function reasonFor(cause: unknown): string {
+  if (cause instanceof Error) return cause.message
+  // `'message' in cause` already narrows the type, so no assertion is needed here.
+  if (typeof cause === 'object' && cause !== null && 'message' in cause) {
+    return String(cause.message)
+  }
+  return String(cause)
+}
+
 /* ------------------------------------------------------------------ appearance */
 
 function browserAppearance(): Appearance {
@@ -374,10 +397,13 @@ export async function accountUpdate(
   await invoke('account_update', {
     id,
     displayName: patch.displayName ?? null,
-    // `undefined` means "leave it alone" and `null` means "clear it", which the core reads
-    // as `Option<Option<String>>`. Collapsing the two here would make the colour
-    // unclearable.
-    color: patch.color === undefined ? null : [patch.color],
+    // `undefined` means "leave it alone" and `null` means "clear it". The two are told apart
+    // by an object rather than by nesting: the core used to take `Option<Option<String>>`,
+    // which cannot express the difference over JSON at all — serde resolves a null against
+    // the outer option — and the array this once sent to get around that was rejected as
+    // "invalid type: sequence, expected a string", so no colour change ever reached the
+    // database. See `ColorChange` in ipc/accounts.rs.
+    color: patch.color === undefined ? null : { value: patch.color },
     syncEnabled: patch.syncEnabled ?? null,
   })
 }

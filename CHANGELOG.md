@@ -6379,3 +6379,156 @@ is the shape this session put in.
 - **The pane count is fixed at seven by more than habit**: `panes.ts`, the guard in
   `ipc/window.rs` and a test on each side all hold the same list, so merging or splitting a pane
   is a three-file change and a deliberate one.
+
+---
+
+## 2026-09-10 — Every control actually pressed, and the crash reports read
+
+The settings rework was tested by driving the controls whose _layout_ had changed and taking
+the rest on trust. The user found the hole in one try: clicking an account colour did nothing
+and did not highlight. It had never worked — not once since the feature shipped.
+
+### Fixed
+
+- **An account colour could never be set. Not once, since 2026-08-26.**
+
+  `src/lib/ipc.ts` sent the colour wrapped in an array — `[patch.color]` — because the core took
+  `Option<Option<String>>` and the frontend was trying to reach `Some(Some(_))`. That type looks
+  like it expresses three states — leave it, set it, clear it — and expresses two: **serde
+  resolves a JSON null against the outer option**, so `Some(None)` is unreachable by any value a
+  caller can send. The array workaround is a sequence where a string is expected, so every
+  colour change was rejected at the seam with
+
+  ```
+  invalid type: sequence, expected a string
+  ```
+
+  and because the rejected promise is the one that would have refreshed the account list, the
+  swatch never showed as chosen either. The two symptoms reported — "not setting" and "not
+  highlighting" — are one bug.
+
+  Replaced with an explicit wire type, `ColorChange { value: Option<String> }`: absent leaves the
+  colour alone, `{"value": null}` clears it, `{"value": "green"}` sets it. Three tests pin all
+  three states, the exact error string the running app printed, and — as an executable note for
+  anyone tempted back — that a nested option cannot express "clear" over JSON at all.
+
+  **Why nothing caught it.** The command is never entered, so no Rust test can see it; the
+  frontend used `void … .then()` with no `.catch()`, so the rejection went nowhere; and the
+  browser e2e suite runs against a mock where `runningInTauri` is false and the real IPC is never
+  called. It was found by listening for `pageerror` while clicking a swatch in the packaged app.
+
+- **The Translucency popup was unreadable — the reason the options only appeared on hover.**
+  `Select` gave the control `--fill-hover`, a 4% black. That is right for a control that
+  composites against a pane and wrong for a popup, which Windows draws from that same colour
+  against nothing: the list came up with no ground of its own, and only the row under the
+  cursor — which Windows paints with the system highlight — could be read. The surface is
+  `--bg-raised` now (what the translucent fill already resolved to within a shade, so the closed
+  control is unchanged), the rows carry an explicit `--bg-menu-opaque`, and the hover state is
+  opaque too, because the popup opens from a click and the control is therefore always hovered
+  at the moment Windows reads its background.
+
+  Verified by capturing the desktop with the popup open, in both themes. A page screenshot
+  cannot see it: the dropdown is an OS window, not part of the document.
+
+- **Six of the nine crash reports were the app refusing to start over a decoration.**
+
+  All six say `Failed to setup app: … the underlying handle is not available`, and each is
+  preceded in the log — same millisecond — by WebView2 refusing to create the webview with
+  `0x80070057`. The log holds exactly six of those, one per crash, and none since. No webview
+  means no window handle, so `hwnd_of` failed, so `platform::install(app.handle(), &main)?`
+  returned an error, so Tauri panicked and `panic = "abort"` ended the process before anything
+  was painted.
+
+  What it died for was the Mica backdrop behind the sidebar. The tray four lines below it
+  already matched on its own failure and carried on; there was never a reason for a decoration
+  to be treated more harshly than the tray. `platform::install` no longer returns a `Result`:
+  a missing handle is logged at ERROR saying what it means, and the appearance watcher — which
+  is not decoration, and needs no handle — runs either way.
+
+  `src-tauri/tests/startup_is_survivable.rs` holds the shape: the backdrop cannot be fatal, the
+  tray stays the precedent, and the setup hook has exactly two fatal steps (a window missing
+  from the config is a broken build; a window that will not show is not an app). Putting the
+  `?` back no longer compiles, which is a better guard than the test.
+
+- **Six swallowed IPC failures in the accounts pane, and one that printed "[object Object]".**
+  Reorder, rename, colour, remove and the sign-in-application Save were all `void … .then()`
+  with no `.catch()` — the mechanism that hid the colour bug for two weeks. The one site that
+  did report used `cause instanceof Error ? cause.message : String(cause)`, but the core rejects
+  with a plain `{code, message}` struct, so that toast rendered "[object Object]" for exactly
+  the error class it existed to show.
+
+  `reasonFor` already existed in `app/queries.ts` with a doc comment warning against that very
+  idiom, and was not exported — so the Settings window, a separate React root reaching the same
+  commands, could not use it. Moved to `lib/ipc.ts`, with the module that knows what a rejection
+  from the core looks like, and all six sites now go through it.
+
+  The rename was the worst of the six and not in the way it looked. `name` is local state seeded
+  once, and nothing resets it, so a refused rename left the typed text in the box looking saved
+  while the database held the old one — a false success rather than an inert control. It reverts
+  now.
+
+### Added
+
+- **`tools/settings-audit.cjs`** — drives every control in all seven panes of the running app
+  over CDP: 76 checks. Every accent swatch, every account's colour picker (set, highlight,
+  persist, clear), rename, reorder with its end-stops, the remove confirmation, the account
+  assistant, both rules editors, every undo-send value, the signature editor and account switch,
+  both checkboxes, the export formats, the crash-report rows, and the nav including its keyboard
+  walk.
+
+  It restores every value it touches and asserts the restoration, refuses to confirm Remove
+  Account or Delete all reports, opens no native file dialog, and watches `pageerror` throughout
+  — which is the signal that catches the class of bug above. 76 passed, 0 failed, 6 skipped
+  deliberately, no uncaught page errors.
+
+### Incidents
+
+- **The audit harness destroyed a real signature, and it took two runs to notice.**
+
+  Leaving the Signatures pane remounts it and the account picker returns to the first account.
+  The harness read the signature from whichever account was showing and, after a pane
+  round-trip, wrote it back to a _different_ one — select-all, retype. It read one character
+  from an empty Yahoo signature and typed that over "Vishal Singh / Sent from Halcyon" on the
+  Gmail account.
+
+  Restored by hand and verified against a screenshot taken earlier the same session; the Yahoo
+  signature was cleared of the test string it had picked up. Nothing else was lost — the colours,
+  order, name and every toggle came back correctly, because those tests assert their own
+  restoration and this one did not.
+
+  Two changes followed. The harness no longer round-trips rich text through a captured string:
+  it appends two characters, takes exactly those two off again, and asserts the HTML is
+  identical to what it found. And every read after a pane switch re-selects the account
+  explicitly instead of assuming the picker stayed put.
+
+  The general lesson is the harder one: **a test that restores state is a test that can destroy
+  it.** Reading a rich-text editor as a string and typing it back is lossy in both directions,
+  and the restore path is the one part of a harness that is never exercised until it is wrong.
+
+- **Both "failures" the harness first reported were its own bugs.** "Typed text persists" and
+  "placement persists" were each the harness reading a different account than it had written.
+  Neither was a product defect. Recorded because a harness that cries wolf is worse than none,
+  and because the fix — read what is selected, never assume — was the same both times.
+
+- **Two audit workflows died on a session limit part-way through.** The control audit finished
+  46 of 145 agents and lost its synthesis; the crash-report audit produced 40 findings and lost
+  its entire verification pass. Their surviving output was used only where it could be checked
+  by hand — every claim acted on above was re-derived from the source before being believed, and
+  one claim from the first audit ("the remove sheet stays open forever") was refuted that way.
+
+### Notes
+
+- **Class B of the crash reports — three on 2026-09-01 — was never shipped.** The updater
+  endpoint has been `https` in the committed config since it was introduced; those three came
+  from a local `--config` override during the updater gate that same morning. No installer ever
+  carried a plain-http endpoint.
+
+- **Unverified findings from the crash-report audit, recorded rather than acted on**, because
+  its verification pass never ran and they are outside what was asked. In rough order of how
+  much they look worth checking: the updater endpoint (`vnikie1/MailBox`, the pre-rename repo
+  name) appears to 404 on every check and is reported to the user as being offline; 95 logged
+  WebView2 `0x8007139F` errors where the webview dies mid-session and the core keeps syncing;
+  five queued offline actions silently discarded because their stored JSON predates a field;
+  four raw UNIQUE-constraint failures surfacing as command errors; `panic = "abort"` defeating
+  the one `catch_unwind` in the codebase, so a malformed attachment would abort the app; and no
+  corruption handling on `halcyon.db`. None of these has been confirmed.

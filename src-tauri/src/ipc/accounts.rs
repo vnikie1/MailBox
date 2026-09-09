@@ -549,13 +549,39 @@ pub async fn accounts_detail(db: State<'_, Db>) -> Response<Vec<AccountDetail>> 
     Ok(db.read(store::list).await?)
 }
 
+/// "Set it to this" and "clear it", told apart on a wire that only has `null`.
+///
+/// ## Why this type exists
+///
+/// The obvious signature is `color: Option<Option<String>>` — absent leaves the colour alone,
+/// `Some(None)` clears it, `Some(Some(name))` sets it — and it was the signature here for
+/// three weeks. **It cannot be deserialised from JSON.** serde resolves a `null` against the
+/// *outer* option and stops, so `None` is the only thing any caller can produce for a null and
+/// `Some(None)` is unreachable by construction.
+///
+/// The frontend tried to reach it by wrapping the value in a one-element array, which is a
+/// sequence where a string was expected. So `account_update` rejected **every** colour change
+/// with `invalid type: sequence, expected a string`, and had done since the feature shipped on
+/// 2026-08-26: clicking a colour in Settings → Accounts did nothing, and the swatch never
+/// showed as chosen because the promise that would have refreshed the list rejected first.
+///
+/// Nothing caught it. The failure is a rejected promise inside a webview — the command is
+/// never entered, so no Rust test could see it, and the frontend never awaited the result.
+///
+/// An object makes the third state expressible, which is all this needs to be: absent leaves
+/// the colour alone, `{"value": null}` clears it, `{"value": "green"}` sets it.
+#[derive(Debug, serde::Deserialize)]
+pub struct ColorChange {
+    pub value: Option<String>,
+}
+
 #[tauri::command]
 pub async fn account_update(
     app: AppHandle,
     db: State<'_, Db>,
     id: i64,
     display_name: Option<String>,
-    color: Option<Option<String>>,
+    color: Option<ColorChange>,
     sync_enabled: Option<bool>,
 ) -> Response<()> {
     db.write(move |tx| {
@@ -563,7 +589,7 @@ pub async fn account_update(
             tx,
             id,
             display_name.as_deref(),
-            color.as_ref().map(|c| c.as_deref()),
+            color.as_ref().map(|c| c.value.as_deref()),
             sync_enabled,
         )
     })
@@ -798,4 +824,68 @@ pub async fn provider_open_setup(provider: String) -> Response<()> {
             message: "Halcyon could not open your browser.".into(),
         }
     })
+}
+
+#[cfg(test)]
+mod color_change_tests {
+    use super::ColorChange;
+
+    /// The three states, in the exact JSON the frontend sends.
+    ///
+    /// This is the test that would have caught the original bug in a second, and it is the
+    /// reason the wire type is an object rather than a nested option.
+    #[test]
+    fn all_three_states_survive_the_wire() {
+        let leave: Option<ColorChange> = serde_json::from_str("null").unwrap();
+        assert!(leave.is_none(), "absent leaves the colour alone");
+
+        let clear: Option<ColorChange> = serde_json::from_str(r#"{"value":null}"#).unwrap();
+        assert_eq!(clear.map(|c| c.value), Some(None), "an explicit null clears it");
+
+        let set: Option<ColorChange> = serde_json::from_str(r#"{"value":"green"}"#).unwrap();
+        assert_eq!(
+            set.map(|c| c.value),
+            Some(Some("green".into())),
+            "a name sets it"
+        );
+    }
+
+    /// The exact failure the running app reported, pinned to the signature that caused it.
+    ///
+    /// The frontend sent `["green"]` to reach `Some(Some(_))`. Against `Option<Option<String>>`
+    /// that unwraps twice and then asks a sequence to be a string, which is the message that
+    /// came back through the webview and the reason no colour was ever stored.
+    ///
+    /// Note the second half: this struct *would* have accepted that array, because serde will
+    /// build a struct from a sequence positionally. That is recorded rather than relied on —
+    /// the frontend sends the object form — but it does mean the wire is now forgiving of the
+    /// shape that used to be fatal.
+    #[test]
+    fn the_old_signature_is_what_rejected_the_array_the_frontend_sent() {
+        let old: Result<Option<Option<String>>, _> = serde_json::from_str(r#"["green"]"#);
+        let message = old.expect_err("the old signature could not take this").to_string();
+        assert!(
+            message.contains("invalid type: sequence, expected a string"),
+            "the message the app actually printed, word for word: {message}"
+        );
+
+        let now: Option<ColorChange> = serde_json::from_str(r#"["green"]"#).unwrap();
+        assert_eq!(now.map(|c| c.value), Some(Some("green".into())));
+    }
+
+    /// The signature this replaced, kept as an executable note.
+    ///
+    /// `Option<Option<String>>` looks like it expresses three states and expresses two: serde
+    /// resolves a null against the outer option and stops, so no JSON value a caller can send
+    /// produces `Some(None)`. Anyone tempted back to the nested form can run this.
+    #[test]
+    fn a_nested_option_cannot_express_clear_over_json() {
+        let from_null: Option<Option<String>> = serde_json::from_str("null").unwrap();
+        assert_eq!(from_null, None, "null resolves against the OUTER option");
+
+        let from_value: Option<Option<String>> = serde_json::from_str(r#""green""#).unwrap();
+        assert_eq!(from_value, Some(Some("green".into())));
+
+        // There is deliberately no third case here. That is the point: there isn't one.
+    }
 }

@@ -190,21 +190,6 @@ function invalidateAfterMutation(client: QueryClient): void {
 }
 
 /**
- * The sentence out of whatever the core rejected a command with.
- *
- * A rejected Tauri command arrives as `{ code, message }`, which is not an `Error` -- so the
- * usual `instanceof Error ? message : String(cause)` renders it as "[object Object]".
- */
-function reasonFor(cause: unknown): string {
-  if (cause instanceof Error) return cause.message
-  // `'message' in cause` already narrows the type, so no assertion is needed here.
-  if (typeof cause === 'object' && cause !== null && 'message' in cause) {
-    return String(cause.message)
-  }
-  return String(cause)
-}
-
-/**
  * Reports a mutation that did not happen.
  *
  * Every mutation below had an `onSuccess` and nothing else, so a rejected command was caught
@@ -219,7 +204,7 @@ function useMutationProblem(): (cause: unknown) => void {
     (cause: unknown) => {
       toast.show({
         title: 'That change could not be made',
-        description: reasonFor(cause),
+        description: ipc.reasonFor(cause),
       })
     },
     [toast],

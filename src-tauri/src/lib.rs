@@ -254,7 +254,10 @@ pub fn run() {
                 tauri::async_runtime::spawn(sync::upkeep::run(db, events));
             }
 
-            platform::install(app.handle(), &main)?;
+            // No `?`: the backdrop is a decoration, and a decoration must not be able to stop
+            // the app from starting. See `platform::install` — this line, with its `?`, is
+            // six of the nine crash reports in the diagnostics folder.
+            platform::install(app.handle(), &main);
 
             // The taskbar right-click menu. Installed once; the shell remembers it until the
             // next CommitList, so there is nothing to refresh and nothing to tear down.

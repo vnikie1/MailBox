@@ -8,6 +8,7 @@ import {
   accountUpdate,
   accountsReorder,
   oauthClientSet,
+  reasonFor,
   syncAll,
 } from '@/lib/ipc'
 import { Field, Form } from '@/features/settings/SettingsForm'
@@ -42,6 +43,7 @@ const COLORS: { id: string; label: string }[] = [
 export function AccountsSettings() {
   const accounts = useAccountsDetail()
   const accountsChanged = useAccountsChanged()
+  const toast = useToast()
   const [assistantOpen, setAssistantOpen] = useState(false)
   const [removing, setRemoving] = useState<AccountDetail | null>(null)
 
@@ -61,11 +63,18 @@ export function AccountsSettings() {
       next[index] = displaced
       next[target] = moved
 
-      void accountsReorder(next.map((account) => account.id)).then(() => {
-        accountsChanged()
-      })
+      accountsReorder(next.map((account) => account.id))
+        .then(() => {
+          accountsChanged()
+        })
+        .catch((cause: unknown) => {
+          toast.show({
+            title: 'That order was not saved',
+            description: reasonFor(cause),
+          })
+        })
     },
-    [list, accountsChanged],
+    [list, accountsChanged, toast],
   )
 
   return (
@@ -138,12 +147,29 @@ function AccountRow({
   const toast = useToast()
   const accountsChanged = useAccountsChanged()
 
+  /**
+   * The rename, and the one failure here that lies rather than does nothing.
+   *
+   * `name` is local state seeded once from the account, and the row's key does not change when
+   * a rename is rejected — so nothing puts the field back. Without the catch, a refused rename
+   * leaves the typed text sitting in the box looking saved while the database still holds the
+   * old one. Every other control on this row renders from server data and merely fails to
+   * move; this one shows an answer that is not true, which is worse.
+   */
   const commit = useCallback(() => {
     if (name.trim() === account.displayName) return
-    void accountUpdate(account.id, { displayName: name.trim() }).then(() => {
-      accountsChanged()
-    })
-  }, [account.id, account.displayName, name, accountsChanged])
+    accountUpdate(account.id, { displayName: name.trim() })
+      .then(() => {
+        accountsChanged()
+      })
+      .catch((cause: unknown) => {
+        setName(account.displayName)
+        toast.show({
+          title: 'That name was not saved',
+          description: reasonFor(cause),
+        })
+      })
+  }, [account.id, account.displayName, name, accountsChanged, toast])
 
   /**
    * Three lines, not one.
@@ -223,7 +249,10 @@ function AccountRow({
                   .catch((cause: unknown) => {
                     toast.show({
                       title: 'That sign-in did not complete',
-                      description: cause instanceof Error ? cause.message : String(cause),
+                      // Not `instanceof Error`: the core rejects with a plain `{code, message}`
+                      // object, so that idiom printed "[object Object]" for precisely the
+                      // errors this toast exists to show. See `reasonFor`.
+                      description: reasonFor(cause),
                     })
                   })
                   .finally(() => {
@@ -245,6 +274,7 @@ function AccountRow({
 
 function ColorPicker({ account }: { account: AccountDetail }) {
   const accountsChanged = useAccountsChanged()
+  const toast = useToast()
 
   return (
     <div
@@ -262,12 +292,20 @@ function ColorPicker({ account }: { account: AccountDetail }) {
           className={cx(styles.swatch, account.color === color.id && styles.swatchActive)}
           data-color={color.id}
           onClick={() => {
-            // Clicking the current colour clears it, which is why the core takes
-            // `Option<Option<String>>` — "leave it" and "remove it" are different.
+            // Clicking the current colour clears it, which is why the core takes a
+            // `ColorChange` rather than a bare string — "leave it" and "remove it" are
+            // different, and a nested option could not express the difference over JSON.
             const next = account.color === color.id ? null : color.id
-            void accountUpdate(account.id, { color: next }).then(() => {
-              accountsChanged()
-            })
+            accountUpdate(account.id, { color: next })
+              .then(() => {
+                accountsChanged()
+              })
+              .catch((cause: unknown) => {
+                toast.show({
+                  title: 'That colour was not saved',
+                  description: reasonFor(cause),
+                })
+              })
           }}
         />
       ))}
@@ -301,11 +339,21 @@ function RemoveConfirmation({
             variant="destructive"
             onClick={() => {
               if (account === null) return
-              void accountRemove(account.id).then(() => {
-                accountsChanged()
-                toast.show({ title: `${account.email} removed` })
-                onClose()
-              })
+              // The sheet closes only on success, so a refusal has to say so — otherwise the
+              // one destructive button in this window looks simply inert, and the user cannot
+              // tell whether the account went or not.
+              accountRemove(account.id)
+                .then(() => {
+                  accountsChanged()
+                  toast.show({ title: `${account.email} removed` })
+                  onClose()
+                })
+                .catch((cause: unknown) => {
+                  toast.show({
+                    title: `${account.email} was not removed`,
+                    description: reasonFor(cause),
+                  })
+                })
             }}
           >
             Remove Account
@@ -430,8 +478,8 @@ function OAuthClientFields({
       <Button
         variant="bordered"
         onClick={() => {
-          void oauthClientSet(provider, value, clientSecret === '' ? undefined : clientSecret).then(
-            () => {
+          oauthClientSet(provider, value, clientSecret === '' ? undefined : clientSecret)
+            .then(() => {
               // Cleared from the form the moment it is stored. There is no reason for a
               // secret to sit in a React state tree after it has been handed to Windows.
               setClientSecret('')
@@ -444,8 +492,15 @@ function OAuthClientFields({
               void syncAll()
 
               toast.show({ title: `${label} sign-in application saved` })
-            },
-          )
+            })
+            .catch((cause: unknown) => {
+              // The secret is deliberately NOT cleared here: it was not stored, and wiping the
+              // box would make the user paste it again to find out why.
+              toast.show({
+                title: `${label} sign-in application was not saved`,
+                description: reasonFor(cause),
+              })
+            })
         }}
       >
         Save

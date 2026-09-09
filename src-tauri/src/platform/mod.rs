@@ -59,17 +59,53 @@ pub fn hwnd_of(window: &WebviewWindow) -> Result<HWND, Box<dyn std::error::Error
 }
 
 /// Attach the platform layer to a freshly created window, before it is shown.
-pub fn install(app: &AppHandle, window: &WebviewWindow) -> Result<(), Box<dyn std::error::Error>> {
-    let hwnd = hwnd_of(window)?;
+///
+/// ## Why this cannot fail the app
+///
+/// It used to return a `Result` and the setup hook used `?` on it. Tauri turns any error out
+/// of the setup hook into a panic, and `panic = "abort"` turns that into a process that dies
+/// before painting anything — no window, no dialog, nothing the user can read.
+///
+/// **Six of the nine crash reports on the developer's machine are that.** All six say
+///
+/// ```text
+/// Failed to setup app: error encountered during setup hook: the underlying handle is not available
+/// ```
+///
+/// and each is preceded in the log, in the same millisecond, by WebView2 refusing to create
+/// the webview with `0x80070057` — six occurrences in the log, one per crash, and none since.
+/// With no webview there is no window handle, so `hwnd_of` fails, so `?` killed the app.
+///
+/// What it died for is **a decoration**: the Mica backdrop behind the sidebar. The tray four
+/// lines below it in `lib.rs` already had this right — it matches on its own failure and
+/// carries on — and there was never a reason for the backdrop to be treated more harshly than
+/// the tray.
+///
+/// So this takes no `?` out to its caller. A missing handle is logged at ERROR, saying what it
+/// actually means rather than repeating Tauri's wording, and the app goes on to show its
+/// window. If the webview really is dead the user still gets an empty frame rather than a
+/// silent exit — which is not good, but it is the first version of this failure they can see
+/// and report.
+pub fn install(app: &AppHandle, window: &WebviewWindow) {
+    match hwnd_of(window) {
+        Ok(hwnd) => {
+            let effective = backdrop::apply(
+                hwnd,
+                appearance::preferred_backdrop(),
+                appearance::is_dark(window),
+            );
+            tracing::info!(?effective, "system backdrop applied");
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "no window handle, so the system backdrop was skipped; this usually means \
+                 WebView2 refused to create the webview (look for 0x80070057 just above)"
+            );
+        }
+    }
 
-    let effective = backdrop::apply(
-        hwnd,
-        appearance::preferred_backdrop(),
-        appearance::is_dark(window),
-    );
-    tracing::info!(?effective, "system backdrop applied");
-
+    // Outside the match on purpose. This is not decoration: it is what pushes theme, accent
+    // and transparency changes from Windows into the UI, and it needs no window handle.
     appearance::watch(app.clone());
-
-    Ok(())
 }

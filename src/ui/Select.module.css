@@ -37,11 +37,38 @@
   line-height: var(--t-body-leading);
   letter-spacing: var(--t-body-tracking);
   text-overflow: ellipsis;
-  background: var(--fill-hover);
+
+  /**
+   * Opaque, and it has to be.
+   *
+   * The dropdown is drawn by Windows, not by the page, and it takes its surface from this
+   * element's own `background-color` — but it composites that colour against nothing, where
+   * the closed control composites it against the pane behind it. `--fill-hover` is a 4% black,
+   * which is right on a pane and invisible in a popup: the list came up with no ground of its
+   * own and the only row anybody could read was the one under the cursor, which Windows paints
+   * with the system highlight.
+   *
+   * `--bg-raised` rather than a mix, because it is what `--fill-hover` over `--bg-content`
+   * already resolves to within a shade in both themes — #f5f5f7 against #f5f5f5 in light,
+   * #2a2a2c against #2a2a2a in dark — so the closed control looks exactly as it did.
+   */
+  background: var(--bg-raised);
   border: 0;
   border-radius: var(--field-radius);
   cursor: default;
   appearance: none;
+}
+
+/**
+ * The rows of that popup, coloured explicitly rather than left to inherit.
+ *
+ * An `<option>` defaults to a transparent background, so even with the surface above fixed the
+ * rows themselves contribute nothing and any translucency on the control shows straight
+ * through. Naming a real menu surface here is also the honest description of what this is.
+ */
+.select option {
+  color: var(--label-1);
+  background-color: var(--bg-menu-opaque);
 }
 
 .chevron {
@@ -72,6 +99,9 @@
   box-shadow: var(--focus-ring);
 }
 
+/* Opaque too, and for the same reason: the popup opens from a click, so the control is always
+   hovered at the moment Windows reads its background to draw the list. A translucent hover
+   would put the original bug back for the one state in which it matters. */
 .select:hover:not(:disabled) {
-  background: var(--fill-pressed);
+  background: color-mix(in srgb, var(--label-1) 8%, var(--bg-raised));
 }

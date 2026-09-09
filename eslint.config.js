@@ -81,8 +81,16 @@ export default tseslint.config(
 
   // CommonJS dev tooling. require() is the correct module system in a .cjs script, not
   // a lapse — this must come last so it wins over the block above.
+  //
+  // `document` and `window` are declared because these scripts drive a browser: the callback
+  // passed to Playwright's `page.evaluate` is serialised and run *in the page*, so it is
+  // browser code that happens to be written inside a Node file. Without this, every DOM read
+  // in a driver script is a no-undef error.
   {
     files: ['tools/**/*.cjs'],
+    languageOptions: {
+      globals: { document: 'readonly', window: 'readonly', getComputedStyle: 'readonly' },
+    },
     rules: { '@typescript-eslint/no-require-imports': 'off' },
   },
 )
