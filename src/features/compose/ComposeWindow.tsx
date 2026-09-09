@@ -267,6 +267,21 @@ export function ComposeWindow() {
     )
   }, [buildMessage, attachments])
 
+  /**
+   * Set once the user has answered the question, or once there is no question left to ask.
+   *
+   * `closeThisWindow` calls `window.close()`, which fires `onCloseRequested` again — so every
+   * path that closes the window deliberately used to walk straight back into the sheet that
+   * asked whether to close it. The fields still hold their text at that point, so `hasContent`
+   * was still true, the sheet reopened, and the close was cancelled. Pressing Delete, Save as
+   * Draft or Send simply reopened the question, for ever: the window could not be closed at all
+   * once anything had been typed in it.
+   *
+   * A ref rather than state because the handler is registered once and must see the current
+   * value — a state variable would be captured at registration and read stale.
+   */
+  const closeApproved = useRef(false)
+
   // docs/01 §6 — closing an unsaved compose offers Save as Draft / Delete / Cancel. Closing a
   // window with something typed in it is the one action in a mail client that destroys work
   // with a single click and no undo.
@@ -275,7 +290,10 @@ export function ComposeWindow() {
     let stopped = false
 
     void onCloseRequested(() => {
+      // Already answered — by Delete, by Save as Draft, or by the send having gone through.
+      if (closeApproved.current) return true
       if (!hasContent()) return true
+
       setClosing(true)
       return false
     }).then((unlisten) => {
@@ -329,6 +347,10 @@ export function ComposeWindow() {
 
       // The core has the message on disk and in the outbox before this resolves, so closing
       // now cannot lose it — and for the length of the undo hold it has not been sent either.
+      //
+      // Approved before closing, or the close handler asks whether to save a draft of the
+      // message that has just been sent — the fields still hold its text.
+      closeApproved.current = true
       await closeThisWindow()
     } catch (cause: unknown) {
       // Undoing the abandon is what keeps an unqueued message savable. Without it the timer,
@@ -525,6 +547,7 @@ export function ComposeWindow() {
               onClick={() => {
                 // Abandoned first, so the autosave timer cannot write it back on the way out.
                 autosave.abandon()
+                closeApproved.current = true
                 setClosing(false)
                 void closeThisWindow()
               }}
@@ -535,6 +558,7 @@ export function ComposeWindow() {
               variant="filled"
               onClick={() => {
                 autosave.saveNow()
+                closeApproved.current = true
                 setClosing(false)
                 void closeThisWindow()
               }}

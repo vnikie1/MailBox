@@ -6172,3 +6172,43 @@ alongside them.
   measurement above was real and irrelevant, and it took a second opinion measuring the same
   document to notice. When a reproduction disagrees with the running app, the reproduction is
   the thing to doubt first.
+
+### Fixed
+
+- **A compose window with anything typed in it could not be closed at all.** Reported as "it
+  asks me to cancel or delete or save as draft, nothing I press works, and it keeps showing this
+  pop up menu."
+
+  `closeThisWindow` calls `window.close()`, which fires `onCloseRequested` again. The handler
+  asked `hasContent()`, the fields still held their text, so it reopened the sheet and cancelled
+  the close. Every button that closes the window deliberately walked straight back into the
+  question it had just answered — Delete, Save as Draft and Send alike. The only way out was to
+  kill the window.
+
+  **Send had it worse than the other two.** It closed with the fields still populated, so a
+  message already handed to the outbox was met with "Save this message as a draft?" — and
+  answering it either wrote a draft copy of a message that had gone, or sat there refusing to
+  close.
+
+  There is now a flag the handler reads first, set by each path that has already asked. A ref
+  rather than state, because the handler is registered once and a state variable would be
+  captured at registration and read stale — which is the same shape of bug one layer down.
+
+- **The To, Cc and Bcc fields were invisible in dark mode.** They had no resting appearance at
+  all: no fill, no border, nothing. On the light theme the row still read as a field because the
+  window behind it is near-white; in dark mode an empty Cc row is a word and then a void, with
+  nothing to say there is anywhere to click. To only appeared once focused, because the focus
+  ring drew the only edge it ever had.
+
+  They now carry `TextField`'s fill — deliberately that one, because the Subject line directly
+  beneath them is a `TextField` and always had it, so the header was showing two kinds of input
+  at two different degrees of visibility.
+
+### Notes
+
+- **Neither of these could have been caught end to end.** `composeBlank` throws outside Tauri —
+  "Composing is only available in the app" — so the compose window does not initialise in the
+  browser build, and `onCloseRequested` and `closeThisWindow` are no-ops there. The whole
+  feature lives in the layer only the packaged app reaches, which is how a window that could not
+  be closed shipped at all. The behaviour is pinned by a component test instead, confirmed by
+  removing the fix and watching Delete and Save as Draft fail.

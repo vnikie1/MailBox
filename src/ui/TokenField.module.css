@@ -22,6 +22,20 @@
   text-align: right;
 }
 
+/**
+ * The part that holds the chips and the caret — and, since this was reported, the part that
+ * looks like a field.
+ *
+ * It had no resting appearance at all: no fill, no border, nothing. On the light theme the row
+ * still read as a field because the window behind it is near-white and the label sits beside a
+ * gap. In dark mode there is nothing to see — an empty Cc row is a word and then a void, with
+ * no way to tell there is anywhere to click, and the To row only appeared once focused because
+ * the focus ring drew the only edge it ever had.
+ *
+ * The fill is `TextField`'s, deliberately: the Subject line directly below these is a
+ * `TextField` and always had one, so the header was showing two kinds of input with two
+ * different degrees of visibility. Now they match.
+ */
 .body {
   display: flex;
   flex: 1 1 auto;
@@ -30,6 +44,9 @@
   align-items: center;
   min-width: 0;
   min-height: var(--tokenfield-row-height);
+  padding: 0 var(--field-pad-x);
+  background: var(--fill-hover);
+  border-radius: var(--field-radius);
 }
 
 .tokens {
