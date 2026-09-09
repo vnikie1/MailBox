@@ -6113,3 +6113,62 @@ alongside them.
   with the fix deleted from the app. This one captures the handler `useMailEvents` actually
   registers and calls it, so the thing under test is the shipped code. Confirmed by removing the
   fix and watching all three fail.
+
+### Fixed
+
+- **A message rendered as a column two words wide, with most of the pane blank beside it.**
+  Reported on mail from `noreply@instamart.in` in the Yahoo mailbox.
+
+  Nothing in the pipeline was at fault, and proving that took most of the work: the stored HTML
+  was byte-identical to a hand extraction from the `.eml`; the render was reproduced **exactly**
+  (46,410 chars, seven real images out of the cache, matching the app's own log); and the
+  sanitiser, the inlined images, the removed `<head><style>`, the frame stylesheet and
+  `overflow-wrap: anywhere` were each measured and exonerated. The live app was inspected over
+  CDP and agreed with every reproduction.
+
+  It is the message's own markup:
+
+  ```html
+  <tr>
+    <td>&nbsp;</td>
+    <td width="100"><img …logo… /></td>
+    <td>&nbsp;</td>
+  </tr>
+  <tr>
+    <td width="5">&nbsp;</td>
+    <td>…the entire message…</td>
+  </tr>
+  ```
+
+  Row one declares three columns; row two supplies two cells. So the body lands in column two —
+  the column the logo pinned to 100px — and column three, empty in every row and carrying no
+  width, absorbs the surplus. Measured at a 1502px frame the columns came out **18 / 100 /
+  1380**. The author meant that second cell to span the rest of the row and omitted the
+  `colspan`; every client that shows this message correctly is being more forgiving than the
+  specification requires.
+
+  A short row's last cell is now extended to reach its table's column count. The same document
+  measures **1493px instead of 100px**.
+
+### Notes
+
+- **The repair cannot touch a well-formed table.** It only ever acts on a row that is _short_,
+  and a table whose rows agree has none — so the blast radius is exactly the malformed mail it
+  exists for.
+
+- **Any table containing a `rowspan` is skipped entirely.** A cell spanning rows occupies a
+  column in each without appearing in their markup, so the row beneath legitimately carries
+  fewer cells; extending it would corrupt a table that renders correctly today. Tracking that
+  properly is possible, and getting it subtly wrong is worse than not doing it.
+
+- **It runs in the reader, not the core.** This is layout repair rather than sanitising, and the
+  markup reaching it has already been through the core. `DOMParser` with `text/html` runs no
+  script and fetches nothing.
+
+- **An incident worth recording: I measured the wrong element for most of this investigation.**
+  `find()` over `querySelectorAll('td')` returns the first match in document order, and with
+  nested tables that is the outermost wrapper — 1498px — not the cell holding the text, which
+  was 100px all along. Four nested cells contain that greeting. Every "renders full width"
+  measurement above was real and irrelevant, and it took a second opinion measuring the same
+  document to notice. When a reproduction disagrees with the running app, the reproduction is
+  the thing to doubt first.

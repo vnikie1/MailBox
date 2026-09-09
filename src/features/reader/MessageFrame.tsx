@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { openExternal } from '@/lib/ipc'
+
+import { repairShortRows } from './repairTables'
 
 import styles from './MessageBody.module.css'
 
@@ -115,6 +117,14 @@ export interface MessageFrameProps {
 
 export function MessageFrame({ html, fromPlainText, resetKey }: MessageFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
+
+  // Rows missing their trailing cells, repaired before the document is built. Memoised because
+  // it parses the markup, and the markup only changes when a different message is shown —
+  // without this it would re-parse on every resize, and resizing is what this component does.
+  const repaired = useMemo(
+    () => (fromPlainText ? html : repairShortRows(html)),
+    [html, fromPlainText],
+  )
 
   /** The observer watching the document currently in the frame, so it can be replaced. */
   const observers = useRef<ResizeObserver | null>(null)
@@ -242,7 +252,7 @@ export function MessageFrame({ html, fromPlainText, resetKey }: MessageFrameProp
       className={styles.frame}
       // No allow-scripts, no allow-popups, no allow-top-navigation. docs/03 §6.1.
       sandbox="allow-same-origin"
-      srcDoc={frameDocument(html, fromPlainText)}
+      srcDoc={frameDocument(repaired, fromPlainText)}
       style={height > 0 ? { height: `${String(height)}px` } : undefined}
       onLoad={onFrameLoad}
     />
