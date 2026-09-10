@@ -56,6 +56,10 @@ pub fn run() {
 
     init_tracing(&diagnostics);
 
+    // Cloned for the setup hook, which needs to name the log directory in a dialog if it cannot
+    // open the store. The original is consumed by init_tracing above.
+    let diagnostics_dir = diagnostics.clone();
+
     // Before the window is built, not after. A window remembered on a display that no longer
     // exists is a rectangle WebView2 refuses outright, and the failure is not a mis-placed
     // window but a process that exits 101 with nothing on screen — see platform::window_state.
@@ -219,7 +223,25 @@ pub fn run() {
             // already backed by the real store rather than by an empty one that fills in.
             let path = db::default_path();
             tracing::info!(path = %path.display(), "opening mail store");
-            app.manage(db::Db::open(&path)?);
+
+            // Not a `?`, and not because this is survivable — it is not. A mail client whose
+            // store will not open has nothing to show. But a `?` here is a panic, and a panic
+            // here is a process that exits before painting anything: the user double-clicks the
+            // icon and nothing happens, with the explanation written to a crash report only a
+            // working installation can display.
+            //
+            // This is the likeliest startup failure a real user will ever hit — a truncated
+            // write after a power cut, a half-restored backup, a file an antivirus has taken
+            // away — so it is the one that most needs to say what went wrong.
+            let store = match db::Db::open(&path) {
+                Ok(store) => store,
+                Err(error) => platform::fatal::cannot_start(
+                    "Halcyon could not open its mail store.",
+                    &format!("{}\n\n{error}", path.display()),
+                    Some(&diagnostics_dir),
+                ),
+            };
+            app.manage(store);
             app.manage(sync::engine::SyncEngine::new());
             app.manage(sync::idle::Watchers::new());
             // Behind an `Arc` because `Db::write` moves its closure to the writer thread, so

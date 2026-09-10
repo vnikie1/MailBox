@@ -6690,3 +6690,84 @@ disposable to point them at.
 - **The dialog helper is scoped to Halcyon's own process now.** Enumerating every `#32770` on the
   desktop and posting `WM_CLOSE` to all of them can hit windows belonging to anything the user
   has open. It did no harm here, but it was luck rather than design.
+
+---
+
+## 2026-09-10 — Working through the crash audit's leftovers
+
+The crash-report investigation produced about forty findings and then lost its verification pass
+to a usage limit, so none of them had been checked. Six were worked through by hand. **Three
+were already fixed**, one was not this app's problem at all, and two were real.
+
+### Fixed
+
+- **`panic = "abort"` made the one `catch_unwind` in the codebase inert.** `search/extract.rs`
+  runs the PDF and DOCX parsers inside `catch_unwind`, with a comment saying a parser panicking
+  on a malformed file "must cost one attachment rather than the process the user is reading
+  their mail in". With `panic = "abort"` the panic runtime aborts before anything unwinds, so
+  that guard never ran.
+
+  It was inert **only in release**. Debug builds unwind by default, so every test of that path
+  passed and the protection looked real right up until it was needed. The input is an email
+  attachment — as untrusted as input gets here — so a malformed PDF would take down the mail
+  client of somebody who had done nothing but receive a message.
+
+  Removed from the release profile, with the reasoning written where the setting used to be, and
+  `release_builds_can_still_catch_a_panicking_parser` fails if it comes back. Confirmed by
+  re-adding it and watching the test fail.
+
+- **A store that will not open now says so instead of vanishing.** `app.manage(db::Db::open(&path)?)`
+  was a `?` in the setup hook, which Tauri turns into a panic — a process that exits before
+  painting anything. The user double-clicks the icon and nothing happens, and the explanation
+  goes to a crash report only a working installation can display.
+
+  This is the likeliest startup failure a real user will ever meet: a truncated write after a
+  power cut, a half-restored backup, a file an antivirus has taken away. It is **not** made
+  survivable — a mail client with no store has nothing to show — but it now names the file, the
+  underlying error and the diagnostics folder in a native message box before exiting.
+
+  `platform/fatal.rs` is the one place in this codebase that reaches past Tauri to Win32, and
+  the reason is in its own doc comment: the dialog plugin needs a running app, which is the
+  thing that has not happened.
+
+### Fixed — in the test, not the code
+
+- **`startup_is_survivable.rs` was under-counting the fatal steps it exists to count.** It
+  matched lines _ending_ in `?`, and the most consequential one did not:
+  `app.manage(db::Db::open(&path)?)`. So it reported two fatal steps when there were three, and
+  the one it could not see was the one most likely to fire on a real machine. It counts `?`
+  anywhere in the line now.
+
+  Worth recording plainly: the test was written in this same session, one commit after finding
+  the class-A crashes, and it was wrong about the thing it was written to watch.
+
+### Notes — the four that needed no code
+
+- **95 WebView2 `0x8007139F` errors are not Halcyon.** RivaTuner Statistics Server and MSI
+  Afterburner are running on this machine, `RTSSHooksLoader64` included. RTSS injects an overlay
+  into Chromium-based processes and puts WebView2 into an invalid state; that is what
+  `0x8007139F` — "the group or resource is not in the correct state" — means here. Bursty and
+  environment-specific: 48 on 09-06, 44 on 09-08, 3 on 09-09. Excluding `halcyon.exe` in RTSS's
+  profile list is the fix, and it belongs to whoever owns the machine. Already in project memory;
+  now corroborated by process list rather than recollection.
+
+- **The five discarded queued actions were fixed on 2026-09-02.** `pending_op` rows whose payload
+  predated the `kind` field could not be parsed and were dropped. Fixed by `fcd27b2` ("Local
+  changes that never reached the server"), whose `server_side` tests exist for exactly this. Last
+  occurrence in the log is 2026-09-01. Closed.
+
+- **The four UNIQUE-constraint failures were fixed the same morning they happened.** `move_to`
+  kept a message's old UID when moving it, and `message` has `UNIQUE(mailbox_id, uid)`, so moving
+  into a mailbox that already held that UID failed the transaction. The four errors are at
+  09:11–09:25 IST on 2026-09-04; the fix, `feb2578`, was committed at 09:34:55 the same morning.
+  That is somebody reproducing a bug and fixing it, not an open defect. None since. Closed.
+
+- **The body-rendering inflation is bounded now.** 454 renders in the log, 124 over 1 MB, 219
+  inflating more than ten times, worst 76 KB in to 12.98 MB out. The cause is remote images
+  fetched and base64'd into data URIs — which the log does not report, so its `inlined=0` field
+  (which counts only `cid:` attachments) made it look like something stranger. `MAX_REMOTE_TOTAL_BYTES`
+  landed at 8 MB on 2026-09-07 20:23, and no render has exceeded 8 MB since: the daily maxima sit
+  at 7.11, 7.82 and 7.84 MB, which is what a cap looks like when it is binding.
+
+  Left open deliberately: the render log line still does not say how many remote images were
+  fetched or what they cost, which is the field that would have made this obvious in one look.

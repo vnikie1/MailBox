@@ -35,6 +35,7 @@
 pub mod appearance;
 pub mod backdrop;
 pub mod badge;
+pub mod fatal;
 pub mod files;
 pub mod jumplist;
 pub mod links;

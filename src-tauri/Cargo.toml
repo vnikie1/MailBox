@@ -153,8 +153,24 @@ incremental = true
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
 strip = true
+
+# `panic = "abort"` is deliberately NOT set here, and removing it was a fix rather than an
+# oversight.
+#
+# `search/extract.rs` runs the PDF and DOCX parsers inside `catch_unwind`, with a comment
+# saying a parser panicking on a malformed file "must cost one attachment rather than the
+# process the user is reading their mail in". With `panic = "abort"` that is not what happens:
+# the panic runtime aborts before anything unwinds, so `catch_unwind` never returns `Err` and
+# the guard is inert.
+#
+# It is inert **only in release**. Debug builds unwind by default, so every test of that path
+# passed and the protection looked real right up until it was needed.
+#
+# The input is an email attachment, which is as untrusted as input gets in this app: a malformed
+# or hostile PDF would take the whole mail client down with it, on a machine where the user did
+# nothing but receive a message. Unwinding costs some binary size in tables. That is the cheaper
+# side of this trade by a wide margin.
 
 [dev-dependencies]
 proptest = "1.9.0"
