@@ -217,7 +217,13 @@ const sleep = (page, ms) => page.waitForTimeout(ms)
     await sleep(s, 4000)
     const status = await s
       .locator('main p')
-      .filter({ hasText: /up to date|available|Could not reach|Asking/ })
+      // Every answer the pane can give, including the four that replaced the single
+      // "usually just being offline" line — see `describeProblem` in UpdateSettings.tsx. A
+      // matcher listing only some of them hangs for thirty seconds on a perfectly good app.
+      .filter({
+        hasText:
+          /up to date|is available|Could not reach|Asking|no release published|could not read|nothing in it for this kind of PC|no update server configured/,
+      })
       .first()
       .textContent()
     note(`update check says: ${JSON.stringify((status || '').trim())}`)
@@ -288,15 +294,32 @@ const sleep = (page, ms) => page.waitForTimeout(ms)
       : null
     note(`${groupName}: starts on ${JSON.stringify(colourBefore)}`)
 
+    // Clicking the colour an account *already has* clears it — the documented toggle, and the
+    // reason `accountUpdate` takes a `ColorChange` rather than a bare string. So one click does
+    // not always mean "selected": for whichever colour the account starts on, the first click
+    // is the clear and the second is the set.
+    //
+    // Reported as a failure once, on an account that happened to start on Red. The app was
+    // right and this loop was wrong, which is the worse of the two ways for a harness to be
+    // mistaken.
     let set = 0
     for (const name of colourNames) {
-      await colours.getByRole('radio', { name, exact: true }).click()
+      const swatch = colours.getByRole('radio', { name, exact: true })
+      const wasChosen = (await swatch.getAttribute('aria-checked')) === 'true'
+
+      await swatch.click()
       await sleep(s, 650)
-      if (
-        (await colours.getByRole('radio', { name, exact: true }).getAttribute('aria-checked')) ===
-        'true'
-      )
-        set++
+
+      if (wasChosen) {
+        // That click cleared it. Prove the clear, then set it again.
+        if ((await swatch.getAttribute('aria-checked')) === 'true') {
+          note(`  "${name}" was already chosen and clicking it did not clear it`)
+        }
+        await swatch.click()
+        await sleep(s, 650)
+      }
+
+      if ((await swatch.getAttribute('aria-checked')) === 'true') set++
       else note(`  "${name}" did not highlight`)
     }
     check(`Accounts ▸ ${groupName}: every colour sets and highlights`, set, colourNames.length)
