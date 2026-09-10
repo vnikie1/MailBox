@@ -33,6 +33,61 @@ use ts_rs::TS;
 
 use super::mail::AppError;
 
+/// Why a check produced no answer.
+///
+/// ## Why a string was not enough
+///
+/// `error` used to be the only signal, and the UI said one thing for all of it: *"Could not
+/// reach the update server. This is usually just being offline."* That sentence was wrong for
+/// the case that has actually been happening on this machine — **69 failed checks and zero
+/// successes since 2026-09-03** — because the server was reached, answered, and said 404: the
+/// GitHub repository is public and real, and has no releases published, so
+/// `releases/latest/download/latest.json` has nothing to serve.
+///
+/// Telling somebody they are offline when they are not is the kind of error message that sends
+/// them to look at their router. The two cases are cleanly distinguishable inside the plugin —
+/// a non-2xx response leaves `last_error` unset and falls through to `ReleaseNotFound`, while a
+/// transport failure returns `Reqwest` — so the distinction is made here, once, and the UI
+/// branches on a value instead of guessing from a sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateProblem {
+    /// Nothing answered: no network, DNS failure, a refused connection, TLS.
+    Unreachable,
+    /// Something answered, and it was not a release. A repository with no releases published
+    /// gives a 404 here, and that is not the user's connection.
+    NoRelease,
+    /// Reached and answered, and the answer could not be understood.
+    Malformed,
+    /// There is a release, and nothing in it for this machine.
+    Unsupported,
+    /// The updater is not configured in this build.
+    Unavailable,
+}
+
+/// Which of those a plugin error is.
+///
+/// `tauri_plugin_updater::Error` is `#[non_exhaustive]`, so the catch-all is required rather
+/// than lazy. It lands on `Malformed` because an error this code has never seen is, from the
+/// user's side, the server having said something unusable — and that reads better than
+/// asserting anything about their connection.
+#[cfg(feature = "self-update")]
+fn classify(error: &tauri_plugin_updater::Error) -> UpdateProblem {
+    use tauri_plugin_updater::Error as E;
+
+    match error {
+        E::Reqwest(_) | E::Network(_) | E::Io(_) => UpdateProblem::Unreachable,
+        E::ReleaseNotFound => UpdateProblem::NoRelease,
+        E::Serialization(_) | E::Semver(_) | E::UrlParse(_) => UpdateProblem::Malformed,
+        E::TargetNotFound(_) | E::TargetsNotFound(_) | E::UnsupportedArch | E::UnsupportedOs => {
+            UpdateProblem::Unsupported
+        }
+        E::EmptyEndpoints => UpdateProblem::Unavailable,
+        _ => UpdateProblem::Malformed,
+    }
+}
+
 /// What a check found.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -45,8 +100,10 @@ pub struct UpdateStatus {
     pub version: Option<String>,
     /// Release notes, as published. Shown as plain text, never as markup.
     pub notes: Option<String>,
-    /// Set when the check itself failed — offline, or GitHub unreachable.
+    /// The underlying message, kept for the log and for a report. Not what the UI says.
     pub error: Option<String>,
+    /// What kind of failure it was, for the UI to say something true about.
+    pub problem: Option<UpdateProblem>,
 }
 
 impl UpdateStatus {
@@ -57,6 +114,7 @@ impl UpdateStatus {
             version: None,
             notes: None,
             error: None,
+            problem: None,
         }
     }
 }
@@ -72,6 +130,7 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, AppErro
         Err(error) => {
             return Ok(UpdateStatus {
                 error: Some(error.to_string()),
+                problem: Some(UpdateProblem::Unavailable),
                 ..UpdateStatus::none(true)
             })
         }
@@ -84,15 +143,26 @@ pub async fn update_check(app: tauri::AppHandle) -> Result<UpdateStatus, AppErro
             version: Some(update.version.clone()),
             notes: update.body.clone(),
             error: None,
+            problem: None,
         }),
         Ok(None) => Ok(UpdateStatus::none(true)),
-        Err(error) => Ok(UpdateStatus {
-            // Reported rather than raised. Being offline is not a fault, and a red banner every
-            // time somebody opens Settings on a train would teach them to ignore the one that
-            // matters.
-            error: Some(error.to_string()),
-            ..UpdateStatus::none(true)
-        }),
+        Err(error) => {
+            let problem = classify(&error);
+
+            // Logged here because the UI deliberately does not show the raw message, and
+            // without this the only record of *why* a check failed is the plugin's own line,
+            // which does not say which endpoint or what the app then told the user.
+            tracing::warn!(%error, ?problem, "update check failed");
+
+            Ok(UpdateStatus {
+                // Reported rather than raised. Being offline is not a fault, and a red banner
+                // every time somebody opens Settings on a train would teach them to ignore the
+                // one that matters.
+                error: Some(error.to_string()),
+                problem: Some(problem),
+                ..UpdateStatus::none(true)
+            })
+        }
     }
 }
 
@@ -150,6 +220,43 @@ pub async fn update_install() -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The distinction the UI was getting wrong, pinned to the two plugin errors that carry it.
+    ///
+    /// A GitHub repository with no releases published answers `releases/latest/download/...`
+    /// with a 404. The plugin treats a non-2xx response as "no release here", leaves its
+    /// `last_error` unset and falls through to `ReleaseNotFound` — so the app was reaching the
+    /// server perfectly well and telling the user they were offline. That happened 69 times on
+    /// the developer's machine before anybody read the log.
+    #[cfg(feature = "self-update")]
+    #[test]
+    fn a_server_that_answered_is_not_the_same_as_no_server() {
+        use tauri_plugin_updater::Error;
+
+        assert_eq!(
+            classify(&Error::ReleaseNotFound),
+            UpdateProblem::NoRelease,
+            "a 404 from a repository with nothing published is not a connection problem"
+        );
+
+        assert_eq!(
+            classify(&Error::Network("connection refused".into())),
+            UpdateProblem::Unreachable,
+            "a transport failure is the case the old copy described"
+        );
+
+        assert_eq!(
+            classify(&Error::EmptyEndpoints),
+            UpdateProblem::Unavailable,
+            "no endpoints configured is a build problem, not the user's"
+        );
+
+        assert_eq!(
+            classify(&Error::UnsupportedArch),
+            UpdateProblem::Unsupported,
+            "a release with nothing for this machine is its own answer"
+        );
+    }
 
     #[test]
     fn a_build_that_cannot_self_update_says_so_rather_than_failing() {

@@ -1220,7 +1220,14 @@ export async function onTransferProgress(
  */
 export async function updateCheck(): Promise<UpdateStatus> {
   if (!runningInTauri) {
-    return { supported: false, available: false, version: null, notes: null, error: null }
+    return {
+      supported: false,
+      available: false,
+      version: null,
+      notes: null,
+      error: null,
+      problem: null,
+    }
   }
   return invoke<UpdateStatus>('update_check')
 }

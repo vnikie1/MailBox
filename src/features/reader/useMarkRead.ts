@@ -31,6 +31,21 @@ import type { MessageFull } from '@/lib/generated/MessageFull'
  * so deliberately, and deliberate beats automatic. The memory clears when the selection changes,
  * which means re-opening a message reads it again — the same as Mail, and the right answer:
  * coming back to a message later is reading it, not un-deciding.
+ *
+ * ## Why remembering what it marked was not enough
+ *
+ * That memory only ever holds messages **this hook marked**, so it is empty for a message that
+ * was already read when the selection opened — and there is nothing to mark in that case, so it
+ * stays empty. Press Ctrl+U on such a message and the effect sees an unread id it does not
+ * recognise, starts the timer, and 700ms later reads it again.
+ *
+ * Measured in the packaged app against the database: `flag_seen` went 1 → 0 at +250ms and was
+ * back to 1 by +600ms. The message you are actually looking at could not be marked unread at
+ * all, which is the same bug the memory was added to fix, reached from the other side.
+ *
+ * So eligibility is decided **once, when the selection opens**: only messages that were unread
+ * at that moment are ever auto-marked. Anything that becomes unread later during the same
+ * selection is the user, and the user is left alone.
  */
 
 /** Long enough to skip past a message, short enough to feel like no delay at all. */
@@ -51,13 +66,31 @@ export function useMarkRead(messages: MessageFull[]): void {
   // because some unrelated field changed.
   const thread = messages.map((message) => message.id).join(',')
 
-  useEffect(() => {
-    marked.current = new Set()
-  }, [thread])
+  /**
+   * The messages that were unread when this selection opened — the only ones ever auto-marked.
+   *
+   * Captured during render rather than in an effect, and that is load-bearing: an effect runs
+   * *after* the render that first shows a new selection, so `unread` below would be computed
+   * against the previous selection's eligibility for one render — long enough to start a timer
+   * for a message that should never have had one.
+   */
+  const eligible = useRef<{ key: string; ids: Set<number> }>({ key: '', ids: new Set() })
 
-  // Only the unread ones this hook has not already handled.
+  if (eligible.current.key !== thread) {
+    eligible.current = {
+      key: thread,
+      ids: new Set(messages.filter((message) => !message.seen).map((message) => message.id)),
+    }
+    marked.current = new Set()
+  }
+
+  // Unread, eligible, and not already handled. The middle condition is what keeps the hook out
+  // of a message the user marked unread while looking at it.
   const unread = messages
-    .filter((message) => !message.seen && !marked.current.has(message.id))
+    .filter(
+      (message) =>
+        !message.seen && eligible.current.ids.has(message.id) && !marked.current.has(message.id),
+    )
     .map((message) => message.id)
     .join(',')
 

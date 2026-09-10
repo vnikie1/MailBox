@@ -6532,3 +6532,80 @@ and did not highlight. It had never worked — not once since the feature shippe
   four raw UNIQUE-constraint failures surfacing as command errors; `panic = "abort"` defeating
   the one `catch_unwind` in the codebase, so a malformed attachment would abort the app; and no
   corruption handling on `halcyon.db`. None of these has been confirmed.
+
+---
+
+## 2026-09-10 — Mark as Unread, and an update check that blamed the network
+
+### Fixed
+
+- **The message you are looking at could not be marked unread.** It worked for about half a
+  second and was then silently undone.
+
+  Measured in the packaged app, against the database, sampling either side of the 700ms dwell:
+
+  ```
+  menu offers: "Mark as Unread"
+    + 250ms  flag_seen=0     <- marked unread
+    + 600ms  flag_seen=1     <- put back
+  ```
+
+  `useMarkRead` keeps a memory of what it has marked so that a deliberate Ctrl+U is not
+  overruled — but that memory only ever holds messages **the hook itself marked**, and for a
+  message that was already read when the selection opened there was nothing to mark, so it
+  stayed empty. Marking such a message unread produced an unread id the effect did not
+  recognise, which started the timer, which read it again. It is the same bug the memory was
+  added to fix, reached from the other side.
+
+  Eligibility is now decided **once, when the selection opens**: only messages that were unread
+  at that moment are ever auto-marked, so anything that becomes unread later in the same
+  selection is the user and is left alone. Captured during render rather than in an effect,
+  because an effect runs after the render that first shows a new selection — one render during
+  which the old selection's eligibility would still apply, which is long enough to start a timer
+  that should never have started.
+
+  `tests/unit/markRead.test.tsx` gains the case the existing four missed: a message that was
+  **already read** when opened. It fails without the fix and passes with it. The distinction
+  that makes it a real test is that it re-renders rather than remounting — unmounting models
+  _opening the message afresh_, which should read it, and testing it that way hides the bug
+  entirely.
+
+- **The update check told the user they were offline when the server had answered.** One
+  sentence was shown for every failure there is: _"Could not reach the update server. This is
+  usually just being offline."_ On this machine it was wrong **69 times in a row** — zero
+  successful checks since 2026-09-03.
+
+  Checked directly: `github.com/vnikie1/MailBox` is public and reachable and the configured
+  endpoint is correct; the repository simply has **no releases and no tags**, so
+  `releases/latest/download/latest.json` has nothing to serve and answers 404. The URL is not
+  the problem — the missing release is, and that is expected until the first one is published.
+
+  The two cases are cleanly distinguishable inside the plugin, which is what makes this worth
+  fixing rather than rewording: a non-2xx response leaves its `last_error` unset and falls
+  through to `ReleaseNotFound`, while a transport failure returns `Reqwest`. `update_check` now
+  classifies the error into an `UpdateProblem` — unreachable, no release, malformed,
+  unsupported, unavailable — and the UI says something true for each. The raw message is kept
+  in `error` for the log and a bug report, and is not what the user is shown.
+
+  A test pins the two that matter, so nobody can collapse them back into one sentence.
+
+### Notes
+
+- **The unread counter itself was tested and is correct.** Reading a mailbox down from four
+  unread to none, the sidebar badge tracked the database exactly at every step — 4, 3, 2, 1, 0 —
+  including the last one, and every badge in the sidebar matched a `GROUP BY` over the message
+  table. The taskbar badge counts Inbox-role mailboxes only and clears correctly at zero. So the
+  reported symptom is not a stale count in either place; what was found instead is the
+  mark-unread bug above, which lives in the same corner and is real.
+
+### Incidents
+
+- **Reproducing this read five of the user's messages.** The Bulk folder was chosen as the
+  lowest-stakes mailbox with a small unread count, and the run marked all five read to watch the
+  badge fall to zero. Four of the five had been unread. Which four is not recoverable: the undo
+  stack is in-memory rather than a table, so nothing on disk records the prior flags, and
+  guessing would leave one message wrongly unread.
+
+  Reported to the user rather than guessed at. The lesson is the same one the signature incident
+  taught and this did not fully learn: **capture the state you are about to change before you
+  change it**, not just the aggregate you are watching.

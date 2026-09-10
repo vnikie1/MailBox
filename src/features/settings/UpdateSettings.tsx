@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 
+import type { UpdateProblem } from '@/lib/generated/UpdateProblem'
 import type { UpdateStatus } from '@/lib/generated/UpdateStatus'
 import { updateCheck, updateInstall } from '@/lib/ipc'
 import { Button } from '@/ui'
@@ -57,6 +58,39 @@ function describeInstallFailure(error: unknown): string {
   }
 
   return 'The update could not be installed. Halcyon has not been changed, so it is safe to try again.'
+}
+
+/**
+ * What to say when a check produced no answer.
+ *
+ * ## Why this is five sentences and not one
+ *
+ * It was one: *"Could not reach the update server. This is usually just being offline."* — said
+ * for every failure there is. On this machine that sentence was **wrong 69 times in a row**.
+ * The GitHub repository is public and reachable; it simply has no releases published, so
+ * `releases/latest/download/latest.json` answers 404. The server was never unreachable, and a
+ * mail client that tells you to check your connection when your connection is fine sends you
+ * off to restart a router for nothing.
+ *
+ * The core now says which kind of failure it was (`UpdateProblem`), so each of these describes
+ * something that is actually true. None of them mentions a version number or a URL: this line
+ * sits in Settings, not in a bug report, and the underlying message is in the log for that.
+ */
+function describeProblem(problem: UpdateProblem | null): string {
+  switch (problem) {
+    case 'noRelease':
+      return 'The update server answered, and has no release published to compare against. Nothing is wrong with your connection.'
+    case 'malformed':
+      return 'The update server answered with something Halcyon could not read. Nothing was downloaded.'
+    case 'unsupported':
+      return 'There is a newer version, but nothing in it for this kind of PC.'
+    case 'unavailable':
+      return 'This copy of Halcyon has no update server configured, so it cannot check.'
+    case 'unreachable':
+    case null:
+    default:
+      return 'Could not reach the update server. This is usually just being offline.'
+  }
 }
 
 export function UpdateSettings() {
@@ -141,9 +175,10 @@ export function UpdateSettings() {
                   : status === null
                     ? ''
                     : status.error !== null
-                      ? // Being offline is not a fault. Saying so plainly beats a red banner
-                        // that teaches people to ignore the one that matters.
-                        'Could not reach the update server. This is usually just being offline.'
+                      ? // Being offline is not a fault, and neither is a server with nothing
+                        // published on it — but they are different, and this said the first
+                        // for both. See `describeProblem`.
+                        describeProblem(status.problem)
                       : status.available
                         ? `Version ${status.version ?? 'unknown'} is available.`
                         : 'Halcyon is up to date.'}

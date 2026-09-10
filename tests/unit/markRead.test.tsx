@@ -122,6 +122,37 @@ describe('marking the open message unread', () => {
     expect(mutate).toHaveBeenCalledTimes(1)
   })
 
+  it('does not undo the user on a message that was already read when it opened', () => {
+    // The half the memory above does not cover, and the one the user hit.
+    //
+    //  only ever remembers messages **this hook marked**. Open a message that is
+    // already read and it stays empty, because there was nothing to mark. Press Ctrl+U and the
+    // message becomes unread, the effect sees an unread id it does not recognise, and 700ms
+    // later it is read again.
+    //
+    // Measured in the packaged app against the database: flag_seen went 1 -> 0 at +250ms and
+    // back to 1 by +600ms. The message the user is looking at cannot be marked unread at all.
+    const view = renderWith([message(1, true)])
+
+    // Nothing to do: it is already read, so no timer and no mutation.
+    vi.advanceTimersByTime(2000)
+    expect(mutate).toHaveBeenCalledTimes(0)
+
+    // The user presses Ctrl+U on the open message. A re-render, NOT a remount: the selection
+    // has not changed, only the flag on the message in it. Unmounting here would be a
+    // different scenario — opening the message afresh, which is covered below and *should*
+    // read it — and testing it that way hides the bug.
+    view.rerender(
+      <QueryClientProvider client={new QueryClient()}>
+        <Harness messages={[message(1, false)]} />
+      </QueryClientProvider>,
+    )
+    vi.advanceTimersByTime(2000)
+
+    // Zero, not one. Anything here is the hook overruling a deliberate act.
+    expect(mutate).toHaveBeenCalledTimes(0)
+  })
+
   it('reads it again when the message is opened afresh', () => {
     // The other half. Leaving and coming back is reading it, not un-deciding — which is what
     // Mail does, and what stops the memory above turning into "never marks read again".
