@@ -39,6 +39,67 @@ Unblock-File .\Halcyon_setup.exe
 > development machine. It is a **one-way switch** — once disabled, the only way to re-enable it
 > is a clean reinstall of Windows. Decide deliberately.
 
+### 0.1 — Defender did flag it. Observed 2026-09-10, not predicted
+
+The table above says unsigned Rust binaries "occasionally false-positive". They do. It happened
+here, twice in four minutes, on a build compiled from this repository minutes earlier:
+
+    InitialDetectionTime : 2026-09-10 10:36:37
+    InitialDetectionTime : 2026-09-10 10:39:51
+    ThreatName           : Trojan:Win32/Bearfoos.A!ml
+    Resources            : file:_%LOCALAPPDATA%\Halcyon\halcyon.exe
+                           file:_Desktop\Halcyon.lnk
+                           file:_Start Menu\Programs\Halcyon.lnk
+                           regkey:_HKCU\...\Uninstall\Halcyon
+                           shellopencmd:_HKCU\...\Classes\mailto\shell\open\command
+                           startup:_Start Menu\Programs\Halcyon.lnk
+                           process:_pid:36368
+
+Read `Get-MpThreatDetection` for the current list; `Get-MpThreat` gives the name.
+
+**What it does.** Defender does not warn. It terminates the running process and deletes the
+executable, leaving `uninstall.exe`, the Start Menu and Desktop shortcuts' targets, and the
+user's data behind. From the outside the app simply vanishes: no dialog, no crash report, and a
+log that stops mid-sentence. The first diagnosis attempt here blamed the app, then blamed the
+test tooling, and only the detection history settled it.
+
+**Why it fires.** The `!ml` suffix is a machine-learning verdict rather than a signature match,
+and `Bearfoos.A!ml` is a well-known generic false positive. The behaviour the model dislikes is
+exactly what this installer legitimately does: an **unsigned** NSIS package writes an
+**unsigned** executable into `%LOCALAPPDATA%`, registers a `mailto` shell handler, and adds a
+Run-at-login entry. Without a signature to vouch for the publisher, that shape is
+indistinguishable from a dropper.
+
+**What it means for each path.**
+
+| Path | Affected | Why |
+|---|---|---|
+| **A — standalone NSIS** | **Yes, blocking** | Every user would have the app silently deleted minutes after installing. Unshippable as it stands. |
+| **B — Microsoft Store** | No | An MSIX is signed by Microsoft at ingestion and installs through AppX rather than dropping a loose exe into `%LOCALAPPDATA%`. |
+
+**This moves code signing from deferred to required for Path A.** It was parked on the reasoning
+that the Store comes first, which remains sound — but the standalone installer cannot ship
+unsigned, and that is now a measurement rather than a caution.
+
+**Two things to do when Path A is taken up again:**
+
+1. Sign the installer and the executable. An EV certificate also carries immediate SmartScreen
+   reputation; an OV one builds it over time and downloads.
+2. Submit a sample to <https://www.microsoft.com/en-us/wdsi/filesubmission> as a false positive.
+   That is what gets the ML verdict corrected, and it is worth doing even once signed, because
+   reputation and heuristics are separate systems.
+
+**On a development machine**, an exclusion keeps the app usable between builds. It is a security
+setting and belongs to whoever owns the machine, so it is written here rather than scripted:
+
+```powershell
+# As Administrator
+Add-MpPreference -ExclusionPath "$env:LOCALAPPDATA\Halcyon"
+```
+
+Running the binary straight out of `src-tauri/target/release/` was not flagged, so it is the
+way to drive a real build without touching Defender's settings at all.
+
 ---
 
 ## 1. Path A — Standalone installer

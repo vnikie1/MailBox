@@ -6609,3 +6609,84 @@ and did not highlight. It had never worked — not once since the feature shippe
   Reported to the user rather than guessed at. The lesson is the same one the signature incident
   taught and this did not fully learn: **capture the state you are about to change before you
   change it**, not just the aggregate you are watching.
+
+---
+
+## 2026-09-10 — The last six controls, and Defender eating the app
+
+### Added
+
+- **`docs/07-distribution.md` §0.1 — Defender flags this app.** Observed rather than predicted:
+  `Trojan:Win32/Bearfoos.A!ml`, twice in four minutes, on a build compiled from this repository
+  minutes earlier. Defender does not warn — it terminates the running process and deletes the
+  executable, leaving `uninstall.exe`, the shortcuts and the user's data behind. From outside
+  the app simply vanishes: no dialog, no crash report, and a log that stops mid-sentence.
+
+  The `!ml` suffix is a machine-learning verdict rather than a signature, and `Bearfoos.A!ml` is
+  a known generic false positive. What trips it is exactly what this installer legitimately
+  does: an unsigned NSIS package writes an unsigned executable into `%LOCALAPPDATA%`, registers
+  a `mailto` handler and adds a Run-at-login entry. Without a signature that shape is
+  indistinguishable from a dropper.
+
+  **This moves code signing from deferred to required for the standalone installer.** Parking it
+  to go Store-first remains sound — an MSIX is signed by Microsoft at ingestion and is not
+  affected — but Path A cannot ship unsigned, and that is now a measurement rather than a
+  caution. §0.1 carries the detection record, what to do about it, and the exclusion command,
+  written down rather than scripted because it is a security setting that belongs to whoever
+  owns the machine.
+
+### Notes — the six controls the audit had skipped are now all tested
+
+Run at the user's request. Four were safe once approached carefully; two needed somewhere
+disposable to point them at.
+
+- **Save the sign-in application** — the same client ID saved back with the secret box empty.
+  `set_client_config` only writes a secret when one is supplied, so the stored Google secret is
+  untouched; verified before and after. Reports "Google sign-in application saved".
+- **Choose files… and Export all mail…** — both open a real Windows modal, both dismiss, and the
+  app is still answering afterwards, which is the question that matters about a modal.
+- **Open the diagnostics folder** — opens Explorer on the right directory.
+- **Sign in again** — reaches the core and reports "Signing in…". The OAuth round trip is not
+  completed; the browser tab it opens is left alone.
+- **Delete all reports** — 9 rows and 9 files on disk to 0 and 0, toast reads "9 reports
+  deleted", the empty state appears and the button removes itself. All nine were copied to the
+  session scratchpad first, and their analysis is already written up in this changelog and in
+  `docs/PHASE-11-VERIFICATION.md`.
+- **Remove Account** — 11 checks, run against a **throwaway** account rather than real mail. A
+  one-message mbox was imported to create the local "On My PC" account, that account was removed,
+  and the assertions covered both halves: the account and its message are gone from the database
+  and from the list without a reload, **and** the two real accounts kept every one of their 1399
+  and 599 messages.
+
+  That is the only responsible way to test this control. Removal deletes every downloaded
+  message and the saved credential, and re-adding a real account needs a password or an OAuth
+  round trip that a test cannot supply — so a test that removes a real account leaves the user
+  worse off than before it ran.
+
+  It also completed the **import** path end to end as a side effect: "Done. 1 message in 1
+  mailbox", a new account in the list, and the file dialog driven from Win32 because the page
+  cannot see a Windows modal at all.
+
+### Fixed — state the earlier testing had disturbed
+
+- **The five Bulk messages read during the unread-counter investigation are unread again**, and
+  the change reached Yahoo: the queue drained to zero with no errors and the flags held across
+  six sync cycles. Marking them one at a time rather than as a selection, because right-clicking
+  collapses a multi-selection to the row under the cursor — correct behaviour, and worth knowing
+  before writing a script that assumes otherwise.
+
+### Incidents
+
+- **Twenty minutes were spent blaming the wrong thing for the app disappearing.** The first
+  hypothesis was a bug in the app; the second was the test harness's own `WM_CLOSE` sweep, which
+  did enumerate dialogs system-wide and was a blunt instrument worth regretting on its own
+  terms. Both were wrong. `Get-MpThreatDetection` settled it in one command, and the detection
+  record even names the process id Defender killed.
+
+  The lesson for next time: when a Windows process disappears with no crash report and no log
+  entry, **read the antivirus history before reading the code**. It is one command, and the
+  alternative is doubting a codebase that has done nothing wrong.
+
+- **The dialog helper is scoped to Halcyon's own process now.** Enumerating every `#32770` on the
+  desktop and posting `WM_CLOSE` to all of them can hit windows belonging to anything the user
+  has open. It did no harm here, but it was luck rather than design.
