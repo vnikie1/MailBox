@@ -39,4 +39,18 @@ failedRemote: number,
 /**
  * True when the message had no HTML part and this is its plain text, wrapped.
  */
-fromPlainText: boolean, };
+fromPlainText: boolean, 
+/**
+ * The message's own stylesheet, filtered by `super::css`, for the frame's `<head>`.
+ *
+ * Apart from `html` rather than inside it. The body HTML still never contains a `<style`
+ * element — the XSS corpus holds that line — and a stylesheet in the body would also be the
+ * body's first child, which is what the frame's own first-margin rule looks for.
+ *
+ * Why it exists at all: a message whose look lives in a `<style>` block rather than in
+ * `style` attributes rendered as bare text. Reported from using the app on a Pi-hole daily
+ * report, whose bar chart is a column of empty `<span class='bar'>` elements — every visible
+ * property of a bar is in the stylesheet, so with it gone the chart was not merely plain, it
+ * was not there.
+ */
+css: string, };

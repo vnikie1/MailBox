@@ -170,13 +170,46 @@ user's problem.
 
 ## 4. Deviations, with reasons
 
-- **Nothing is compiled in as an OAuth client, so Google and Microsoft are unusable until the
-  user registers one.** docs/05 §2 offers "bring your own OAuth client" as a mitigation; here
-  it is the only path. Embedding a client id and secret in a desktop binary means shipping a
-  credential that anyone can extract, and it makes every user's mail access contingent on one
-  registration surviving Google's review. The provider tile says
-  "Needs setting up in Settings first" and Continue is disabled, rather than opening a browser
-  onto a Google error page that reads as the app being broken.
+- ~~**Nothing is compiled in as an OAuth client, so Google and Microsoft are unusable until the
+  user registers one.**~~ **Reversed on 2026-09-16 — a build may now carry its own client.**
+  The original entry follows, then why it no longer holds.
+
+  > docs/05 §2 offers "bring your own OAuth client" as a mitigation; here it is the only path.
+  > Embedding a client id and secret in a desktop binary means shipping a credential that
+  > anyone can extract, and it makes every user's mail access contingent on one registration
+  > surviving Google's review. The provider tile says "Needs setting up in Settings first" and
+  > Continue is disabled, rather than opening a browser onto a Google error page that reads as
+  > the app being broken.
+
+  **Why reversed.** Reported from a fresh install: choosing Google or Microsoft said the app
+  "ships without" a sign-in application. From outside, that is a mail client without Gmail
+  support. docs/05 §2 never asked for BYO to be the only path — it offers it "for advanced
+  users" and expects the app's own client to be the main one.
+
+  **What each original objection now gets.** _A credential anyone can extract_ — a Desktop OAuth
+  client's secret is not one; Google issues it to installed apps knowing it ships inside them,
+  and PKCE, already unconditional, is the protection against intercepted codes. What must not
+  happen is the value entering **public source** (docs/05 §9), so it is a build input: read by
+  `build.rs` from the environment or from the gitignored `src-tauri/oauth/clients.env`, reaching
+  the crate through `option_env!`. A clean checkout carries none and behaves exactly as this
+  entry originally described, which is what docs/05 §9 requires of an open-source build. A test
+  fails if the file is ever tracked or the ignore rule removed. _Contingent on one registration_
+  — still true of built-in users, so a client the user enters in Settings always wins, and
+  clearing it returns to the built-in rather than disabling the provider.
+
+  Google is compiled in only with both halves: an id without its secret would light the tile
+  and fail at the last step of a browser consent. Microsoft needs no secret, and none is sent —
+  a public client that presents one is refused with AADSTS700025.
+
+- **`User.Read` is not requested from Microsoft, although docs/05 §3 lists it.** docs/05 §3
+  names four permissions for the Entra app registration; the code read them as the scopes of
+  the sign-in request. `User.Read` is a Microsoft Graph scope and the other two belong to
+  Exchange Online, and the identity platform will not issue one token for two resources: the
+  authorise request fails with AADSTS28000 before any sign-in page. Microsoft sign-in could
+  therefore never have worked, for anyone — hidden only because no Microsoft client had ever
+  been configured. Nothing in Halcyon calls Graph. The request now carries exactly the set
+  Microsoft's IMAP/SMTP OAuth guide lists; a test asserts every provider's scopes share one
+  resource. Found 2026-09-16.
 - **STARTTLS on IMAP is reported as unsupported rather than implemented.** The code detects it
   and refuses with a sentence naming port 993. Reaching that branch means a hand-entered
   plaintext IMAP port, which docs/05 §6 does not permit against a public host anyway, and none

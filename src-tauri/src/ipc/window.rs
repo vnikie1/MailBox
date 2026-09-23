@@ -114,8 +114,16 @@ pub async fn badge_paint(app: tauri::AppHandle, fill: u32, ink: u32) -> Result<(
 /// Unlike compose, there is exactly one — the label is fixed. Two settings windows could
 /// disagree about the same value, and the second one to be closed would win, which is a
 /// confusing way to lose a change.
+///
+/// `account` picks out one account on the Accounts pane — the mailbox menu's `Edit "Account"…`,
+/// which used to open the pane and leave the user to find the account in it. An id cannot
+/// break out of a query string, so it needs no check beyond being a number.
 #[tauri::command]
-pub async fn settings_open(app: tauri::AppHandle, pane: Option<String>) -> Result<(), AppError> {
+pub async fn settings_open(
+    app: tauri::AppHandle,
+    pane: Option<String>,
+    account: Option<i64>,
+) -> Result<(), AppError> {
     use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
     let pane = pane.unwrap_or_else(|| "general".into());
@@ -134,29 +142,33 @@ pub async fn settings_open(app: tauri::AppHandle, pane: Option<String>) -> Resul
         // Already open: move it to the pane that was asked for rather than opening a second
         // window or silently showing whichever pane it happened to be on.
         let _ = existing.emit("settings:pane", &pane);
+        if let Some(account) = account {
+            let _ = existing.emit("settings:account", account);
+        }
         let _ = existing.unminimize();
         let _ = existing.show();
         let _ = existing.set_focus();
         return Ok(());
     }
 
-    WebviewWindowBuilder::new(
-        &app,
-        "settings",
-        WebviewUrl::App(format!("index.html?settings=1&pane={pane}").into()),
-    )
-    .title("Settings")
-    .inner_size(780.0, 580.0)
-    .min_inner_size(560.0, 420.0)
-    .decorations(true)
-    .build()
-    .map_err(|error| {
-        tracing::warn!(%error, "could not open the settings window");
-        AppError {
-            code: "window-failed".into(),
-            message: "The Settings window could not be opened.".into(),
-        }
-    })?;
+    let address = match account {
+        Some(account) => format!("index.html?settings=1&pane={pane}&account={account}"),
+        None => format!("index.html?settings=1&pane={pane}"),
+    };
+
+    WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App(address.into()))
+        .title("Settings")
+        .inner_size(780.0, 580.0)
+        .min_inner_size(560.0, 420.0)
+        .decorations(true)
+        .build()
+        .map_err(|error| {
+            tracing::warn!(%error, "could not open the settings window");
+            AppError {
+                code: "window-failed".into(),
+                message: "The Settings window could not be opened.".into(),
+            }
+        })?;
 
     Ok(())
 }

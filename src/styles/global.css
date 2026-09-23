@@ -69,6 +69,25 @@ body {
   box-shadow: var(--focus-ring);
 }
 
+/**
+ * The rows of every native dropdown list, readable whoever renders the `<select>`.
+ *
+ * Windows draws an open `<select>` outside the page: its surface comes from the control's own
+ * background and each row's colours from its `<option>`, which defaults to transparent. So a
+ * control on a translucent or absent background opens onto a list with no ground at all, and
+ * in the dark theme its light text lands on white — every row unreadable except the one under
+ * the pointer, which Windows paints with its own highlight. Reported from the compose window's
+ * From picker on 2026-09-17; seven other hand-built selects had the same fault.
+ *
+ * `ui/Select` is the real fix and every select now goes through it (eslint enforces that).
+ * This is the floor beneath it: `:where()` keeps the specificity at zero, so any component that
+ * colours its own options still decides.
+ */
+:where(option, optgroup) {
+  color: var(--label-1);
+  background-color: var(--bg-menu-opaque);
+}
+
 /* Tabular figures wherever numbers must not shimmy as they change — docs/01 §2. */
 .tabular {
   font-feature-settings: var(--font-feat-ui), var(--font-feat-num);

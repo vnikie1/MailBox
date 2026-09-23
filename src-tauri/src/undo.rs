@@ -354,6 +354,13 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     continue;
                 };
 
+                // The folder it came from has been deleted since. There is nowhere to put the
+                // message back, and trying would fail the foreign key and every other part of
+                // this undo with it — so it stays where it is.
+                if crate::sync::ops::mailbox_path(tx, *mailbox_id)?.is_none() {
+                    continue;
+                }
+
                 inverse.push(Prior::Mailbox {
                     id: *id,
                     mailbox_id: current,
@@ -641,6 +648,34 @@ mod tests {
         let label = undo(&stack, &tx).expect("undo");
         assert_eq!(label.as_deref(), Some("Move to Archive"));
         assert_eq!(mailbox_of(&tx, 1), 1, "did not go back where it came from");
+    }
+
+    #[test]
+    fn undoing_a_move_out_of_a_deleted_folder_leaves_the_message_where_it_is() {
+        // There is nowhere to put it back. The alternative was a foreign-key failure that took
+        // the rest of the undo down with it.
+        let mut conn = store();
+        let stack = Stack::new();
+
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (3, 1, 'Old', 'Old', NULL)",
+            [],
+        )
+        .expect("folder");
+        conn.execute("UPDATE message SET mailbox_id = 3 WHERE id = 1", [])
+            .expect("file it there");
+
+        let tx = conn.transaction().expect("tx");
+        let step = capture(&tx, "Move to Archive", &[1], &[Field::Mailbox]).expect("capture");
+        crate::db::write::move_to(&tx, &[1], 2).expect("move");
+        stack.record(step);
+
+        crate::sync::folders::delete(&tx, 3).expect("delete the folder");
+
+        let label = undo(&stack, &tx).expect("undo does not fail");
+        assert_eq!(label.as_deref(), Some("Move to Archive"));
+        assert_eq!(mailbox_of(&tx, 1), 2);
     }
 
     #[test]

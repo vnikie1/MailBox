@@ -16,6 +16,9 @@ export default tseslint.config(
       // Written by `cargo test` from the Rust types; formatting them here would be undone
       // on the next run and the diff would be pure noise.
       'src/lib/generated',
+      // The designer's raw icon export, untracked (see .gitignore). Its scripts are the design
+      // tool's, not ours, and ESLint does not read .gitignore.
+      'Halcyon Mail App Logo',
     ],
   },
 
@@ -48,6 +51,28 @@ export default tseslint.config(
       // validated there and nowhere else, so banning `any` everywhere else is right.
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/restrict-template-expressions': ['error', { allowNumber: true }],
+    },
+  },
+
+  // One popup button in the app, not eight.
+  //
+  // Windows draws an open <select> itself, from the control's own background, so every
+  // hand-styled one is a chance to open a list with no surface. Eight of them did — the compose
+  // window's From picker was reported on 2026-09-17 with every account but the hovered one
+  // unreadable, and the rules editors and the account assistant had the same fault — while
+  // `ui/Select` had been fixed for it weeks earlier. Nothing stopped a feature writing its own.
+  {
+    files: ['src/**/*.tsx'],
+    ignores: ['src/ui/Select.tsx'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "JSXOpeningElement[name.name='select']",
+          message:
+            'Use the Select primitive from @/ui. Windows draws the open list from the control, and a hand-styled <select> opens one with no surface in the dark theme.',
+        },
+      ],
     },
   },
 

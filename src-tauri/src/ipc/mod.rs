@@ -6,6 +6,7 @@ pub mod body;
 pub mod compose;
 pub mod diagnostics;
 pub mod eml;
+pub mod folders;
 pub mod mail;
 pub mod organise;
 pub mod search;

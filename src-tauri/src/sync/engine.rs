@@ -12,7 +12,6 @@
 //! No `unwrap()` in this module, per docs/06 Phase 5.
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -85,7 +84,16 @@ pub struct AccountError {
 #[derive(Clone)]
 pub struct SyncEngine {
     locks: Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>,
+    /// Whether a push is already waiting to go. See [`SyncEngine::push_soon`].
+    push_waiting: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// How long a push waits for more changes before it goes.
+///
+/// Changes come in bursts — Mark All as Read, a run of Delete presses, a rule over a selection —
+/// and one connection for the burst is the point. Short enough that someone who marks a message
+/// read and picks up their phone finds it read there.
+const PUSH_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Default for SyncEngine {
     fn default() -> Self {
@@ -97,7 +105,78 @@ impl SyncEngine {
     pub fn new() -> Self {
         Self {
             locks: Arc::new(Mutex::new(HashMap::new())),
+            push_waiting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Sends what the user has changed, shortly, without a whole sync.
+    ///
+    /// The queue used to be drained only at the start of a sync, and with IDLE doing its job a
+    /// sync starts when the *Inbox* changes — or at the five-minute safety net. So marking a
+    /// folder read, flagging a message or moving one reached the server whenever something else
+    /// happened to start a sync. Driving the built app against the Dovecot rig found it: Mark All
+    /// Messages as Read on a folder, and the server still had every message unread minutes later.
+    /// docs/03 §3 describes a worker that drains `pending_op`; this is what wakes it.
+    ///
+    /// Only the queue — connect, drain, disconnect. A whole pass per flag change would re-read
+    /// every folder the account has. One push at a time for the whole app, after `PUSH_DELAY`,
+    /// and then one per account that has anything waiting, each under that account's lock so it
+    /// cannot interleave with a sync.
+    pub async fn push_soon(&self, app: Arc<dyn Events>, db: Db) {
+        use std::sync::atomic::Ordering;
+
+        if self.push_waiting.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        tokio::time::sleep(PUSH_DELAY).await;
+        // Cleared before reading the queue, so a change made from here on schedules a push of its
+        // own rather than being assumed to be in this one.
+        self.push_waiting.store(false, Ordering::SeqCst);
+
+        let accounts = match db.read(accounts_with_pending_ops).await {
+            Ok(accounts) => accounts,
+            Err(error) => {
+                tracing::warn!(%error, "could not read the queue to push it");
+                return;
+            }
+        };
+
+        for account_id in accounts {
+            let engine = self.clone();
+            let app = Arc::clone(&app);
+            let db = db.clone();
+
+            tokio::spawn(async move {
+                let lock = engine.lock_for(account_id).await;
+                let _guard = lock.lock().await;
+
+                // Not surfaced as an account error. The changes are safe in the queue, and the
+                // next sync — which does report — sends them.
+                if let Err(error) = push_once(app.as_ref(), &db, account_id).await {
+                    tracing::info!(account_id, %error, "queued changes not sent yet");
+                }
+            });
+        }
+    }
+
+    /// Sends what is queued, then syncs only these mailboxes of the account.
+    ///
+    /// The pass Rebuild asks for: reading one folder again has no reason to wait for a pass over
+    /// every other folder of the account — which, for an account with a large Inbox, is minutes.
+    /// No retries: a pass that fails leaves the rebuild asked for, and the account's next full
+    /// sync does it.
+    pub async fn sync_mailboxes(
+        &self,
+        app: &dyn Events,
+        db: &Db,
+        account_id: i64,
+        mailbox_ids: &[i64],
+    ) -> Result<(), SyncError> {
+        let lock = self.lock_for(account_id).await;
+        let _guard = lock.lock().await;
+
+        run_some(app, db, account_id, mailbox_ids).await
     }
 
     /// The lock for one account, created on first use.
@@ -210,8 +289,24 @@ impl SyncEngine {
 /// client stopped checking mail "for the next six and a half hours" and said nothing. A token
 /// refresh is the same decision one layer up, and never got the same treatment — though
 /// `OAuthError` has distinguished the cases all along.
-fn oauth_failure(email: &str, error: &accounts::oauth::OAuthError) -> SyncError {
+fn oauth_failure(
+    provider: Provider,
+    email: &str,
+    error: &accounts::oauth::OAuthError,
+) -> SyncError {
     match error {
+        // The provider answered, and said no — to the *application*, not to the account.
+        // `invalid_client` is Google's reply to a missing or wrong client secret, and it used
+        // to fall into the arm below and stop the account with "Signing in again will fix it".
+        // It is the one refusal a new sign-in cannot mend, so it is sorted out first.
+        accounts::oauth::OAuthError::Refused { .. }
+            if accounts::oauth::indicates_client_misconfiguration(error) =>
+        {
+            SyncError::OauthClientUnusable {
+                provider: provider.id().to_string(),
+                configured: true,
+            }
+        }
         // The provider answered, and said no. `invalid_grant` is a revoked or expired refresh
         // token, and no amount of retrying turns that into a yes.
         accounts::oauth::OAuthError::Refused { .. } => SyncError::Rejected {
@@ -242,8 +337,7 @@ fn describe(error: &SyncError) -> String {
         // sending the user through a sign-in would waste their time and teach them that the
         // banner lies.
         SyncError::AuthUnavailable { .. } => {
-            "The mail server could not complete the sign-in. Halcyon will keep trying."
-                .to_string()
+            "The mail server could not complete the sign-in. Halcyon will keep trying.".to_string()
         }
         SyncError::Unreachable { .. } | SyncError::Timeout { .. } | SyncError::Io(_) => {
             "Could not reach the mail server.".to_string()
@@ -258,9 +352,25 @@ fn describe(error: &SyncError) -> String {
         SyncError::NotConfigured { .. } => {
             "This account has no incoming mail server set. Open Settings to add one.".to_string()
         }
+        // The `\` is a line continuation, not a `\n`. It was written as an escaped newline
+        // followed by thirteen spaces of source indentation, which went into the string and
+        // only survived unnoticed because the banner's CSS leaves `white-space` at its
+        // default and HTML collapses the run.
         SyncError::MissingClientSecret { .. } => {
-            "Google needs the client secret for your sign-in application before it will \n             refresh this account. Paste it into Settings — signing in again will not help."
+            "Google needs the client secret for your sign-in application before it will \
+             refresh this account. Paste it into Settings — signing in again will not help."
                 .to_string()
+        }
+        SyncError::OauthClientUnusable { configured, .. } => {
+            if *configured {
+                "The provider rejected Halcyon's sign-in application, not your account. Check \
+                 the client ID and secret in Settings → Accounts → Sign-in applications."
+                    .to_string()
+            } else {
+                "This account signs in through a sign-in application, and none is configured. \
+                 Add one in Settings → Accounts → Sign-in applications."
+                    .to_string()
+            }
         }
         SyncError::UidValidityChanged { .. } => {
             "The server reorganised a mailbox; Halcyon is downloading it again.".to_string()
@@ -295,9 +405,14 @@ pub(crate) async fn credential_for(
                 let _ = &reference;
                 db.read(move |conn| accounts::client_config(conn, provider))
                     .await?
-                    .ok_or_else(|| SyncError::Rejected {
-                        host: account.email.clone(),
-                        detail: "no oauth client configured".into(),
+                    // Not `Rejected`. This is Halcyon having no registration with the
+                    // provider, which the user fixes in Settings — and as a `Rejected` it
+                    // rendered as "Signing in again will fix it", so clearing a client id
+                    // stopped every OAuth account at once and offered each one a button that
+                    // could not possibly succeed.
+                    .ok_or_else(|| SyncError::OauthClientUnusable {
+                        provider: provider.id().to_string(),
+                        configured: false,
                     })?
             };
 
@@ -319,7 +434,7 @@ pub(crate) async fn credential_for(
 
             let (token, refreshed) = accounts::access_token(expiry, provider, &client, &reference)
                 .await
-                .map_err(|error| oauth_failure(&account.email, &error))?;
+                .map_err(|error| oauth_failure(provider, &account.email, &error))?;
 
             if let Some(expires_at) = refreshed {
                 let reference = reference.clone();
@@ -331,6 +446,119 @@ pub(crate) async fn credential_for(
             Ok(Credential::OAuth(token))
         }
     }
+}
+
+/// The accounts that have changes waiting for their server.
+fn accounts_with_pending_ops(conn: &rusqlite::Connection) -> Result<Vec<i64>, crate::db::DbError> {
+    let mut statement =
+        conn.prepare("SELECT DISTINCT account_id FROM pending_op ORDER BY account_id")?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<i64>>>()?)
+}
+
+/// Sends one account's queue, and nothing else. See [`SyncEngine::push_soon`].
+async fn push_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), SyncError> {
+    let waiting = db
+        .write(move |tx| ops::pending_count(tx, account_id))
+        .await?;
+    if waiting == 0 {
+        // A sync got there while this one waited for the lock.
+        return Ok(());
+    }
+
+    let Some(account) = db
+        .read(move |conn| crate::accounts::store::get(conn, account_id))
+        .await?
+    else {
+        return Ok(());
+    };
+
+    // Switched off in Settings: the changes wait, exactly as they do for a sync, which
+    // `sync_all` skips for such an account.
+    if !account.sync_enabled {
+        return Ok(());
+    }
+
+    let Some(imap) = account.imap.clone() else {
+        return Ok(());
+    };
+
+    let credential = credential_for(db, &account).await?;
+    let (mut session, caps) = session::connect(&imap, &account.email, &credential).await?;
+
+    let drained = ops::drain(app, db, &mut session, account_id, caps.move_command).await;
+    let _ = session.logout().await;
+
+    let sent = drained?;
+    tracing::debug!(account_id, sent, "queued changes pushed");
+    Ok(())
+}
+
+/// The queue, then some of an account's mailboxes. See [`SyncEngine::sync_mailboxes`].
+async fn run_some(
+    app: &dyn Events,
+    db: &Db,
+    account_id: i64,
+    mailbox_ids: &[i64],
+) -> Result<(), SyncError> {
+    let account = db
+        .read(move |conn| crate::accounts::store::get(conn, account_id))
+        .await?
+        .ok_or(SyncError::ShuttingDown)?;
+
+    let imap = account
+        .imap
+        .clone()
+        .ok_or_else(|| SyncError::NotConfigured {
+            email: account.email.clone(),
+        })?;
+
+    tracing::info!(account_id, mailboxes = ?mailbox_ids, "partial sync starting");
+
+    let credential = credential_for(db, &account).await?;
+    let (mut session, caps) = session::connect(&imap, &account.email, &credential).await?;
+
+    // First, for the reason `run_once` gives.
+    ops::drain(app, db, &mut session, account_id, caps.move_command).await?;
+
+    for &mailbox_id in mailbox_ids {
+        let found: Option<(String, Option<String>)> = db
+            .read(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT remote_path, role FROM mailbox WHERE id = ?1 AND account_id = ?2",
+                        rusqlite::params![mailbox_id, account_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .ok())
+            })
+            .await?;
+
+        // Gone meanwhile, or Gmail's All Mail, which `run_once` never syncs either.
+        let Some((path, role)) = found else {
+            continue;
+        };
+        if role.as_deref() == Some(mailboxes::Role::All.as_str()) {
+            continue;
+        }
+
+        let backfill = role.as_deref() == Some(mailboxes::Role::Inbox.as_str());
+        sync_mailbox(
+            app,
+            db,
+            &mut session,
+            caps,
+            account_id,
+            mailbox_id,
+            &path,
+            backfill,
+        )
+        .await?;
+    }
+
+    let _ = session.logout().await;
+    tracing::info!(account_id, "partial sync finished");
+    Ok(())
 }
 
 /// One attempt at a full pass.
@@ -361,7 +589,7 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
     // Before anything is fetched, and that order is load-bearing. Pulling first would
     // overwrite the local change with the stale value the server still holds, and the queued
     // operation would then push a value the user had already watched revert.
-    ops::drain(db, &mut session, account_id, caps.move_command).await?;
+    ops::drain(app, db, &mut session, account_id, caps.move_command).await?;
 
     // ---- 1. the mailbox tree -----------------------------------------------------------
     let discovered = mailboxes::discover(&mut session).await?;
@@ -377,11 +605,24 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
         .cloned()
         .collect();
 
-    let ids = {
+    let persisted = {
         let to_persist = selectable.clone();
         db.write(move |tx| mailboxes::persist(tx, account_id, &to_persist))
             .await?
     };
+
+    // Paired by path, not by position. `persist` skips a listed mailbox the user has renamed or
+    // deleted since the LIST — the server has not heard yet — so its answer can be shorter than
+    // the list, and a zip would sync each folder's mail into its neighbour's row.
+    let targets: Vec<(mailboxes::Discovered, i64)> = selectable
+        .iter()
+        .filter_map(|mailbox| {
+            persisted
+                .iter()
+                .find(|(_, path)| path == &mailbox.remote_path)
+                .map(|(id, _)| (mailbox.clone(), *id))
+        })
+        .collect();
 
     // Folders the server no longer has. `discover` returns an error rather than a short list
     // if the LIST breaks off, so an Ok result of non-zero length is the whole tree — which is
@@ -412,11 +653,10 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
     // ---- 2. the Inbox, newest page first ------------------------------------------------
     // docs/03 §5 orders this deliberately: the Inbox is what the user is looking at, and its
     // newest page is what they see. Everything else waits.
-    let inbox = selectable
+    let inbox = targets
         .iter()
-        .zip(ids.iter())
         .find(|(mailbox, _)| mailbox.role == Some(mailboxes::Role::Inbox))
-        .map(|(mailbox, (id, _))| (mailbox.remote_path.clone(), *id));
+        .map(|(mailbox, id)| (mailbox.remote_path.clone(), *id));
 
     // Counted so "sync finished" can say what it did. A run that logs only its own start and
     // end is indistinguishable from a run that hung — which is exactly how a 46-mailbox
@@ -441,7 +681,7 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
     }
 
     // ---- 3. everything else, newest 200 each -------------------------------------------
-    for (mailbox, (mailbox_id, _)) in selectable.iter().zip(ids.iter()) {
+    for (mailbox, mailbox_id) in &targets {
         if mailbox.role == Some(mailboxes::Role::Inbox) {
             continue;
         }
@@ -556,6 +796,45 @@ async fn sync_mailbox(
         highest_modseq: mut stored_modseq,
     } = stored_state;
 
+    // ---- Rebuild ---------------------------------------------------------------------------
+    // Asked for from the mailbox menu (`folders::request_rebuild`). This pass reads the whole
+    // mailbox again: every message's envelope and flags, removing what the server no longer
+    // has, and downloading every cached body again. Not while anything queued still names the
+    // mailbox — the drain at the start of the pass sent what it could, and a change still
+    // waiting would be read back from the server before the server had made it.
+    let rebuilding = if db
+        .read(move |conn| persist::rebuild_requested(conn, mailbox_id))
+        .await?
+    {
+        let owned = path.to_string();
+        let waiting = db
+            .write(move |tx| ops::names_mailbox(tx, account_id, &owned))
+            .await?;
+
+        if waiting {
+            tracing::info!(
+                path,
+                "rebuild waits for changes still on their way to the server"
+            );
+            false
+        } else {
+            db.write(move |tx| persist::begin_rebuild(tx, mailbox_id))
+                .await?;
+            // As `begin_rebuild` left them: the full path, and a backfill from the top.
+            backfilled_to = None;
+            stored_modseq = None;
+            tracing::info!(path, "rebuilding the mailbox");
+            true
+        }
+    } else {
+        false
+    };
+    let refresh = if rebuilding {
+        persist::Refresh::Everything
+    } else {
+        persist::Refresh::Flags
+    };
+
     let selected = match fetch::select(session, path, stored, caps).await {
         Ok(selected) => selected,
 
@@ -591,6 +870,12 @@ async fn sync_mailbox(
 
     if selected.uid_next == 0 && selected.exists == 0 {
         tracing::debug!(path, "mailbox is empty");
+
+        if rebuilding {
+            db.write(move |tx| persist::remove_all_numbered(tx, mailbox_id))
+                .await?;
+            finish_rebuild(app, db, session, account_id, mailbox_id, path).await?;
+        }
         return Ok(0);
     }
 
@@ -599,6 +884,7 @@ async fn sync_mailbox(
         exists = selected.exists,
         uid_next = selected.uid_next,
         backfill,
+        rebuilding,
         "syncing mailbox"
     );
 
@@ -676,7 +962,7 @@ async fn sync_mailbox(
         let batch = batch.clone();
         db.write(move |tx| {
             let started = std::time::Instant::now();
-            let written = persist::write_batch(tx, account_id, mailbox_id, &batch)?;
+            let written = persist::write_batch_as(tx, account_id, mailbox_id, &batch, refresh)?;
             let batch_ms = started.elapsed().as_millis() as u64;
 
             let started = std::time::Instant::now();
@@ -757,8 +1043,10 @@ async fn sync_mailbox(
     // Cheap when nothing has gone: `reconcile_expunged` counts the local rows first and returns
     // before touching the network unless there are more here than the server says it has. That
     // also makes it safe during an initial sync or a backfill, when this side is behind rather
-    // than ahead.
-    let expunged = reconcile_expunged(db, session, mailbox_id, path, selected.exists).await?;
+    // than ahead. A rebuild asks every time: a message the server lost and another it gained
+    // leave the counts agreeing and the copy wrong about both.
+    let expunged =
+        reconcile_expunged(db, session, mailbox_id, path, selected.exists, rebuilding).await?;
     if expunged > 0 {
         db.write(move |tx| persist::recount(tx, mailbox_id)).await?;
         app.emit("mailbox:changed", payload(&mailbox_id));
@@ -767,6 +1055,18 @@ async fn sync_mailbox(
     let mut total = written.inserted;
 
     if !backfill {
+        if rebuilding {
+            refresh_held(
+                db,
+                session,
+                caps,
+                account_id,
+                mailbox_id,
+                written.lowest_uid,
+            )
+            .await?;
+            finish_rebuild(app, db, session, account_id, mailbox_id, path).await?;
+        }
         return Ok(total);
     }
 
@@ -827,7 +1127,8 @@ async fn sync_mailbox(
         let batch_for_write = batch.clone();
         let written = db
             .write(move |tx| {
-                let written = persist::write_batch(tx, account_id, mailbox_id, &batch_for_write)?;
+                let written =
+                    persist::write_batch_as(tx, account_id, mailbox_id, &batch_for_write, refresh)?;
                 persist::recount(tx, mailbox_id)?;
                 persist::rethread(tx, account_id, RETHREAD_WINDOW)?;
                 Ok(written)
@@ -870,7 +1171,122 @@ async fn sync_mailbox(
     checkpoint(db, mailbox_id, 1).await?;
     tracing::debug!(path, total, "backfill complete");
 
+    if rebuilding {
+        finish_rebuild(app, db, session, account_id, mailbox_id, path).await?;
+    }
+
     Ok(total)
+}
+
+/// What a finished rebuild tells the window.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Rebuilt {
+    account_id: i64,
+    mailbox_id: i64,
+    /// How many messages the mailbox holds here now.
+    messages: i64,
+}
+
+/// Reads again the messages a folder holds beyond its newest page. Part of Rebuild.
+///
+/// The Inbox's backfill reads every message anyway. Any other folder is only ever read to its
+/// newest page, and the rest of what it holds here — older mail kept from earlier syncs, mail
+/// moved in — would otherwise keep whatever the store had, which is the copy in doubt.
+async fn refresh_held(
+    db: &Db,
+    session: &mut ImapSession,
+    caps: Caps,
+    account_id: i64,
+    mailbox_id: i64,
+    below: u32,
+) -> Result<(), SyncError> {
+    let held = db
+        .read(move |conn| persist::held_uids(conn, mailbox_id))
+        .await?;
+
+    // Below the page just written — or all of it, when that page came back empty.
+    let mut cursor = if below == 0 { u32::MAX } else { below };
+
+    while let Some((set, lowest)) = fetch::backfill_window(&held, cursor, BACKFILL_BATCH) {
+        let batch = fetch::envelopes(session, &set, caps).await?;
+        db.write(move |tx| {
+            persist::write_batch_as(
+                tx,
+                account_id,
+                mailbox_id,
+                &batch,
+                persist::Refresh::Everything,
+            )?;
+            Ok(())
+        })
+        .await?;
+        cursor = lowest;
+    }
+
+    Ok(())
+}
+
+/// The end of a rebuild: every cached body downloaded again, the request cleared, and the
+/// window told.
+///
+/// A body that does not come back keeps the copy already cached — one over the size cap, or one
+/// the server has stopped returning, is better kept than lost. A dropped connection is another
+/// matter, and ends the pass with the request still set, so the next sync rebuilds again.
+async fn finish_rebuild(
+    app: &dyn Events,
+    db: &Db,
+    session: &mut ImapSession,
+    account_id: i64,
+    mailbox_id: i64,
+    path: &str,
+) -> Result<(), SyncError> {
+    let cached = db
+        .read(move |conn| persist::cached_bodies(conn, mailbox_id))
+        .await?;
+    let root = db.folder().to_path_buf();
+    let mut refreshed: Vec<i64> = Vec::new();
+
+    for (message_id, uid) in cached {
+        let raw = match bodies::fetch(session, uid).await {
+            Ok(raw) if !raw.is_empty() => raw,
+            Ok(_) => continue,
+            Err(SyncError::Imap(
+                async_imap::error::Error::Bad(_) | async_imap::error::Error::No(_),
+            )) => {
+                tracing::debug!(message_id, uid, "rebuild: body not downloaded again; kept");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        let parsed = bodies::parse(&raw);
+        let cached = bodies::write_cache(&root, account_id, message_id, &raw).ok();
+        db.write(move |tx| bodies::persist(tx, message_id, &parsed, cached.as_deref()))
+            .await?;
+        refreshed.push(message_id);
+    }
+
+    let messages = db
+        .write(move |tx| persist::finish_rebuild(tx, mailbox_id))
+        .await?;
+
+    tracing::info!(path, messages, bodies = refreshed.len(), "mailbox rebuilt");
+
+    if !refreshed.is_empty() {
+        app.emit("messages:updated", payload(&refreshed));
+    }
+    app.emit("mailbox:changed", payload(&mailbox_id));
+    app.emit(
+        "mailbox:rebuilt",
+        payload(&Rebuilt {
+            account_id,
+            mailbox_id,
+            messages,
+        }),
+    );
+
+    Ok(())
 }
 
 /// Where the backfill walk should start, given what is stored and what the newest page found.
@@ -973,12 +1389,18 @@ impl StoredState {
 /// changed. The pathological case — an equal number added and removed, with `UIDNEXT` and
 /// `HIGHESTMODSEQ` both landing back where they started — cannot happen: `UIDNEXT` only ever
 /// increases.
+///
+/// `force` skips that test, for a rebuild. And a server that says the mailbox is **empty** is
+/// believed without a search: that is an answer rather than a fault, and a Bin emptied in webmail
+/// used to keep every message here, because the search came back empty and an empty search is
+/// (rightly) not trusted.
 async fn reconcile_expunged(
     db: &Db,
     session: &mut ImapSession,
     mailbox_id: i64,
     path: &str,
     server_exists: u32,
+    force: bool,
 ) -> Result<usize, SyncError> {
     let local: i64 = db
         .read(move |conn| {
@@ -996,14 +1418,30 @@ async fn reconcile_expunged(
 
     // The common case, and the reason this is affordable: nothing has been removed, so there is
     // nothing to ask the server.
-    if local <= i64::from(server_exists) {
+    if !force && local <= i64::from(server_exists) {
         return Ok(0);
+    }
+
+    if server_exists == 0 {
+        let removed = db
+            .write(move |tx| persist::remove_all_numbered(tx, mailbox_id))
+            .await?;
+
+        if removed > 0 {
+            tracing::info!(
+                path,
+                removed,
+                "the server's copy is empty; removed them here"
+            );
+        }
+        return Ok(removed);
     }
 
     tracing::debug!(
         path,
         local,
         server = server_exists,
+        force,
         "more messages here than on the server; reconciling"
     );
 
@@ -1175,7 +1613,8 @@ async fn incremental(
         // reports no modseq at all, and for that server a deletion changes nothing this
         // condition looks at. Skipping the check here would leave those accounts with exactly
         // the bug this whole function exists to fix.
-        let expunged = reconcile_expunged(db, session, mailbox_id, path, selected.exists).await?;
+        let expunged =
+            reconcile_expunged(db, session, mailbox_id, path, selected.exists, false).await?;
 
         if expunged > 0 {
             app.emit("messages:added", payload(&mailbox_id));
@@ -1224,7 +1663,8 @@ async fn incremental(
     // Before the counts are written, so the badge reflects what is actually here. Without this
     // nothing ever removed a message that vanished from the server, and an Inbox used alongside
     // a phone filled up with mail the user had already dealt with elsewhere.
-    let expunged = reconcile_expunged(db, session, mailbox_id, path, selected.exists).await?;
+    let expunged =
+        reconcile_expunged(db, session, mailbox_id, path, selected.exists, false).await?;
 
     // Counts and state last, and in the same order as the full path: the badge is a cache of
     // rows that have now all been written.
@@ -1330,10 +1770,9 @@ pub async fn fetch_body(
     let credential = credential_for(db, &account).await?;
     let (mut session, caps) = session::connect(&imap, &account.email, &credential).await?;
 
-    let root = crate::db::default_path()
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
+    // The store's own folder, which for the app is `default_path`'s. A store opened elsewhere
+    // used to cache into the app's folder anyway, under ids that belong to the app's messages.
+    let root = db.folder().to_path_buf();
 
     let total = wanted.len();
     let mut stored = 0usize;
@@ -1444,6 +1883,7 @@ mod tests {
         // credential is dead; a provider that cannot be reached means nothing about it at all,
         // and treating the second as the first stopped the account and blamed the user.
         let refused = oauth_failure(
+            Provider::Google,
             "me@gmail.com",
             &accounts::oauth::OAuthError::Refused {
                 provider: "google".into(),
@@ -1461,7 +1901,11 @@ mod tests {
         // Everything that is not the provider saying no keeps the account alive. `TimedOut`
         // stands in for the whole class here because a `reqwest::Error` cannot be constructed
         // in a test, and the arm they share is the `_` fallthrough.
-        let unavailable = oauth_failure("me@gmail.com", &accounts::oauth::OAuthError::TimedOut);
+        let unavailable = oauth_failure(
+            Provider::Google,
+            "me@gmail.com",
+            &accounts::oauth::OAuthError::TimedOut,
+        );
 
         assert!(
             matches!(unavailable, SyncError::AuthUnavailable { .. }),
@@ -1471,6 +1915,105 @@ mod tests {
         let described = describe(&unavailable);
         assert!(!described.contains("Signing in again"), "{described}");
         assert!(described.contains("keep trying"), "{described}");
+    }
+
+    #[test]
+    fn a_rejected_sign_in_application_is_never_reported_as_a_dead_credential() {
+        // Both routes to the same wrong sentence, closed together.
+        //
+        // Google answers `invalid_client` when the client secret is missing or wrong, and that
+        // used to land in `Rejected` — so the banner read "The saved sign-in for this account
+        // was refused. Signing in again will fix it." Signing in again reran the identical
+        // request against the identical broken registration. The other route was a cleared
+        // client id, which arrived as a `Rejected` carrying the detail "no oauth client
+        // configured" and stopped every OAuth account at once with the same useless advice.
+        for code in ["invalid_client", "unauthorized_client"] {
+            let mapped = oauth_failure(
+                Provider::Google,
+                "me@gmail.com",
+                &accounts::oauth::OAuthError::Refused {
+                    provider: "google".into(),
+                    error: code.into(),
+                    description: Some("Unauthorized".into()),
+                },
+            );
+
+            assert!(
+                matches!(
+                    mapped,
+                    SyncError::OauthClientUnusable {
+                        configured: true,
+                        ..
+                    }
+                ),
+                "{code} must blame the sign-in application, not the account"
+            );
+
+            let described = describe(&mapped);
+            assert!(!described.contains("Signing in again"), "{described}");
+            assert!(described.contains("Sign-in applications"), "{described}");
+        }
+
+        // Nothing configured at all: a different sentence, the same destination.
+        let absent = SyncError::OauthClientUnusable {
+            provider: "google".into(),
+            configured: false,
+        };
+
+        let described = describe(&absent);
+        assert!(!described.contains("Signing in again"), "{described}");
+        assert!(described.contains("Sign-in applications"), "{described}");
+
+        // Still non-retryable, like every other configuration fault: waiting fixes none of it,
+        // and retrying would back an account off for thirty seconds on every pass.
+        assert!(!absent.is_retryable());
+        assert!(!SyncError::OauthClientUnusable {
+            provider: "google".into(),
+            configured: true,
+        }
+        .is_retryable());
+
+        // And the one refusal that genuinely does mean sign in again still says so.
+        let revoked = oauth_failure(
+            Provider::Google,
+            "me@gmail.com",
+            &accounts::oauth::OAuthError::Refused {
+                provider: "google".into(),
+                error: "invalid_grant".into(),
+                description: None,
+            },
+        );
+        assert!(matches!(revoked, SyncError::Rejected { .. }));
+        assert!(describe(&revoked).contains("Signing in again"));
+    }
+
+    #[test]
+    fn no_banner_sentence_carries_stray_whitespace_from_a_broken_continuation() {
+        // `MissingClientSecret` held an escaped newline plus thirteen spaces of source
+        // indentation, from a `\n` written where a line continuation was meant. It rendered
+        // correctly only because the banner leaves `white-space` at its default and HTML
+        // collapses the run — so the defect was invisible and would have survived any change
+        // to that CSS.
+        for error in [
+            SyncError::MissingClientSecret {
+                provider: "google".into(),
+            },
+            SyncError::OauthClientUnusable {
+                provider: "google".into(),
+                configured: true,
+            },
+            SyncError::OauthClientUnusable {
+                provider: "google".into(),
+                configured: false,
+            },
+            SyncError::NotConfigured {
+                email: "me@gmail.com".into(),
+            },
+        ] {
+            let described = describe(&error);
+            assert!(!described.contains('\n'), "{described:?}");
+            assert!(!described.contains("  "), "{described:?}");
+        }
     }
 
     #[test]
@@ -1484,7 +2027,7 @@ mod tests {
                 provider: "google".into(),
             },
         ] {
-            let mapped = oauth_failure("me@gmail.com", &error);
+            let mapped = oauth_failure(Provider::Google, "me@gmail.com", &error);
             assert!(
                 !matches!(mapped, SyncError::Rejected { .. }),
                 "{error} was mapped to a credential rejection"
@@ -1702,5 +2245,37 @@ mod tests {
         .expect("message");
 
         assert_eq!(new_since(&conn, 1, 1, &[1, 50]).expect("query"), vec![1]);
+    }
+
+    #[test]
+    fn a_push_looks_only_at_accounts_with_something_queued() {
+        let mut conn = mailbox_with_uids(&[1]);
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (2, 'Quiet', 'quiet@t.test', 'other', 'password', 'halcyon:quiet')",
+            [],
+        )
+        .expect("account");
+
+        assert!(accounts_with_pending_ops(&conn).expect("read").is_empty());
+
+        let tx = conn.transaction().expect("tx");
+        for _ in 0..2 {
+            ops::enqueue(
+                &tx,
+                1,
+                &ops::Op::Flag {
+                    mailbox: "INBOX".into(),
+                    uids: vec![1],
+                    seen: Some(true),
+                    flagged: None,
+                },
+            )
+            .expect("queue");
+        }
+        tx.commit().expect("commit");
+
+        // Once per account, however much it has queued, and never the account with nothing.
+        assert_eq!(accounts_with_pending_ops(&conn).expect("read"), vec![1]);
     }
 }

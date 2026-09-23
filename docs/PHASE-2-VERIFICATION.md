@@ -134,6 +134,27 @@ wins":
 - **The mock clock is frozen** at 2026-08-26 19:30. The fixtures are offsets back from it, so
   a live clock would move "Today" out from under the dataset overnight and break every
   date-header assertion at midnight. Phase 3 uses the real clock because the dates are real.
+- **The reader's multi-selection state is a fanned deck, which no doc specifies.** Added
+  2026-09-20. `docs/01` §4 gives "rows stack into a fanned deck with a count badge" to
+  *dragging* and says nothing about what the reader shows when several rows are selected;
+  `docs/02` §6.10 covers only "No Message Selected". The pane drew the count over an
+  envelope glyph, which is accurate and tells the user nothing about which messages they
+  caught. It now draws up to three of them as a tilted stack — the same object as the drag
+  image, at reading size — with the count beneath. Two departures from §4's sentence, both
+  deliberate: there is **no count badge** on the deck, because the caption underneath already
+  carries the number and a badge would state it twice. **Since 2026-09-22 the deck is not
+  cards at all but sheets the size of the pane**: the first selected message on top, rendered
+  for real — its body in the same sandboxed frame the reader uses, with remote images off — and
+  the next two behind it, lifted and tilted so each one's header shows above the sheet in front.
+  Reported on seeing the small cards: "the preview should be big and fill the whole mail window
+  and be tilted to show the different mails." The sheets behind carry their header and nothing
+  else, because a sheet behind is visible only down to the *tilted* edge of the one in front of
+  it and any line of text placed in that strip comes out sliced lengthways. That was found twice:
+  on the small cards, where the first answer was a larger stagger, and again on the first draft
+  of the sheets, where the answer was to put nothing there to slice. Unverifiable against `assets/reference/`,
+  which is still empty — the layout is checked by measurement in
+  `tests/e2e/selectionDeck.spec.ts`, in the running app over CDP, and by eye, not against a
+  capture of Mail.
 
 ---
 

@@ -8,6 +8,7 @@ import {
   useArchiveMessages,
   useBlockedSenders,
   useDeleteMessages,
+  useFavourites,
   useFlagNames,
   useMailboxes,
   useMoveMessages,
@@ -18,16 +19,7 @@ import {
   useVips,
 } from '@/app/queries'
 import { MessageContextMenu } from '@/features/messageList/MessageContextMenu'
-import { MailboxContextMenu } from '@/features/sidebar/MailboxContextMenu'
-import { AccountInfoSheet } from '@/features/sidebar/AccountInfoSheet'
-import { useAccountsDetail } from '@/features/accounts/queries'
-import {
-  exportPickFolder,
-  exportRun,
-  mailboxMarkRead,
-  onTransferProgress,
-  syncNow,
-} from '@/lib/ipc'
+import { useMailboxMenu } from '@/features/sidebar/useMailboxMenu'
 import { blockSender, flagSet, muteThread, unblockSender } from '@/lib/organise'
 import { useMailStore } from '@/store/mail'
 import { Button, useToast } from '@/ui'
@@ -35,7 +27,7 @@ import { MessageList } from '@/features/messageList/MessageList'
 import { Reader } from '@/features/reader/Reader'
 import { RedirectSheet } from '@/features/reader/RedirectSheet'
 import { Sidebar } from '@/features/sidebar/Sidebar'
-import { buildSidebar, selectionForNode } from '@/features/sidebar/model'
+import { allNodes, buildSidebar, selectionForNode } from '@/features/sidebar/model'
 import { MailboxPicker, useUndo } from '@/features/organise'
 import { useShortcuts } from '@/app/useShortcuts'
 import { ShortcutSheet } from '@/features/help/ShortcutSheet'
@@ -43,6 +35,7 @@ import { ScopeBar, useSearch } from '@/features/search'
 import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
 import { junkMark, rulesRun } from '@/lib/organise'
 import { composeOpen, onJumpListTask, settingsOpen, syncAll } from '@/lib/ipc'
+import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 
 import { PaneDivider } from './PaneDivider'
 import { useBreakpoint } from './useBreakpoint'
@@ -51,6 +44,9 @@ import styles from './AppShell.module.css'
 
 /** Which pane is on screen in the one-pane layout. docs/01 §1 — push navigation. */
 type Level = 'mailboxes' | 'list' | 'reader'
+
+/** Favourites before the store has answered, as one array rather than a new one per render. */
+const NO_FAVOURITES: FavouriteRow[] = []
 
 /**
  * The window. docs/01 §1.
@@ -94,7 +90,8 @@ export function AppShell() {
   const selectMailbox = useMailStore((state) => state.selectMailbox)
   const moveInThread = useMailStore((state) => state.moveInThread)
 
-  const { data: mailboxes = [] } = useMailboxes()
+  const mailboxesQuery = useMailboxes()
+  const mailboxes = useMemo(() => mailboxesQuery.data ?? [], [mailboxesQuery.data])
   const { data: accounts = [] } = useAccounts()
 
   // For Ctrl+1-9 only. The sidebar mounts these same queries, so this shares its cache
@@ -102,8 +99,8 @@ export function AppShell() {
   const { data: smart = [] } = useSmartMailboxes()
   const { data: flagNames = [] } = useFlagNames()
   const { data: blockedSenders = new Set<string>() } = useBlockedSenders()
-  const { data: accountDetails = [] } = useAccountsDetail()
   const { data: vips = [] } = useVips()
+  const { data: favourites = NO_FAVOURITES } = useFavourites()
   const move = useMoveMessages()
   const remove = useDeleteMessages()
   const archive = useArchiveMessages()
@@ -208,72 +205,12 @@ export function AppShell() {
     return mailboxes.filter((mailbox) => mailbox.accountId === account)
   }, [mailboxes, selectedAccountIds])
 
-  const [accountInfoFor, setAccountInfoFor] = useState<number | null>(null)
-
   /**
-   * What the mailbox right-click menu does. Separate from `actions` because none of it is on
-   * the toolbar or a shortcut: these are the five rows of that menu and nothing else calls them.
+   * The mailbox right-click menu: what its rows do and the sheets they open. Its own hook,
+   * because none of it is on the toolbar or a shortcut and all of it is state this layout has
+   * no other use for.
    */
-  const mailboxActions = useMemo(
-    () => ({
-      exportMailbox: (mailboxId: number, label: string) => {
-        void (async () => {
-          const directory = await exportPickFolder()
-          if (directory === null) return
-
-          // Export returns as soon as the work is *scheduled*, so without listening for the
-          // finish this row would appear to do nothing at all. The Settings pane has its own
-          // listener; this one is for the times the export was started from here.
-          // `finished` is the completion signal — `done` is a running count, not a flag, and
-          // treating it as one would have fired the toast on the first message.
-          let stop: (() => void) | null = null
-          stop = await onTransferProgress((progress) => {
-            const result = progress.finished
-            if (result === null) return
-
-            toast.show({
-              title:
-                result.error === null ? `Exported “${label}”` : `“${label}” could not be exported`,
-              description:
-                result.error ?? `${String(result.messages)} messages written to ${directory}.`,
-            })
-
-            // Unsubscribed here rather than on unmount: this listener exists for one export and
-            // would otherwise fire again for every later transfer, imports included.
-            stop?.()
-          })
-
-          await exportRun([mailboxId], 'mbox', directory)
-        })().catch(failed('That mailbox could not be exported'))
-      },
-
-      markAllRead: (mailboxId: number) => {
-        void mailboxMarkRead(mailboxId)
-          .then((changed) => {
-            toast.show({
-              title:
-                changed === 0 ? 'Nothing was unread' : `Marked ${String(changed)} messages as read`,
-            })
-          })
-          .catch(failed('Those messages could not be marked as read'))
-      },
-
-      synchronise: (accountId: number) => {
-        void syncNow(accountId).catch(failed('That account could not be synchronised'))
-      },
-
-      // The pane, not the account: `settings_open` takes only a pane name and there is no
-      // channel to say which account. Exact with one account, one click away with several.
-      editAccount: () => {
-        openSettings()
-      },
-
-      accountInfo: (accountId: number) => {
-        setAccountInfoFor(accountId)
-      },
-    }),
-    [toast, failed, openSettings],
-  )
+  const mailboxMenu = useMailboxMenu()
 
   const actions = {
     newMessage: useCallback(() => {
@@ -427,16 +364,18 @@ export function AppShell() {
     // This was listed in the Help sheet and bound nowhere. `parseChord` returns null for the
     // range `Ctrl+1-9`, so the table skipped the row and no handler was ever written for it;
     // the dispatcher now special-cases the digits.
+    //
+    // In the order the user left Favourites in, so a favourite dragged to the top is Ctrl+1.
     jumpToMailbox: useCallback(
       (position: number) => {
-        const favourites = buildSidebar(accounts, mailboxes, smart, flagNames, vips)[0]
-        const node = favourites?.nodes[position - 1]
+        const section = buildSidebar(accounts, mailboxes, smart, flagNames, vips, favourites)[0]
+        const node = section?.nodes[position - 1]
         if (node === undefined) return
 
         const selection = selectionForNode(node)
         if (selection !== null) selectMailbox(selection)
       },
-      [accounts, mailboxes, smart, flagNames, vips, selectMailbox],
+      [accounts, mailboxes, smart, flagNames, vips, favourites, selectMailbox],
     ),
 
     // Ctrl+↓ and Ctrl+↑. docs/01 §14 — within the open conversation, not between rows, which
@@ -491,6 +430,71 @@ export function AppShell() {
       })
     }
   }, [selectedNodeId, firstInbox, selectMailbox])
+
+  /**
+   * Keeps the selection in step with the sidebar when the sidebar changes under it.
+   *
+   * Three cases, all new with the mailbox menu:
+   *
+   *  - **The open folder was renamed.** Its row is the same row, so the highlight stayed, but
+   *    the list's heading is the label captured when it was selected, and went on saying the
+   *    old name.
+   *  - **The favourite it was opened from was removed.** The mailbox is still there, so the
+   *    selection moves to the mailbox's own row rather than to nothing — the highlight would
+   *    otherwise vanish from under a list that is still showing it.
+   *  - **The open folder was deleted.** The list sat on a mailbox that no longer existed: an
+   *    empty pane under a name that was gone. Mail moves to the Inbox, and so does this. Only
+   *    when *every* mailbox of the selection has gone — All Inboxes losing one account still has
+   *    the others to show.
+   *
+   * The first two keep the open message; only the third starts again.
+   */
+  const selectionPredicate = useMailStore((state) => state.selection.predicate)
+  const retargetSelection = useMailStore((state) => state.retargetSelection)
+  const sidebarNodes = useMemo(
+    () => allNodes(buildSidebar(accounts, mailboxes, smart, flagNames, vips, favourites)),
+    [accounts, mailboxes, smart, flagNames, vips, favourites],
+  )
+
+  useEffect(() => {
+    if (!mailboxesQuery.isSuccess || selectedNodeId === '') return
+
+    const node = sidebarNodes.find((each) => each.id === selectedNodeId)
+    if (node !== undefined) {
+      if (node.label !== selectionLabel) retargetSelection(node.id, node.label)
+      return
+    }
+
+    // A saved search whose row is not built yet, or has gone, is not this effect's business.
+    if (selectionPredicate !== undefined || selectionMailboxIds.length === 0) return
+
+    const known = mailboxes.filter((mailbox) => selectionMailboxIds.includes(mailbox.id))
+    const [only] = known
+
+    if (known.length === 1 && only !== undefined) {
+      retargetSelection(`mailbox-${String(only.id)}`, only.displayName)
+      return
+    }
+
+    if (known.length === 0 && firstInbox !== undefined) {
+      selectMailbox({
+        nodeId: `mailbox-${String(firstInbox.id)}`,
+        label: firstInbox.displayName,
+        mailboxIds: [firstInbox.id],
+      })
+    }
+  }, [
+    mailboxesQuery.isSuccess,
+    sidebarNodes,
+    mailboxes,
+    selectedNodeId,
+    selectionLabel,
+    selectionMailboxIds,
+    selectionPredicate,
+    firstInbox,
+    selectMailbox,
+    retargetSelection,
+  ])
 
   const [level, setLevel] = useState<Level>('list')
 
@@ -553,21 +557,7 @@ export function AppShell() {
               className={styles.sidebarPane}
               style={breakpoint === 'one' ? undefined : { width: `${String(sidebarWidth)}px` }}
             >
-              <Sidebar
-                onOpenSettings={openSettings}
-                contextMenu={(node) => {
-                  const account = accountDetails.find((each) => each.id === node.accountId)
-
-                  return (
-                    <MailboxContextMenu
-                      node={node}
-                      accountName={account?.displayName ?? 'this account'}
-                      syncEnabled={account?.syncEnabled ?? false}
-                      actions={mailboxActions}
-                    />
-                  )
-                }}
-              />
+              <Sidebar onOpenSettings={openSettings} contextMenu={mailboxMenu.menu} />
             </div>
             {breakpoint === 'three' && (
               <PaneDivider
@@ -660,13 +650,7 @@ export function AppShell() {
         />
       )}
 
-      <AccountInfoSheet
-        open={accountInfoFor !== null}
-        onOpenChange={(open) => {
-          if (!open) setAccountInfoFor(null)
-        }}
-        account={accountDetails.find((each) => each.id === accountInfoFor)}
-      />
+      {mailboxMenu.sheets}
 
       <MailboxPicker
         open={movingTo}

@@ -4,4 +4,14 @@
  * An account, as the sidebar needs it. Credentials are not representable here — standing
  * rule 12 keeps them in the Credential Manager, and `cred_ref` is deliberately not a field.
  */
-export type AccountRow = { id: number, displayName: string, email: string, provider: string, };
+export type AccountRow = { id: number, displayName: string, email: string, provider: string, 
+/**
+ * The colour the user picked for this account in Settings, or `None` for the accent.
+ *
+ * Here rather than only on `AccountDetail` because the settings pane is not where a
+ * per-account colour is *for*. It was stored, and offered, and read back by the pane
+ * that set it — and the mailbox window never received it, so picking a colour changed
+ * nothing anyone could see. One of the seven names in `COLORS`
+ * (`src/features/accounts/AccountsSettings.tsx`), which are the flag palette.
+ */
+color: string | null, };

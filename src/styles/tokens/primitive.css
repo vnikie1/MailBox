@@ -144,12 +144,14 @@
   --tint-subtle: 12%; /* reader banners — docs/02 §6.4 */
   --tint-token: 15%; /* search tokens, invalid chips — docs/02 §6.6, §6.7 */
 
-  /* Kept, unused, deliberately. docs/02 §6.2 asks for the sidebar drop target to be the
-   * accent at 25%; docs/01 §3 asks for a filled accent pill, and the sidebar now draws the
-   * pill because 25% measures 1.35-1.39:1 against the sidebar and the user could not see it.
-   * The docs contradict each other and the user has to settle which is right — this stays so
-   * that ruling for docs/02 is a one-line revert rather than an archaeology exercise.
-   * See CHANGELOG.md and features/sidebar/Sidebar.module.css. */
+  /* docs/02 §6.2's drop-target tint. The sidebar does not use it: docs/01 §3 asks for a
+   * filled accent pill, and the sidebar draws the pill because 25% measures 1.35-1.39:1
+   * against the sidebar and the user could not see it. The docs contradict each other and the
+   * user has to settle which is right — this stays so that ruling for docs/02 is a one-line
+   * revert. See CHANGELOG.md and features/sidebar/Sidebar.module.css.
+   *
+   * The compose window's file drop target does use it, mixed *opaquely* into the content
+   * ground rather than laid over it, which is what the sidebar's translucent version lacked. */
   --tint-drop: 25%;
 }
 

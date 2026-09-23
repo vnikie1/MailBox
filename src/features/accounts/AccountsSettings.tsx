@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronDown, ChevronUp, Plus, Trash2 } from 'lucide-react'
 
 import type { AccountDetail } from '@/lib/generated/AccountDetail'
+import type { OAuthClientStatus } from '@/lib/generated/OAuthClientStatus'
 import {
   accountReauth,
   accountRemove,
@@ -40,17 +41,42 @@ const COLORS: { id: string; label: string }[] = [
  * will actually happen: the mail goes, and so does the saved password. "Remove account" on
  * its own does not tell a user that their downloaded mail is about to be deleted.
  */
-export function AccountsSettings() {
+export interface AccountsSettingsProps {
+  /**
+   * An account to bring into view with its name field focused — the mailbox menu's
+   * `Edit "Account"…`. `request` changes on every ask, so asking again for the same account
+   * works too.
+   */
+  focus?: { accountId: number; request: number } | null
+}
+
+export function AccountsSettings({ focus = null }: AccountsSettingsProps) {
   const accounts = useAccountsDetail()
   const accountsChanged = useAccountsChanged()
   const toast = useToast()
   const [assistantOpen, setAssistantOpen] = useState(false)
   const [removing, setRemoving] = useState<AccountDetail | null>(null)
+  const rows = useRef<HTMLUListElement>(null)
 
   // Memoised because the reorder callback closes over it: a fresh array every render
   // would give that callback a new identity on every render too.
   const data = accounts.data
   const list = useMemo(() => data ?? [], [data])
+
+  // Waits for the list: the pane opens before its query answers, and the row asked for does
+  // not exist until then.
+  const loaded = list.length > 0
+  useEffect(() => {
+    if (focus === null || !loaded) return
+
+    const row = rows.current?.querySelector<HTMLElement>(
+      `[data-account-id="${String(focus.accountId)}"]`,
+    )
+    if (!row) return
+
+    row.scrollIntoView({ block: 'nearest' })
+    row.querySelector<HTMLInputElement>('input')?.focus()
+  }, [focus, loaded])
 
   const move = useCallback(
     (index: number, direction: -1 | 1) => {
@@ -96,7 +122,7 @@ export function AccountsSettings() {
         <p className={styles.empty}>No accounts yet. Add one to start receiving mail.</p>
       )}
 
-      <ul className={styles.list}>
+      <ul ref={rows} className={styles.list}>
         {list.map((account, index) => (
           <AccountRow
             key={account.id}
@@ -184,7 +210,7 @@ function AccountRow({
    * colour and the sign-in on the third, which is where the things you touch rarely belong.
    */
   return (
-    <li className={styles.row}>
+    <li className={styles.row} data-account-id={account.id}>
       <Avatar name={account.displayName} email={account.email} size="md" />
 
       <div className={styles.identity}>
@@ -377,9 +403,13 @@ function RemoveConfirmation({
 /**
  * docs/05 §2's "bring your own OAuth client".
  *
- * Nothing is compiled in, so this is how a Google or Microsoft account becomes possible at
- * all — and it means the app is never blocked on someone else's verification status. The
- * client id is shown back; the secret never is.
+ * A build may carry its own client for each provider (`src-tauri/oauth/`), and then this panel
+ * is optional: it is for someone who wants an application of their own instead. A build from
+ * public source carries none, and then this is the only way a Google or Microsoft account
+ * becomes possible at all. The intro has to be true of both, so it describes the rule rather
+ * than asserting which kind of build this is — each provider's row says which applies to it.
+ *
+ * The client id is shown back; the secret never is.
  */
 function OAuthClientPanel() {
   const providers = useProviders()
@@ -389,8 +419,9 @@ function OAuthClientPanel() {
     <section className={styles.advanced}>
       <h2 className={settings.heading}>Sign-in applications</h2>
       <p className={settings.intro}>
-        Google and Microsoft require each app to register its own sign-in application. Halcyon ships
-        without one, so you register yours and paste the client ID here. It is not a secret — it
+        Google and Microsoft only let a registered application sign you in. Where Halcyon has one
+        built in, it is used automatically and you can leave these fields empty. To use an
+        application you registered yourself, paste its client ID here — it is not a secret; it
         appears in the address bar when you sign in.
       </p>
 
@@ -406,6 +437,38 @@ function OAuthClientPanel() {
       </Form>
     </section>
   )
+}
+
+/**
+ * What the Client ID field says about the client **in use**, not about the box.
+ *
+ * In a build that carries its own application an empty box is the normal, working state. Every
+ * word here used to assume the opposite — that an empty box meant a provider nobody could sign in
+ * to — which in such a build would read as a fault on a setup that works.
+ */
+function clientIdDescription(
+  status: OAuthClientStatus | undefined,
+  label: string,
+): string | undefined {
+  if (status === undefined) return undefined
+
+  switch (status.source) {
+    case 'builtin':
+      return "Halcyon's own application is in use. Leave this empty to keep using it."
+    case 'custom':
+      // Without a built-in there is nothing to go back to, and nothing worth saying.
+      return status.builtin
+        ? "Your own application is in use. Clear this and save to go back to Halcyon's."
+        : undefined
+    case null:
+      return `Needed before a ${label} account can be added.`
+  }
+}
+
+function clientSecretDescription(status: OAuthClientStatus | undefined, label: string): string {
+  if (status?.hasSecret === true) return 'A secret is saved. Type a new one to replace it.'
+  if (status?.source === 'builtin') return 'Only needed with an application of your own.'
+  return `Required. ${label} will not refresh an account without it.`
 }
 
 function OAuthClientFields({
@@ -447,33 +510,38 @@ function OAuthClientFields({
         aria-label={`${label} client ID`}
         className={styles.clientField}
         value={value}
+        description={clientIdDescription(status.data, label)}
         onChange={(event) => {
           setClientId(event.currentTarget.value)
         }}
       />
 
-      {/* Labelled from the provider, not "(optional)" for everyone. Google requires the
-          secret on every token refresh; Microsoft public clients have none. Calling it
-          optional for Google is a lie whose cost arrives an hour later, as a refresh failure
-          that reads exactly like a rejected password. */}
-      <TextField
-        label={`Client secret${requiresSecret ? '' : ' (optional)'}`}
-        aria-label={`${label} client secret`}
-        type="password"
-        className={styles.clientField}
-        value={clientSecret}
-        invalid={requiresSecret && status.data?.configured === true && !status.data.hasSecret}
-        description={
-          status.data?.hasSecret === true
-            ? 'A secret is saved. Type a new one to replace it.'
-            : requiresSecret
-              ? 'Required. Google will not refresh this account without it.'
-              : undefined
-        }
-        onChange={(event) => {
-          setClientSecret(event.currentTarget.value)
-        }}
-      />
+      {/* Only for a provider that uses one — which is Google alone.
+
+          It used to be offered to every provider, labelled "(optional)" for Microsoft. Halcyon
+          registers a Microsoft app as a *public* client, and a public client that presents a
+          secret is refused (AADSTS700025), so the box invited exactly the input that would
+          break sign-in. The core no longer sends one either; see `oauth::exchange`.
+
+          For Google it is not optional, and saying so matters: a missing secret surfaces an
+          hour later as a refresh failure that reads exactly like a rejected password. */}
+      {requiresSecret && (
+        <TextField
+          label="Client secret"
+          aria-label={`${label} client secret`}
+          type="password"
+          className={styles.clientField}
+          value={clientSecret}
+          // From the core, not worked out here: whether the client *in use* can refresh a
+          // token is not the same as whether the user typed a secret. A client whose id is the
+          // built-in one borrows the built-in secret, and that id is not visible from here.
+          invalid={status.data?.missingSecret === true}
+          description={clientSecretDescription(status.data, label)}
+          onChange={(event) => {
+            setClientSecret(event.currentTarget.value)
+          }}
+        />
+      )}
 
       <Button
         variant="bordered"

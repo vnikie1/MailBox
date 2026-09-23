@@ -33,6 +33,7 @@ function body(html: string): Rendered {
     loadedRemote: 0,
     failedRemote: 0,
     fromPlainText: false,
+    css: '',
   }
 }
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect } from 'react'
 import {
   useInfiniteQuery,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
   type QueryClient,
@@ -9,6 +10,7 @@ import {
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
 import type { Cursor } from '@/lib/generated/Cursor'
+import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 import type { FlagPatch } from '@/lib/generated/FlagPatch'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
 import type { MessageFull } from '@/lib/generated/MessageFull'
@@ -40,6 +42,7 @@ const PAGE_SIZE = 100
 export const keys = {
   accounts: ['accounts'] as const,
   mailboxes: ['mailboxes'] as const,
+  favourites: ['favourites'] as const,
   messages: (mailboxIds: number[], unreadOnly: boolean) =>
     ['messages', [...mailboxIds].sort((a, b) => a - b), unreadOnly] as const,
   // Keyed on the predicate itself, so editing a smart mailbox refetches and two smart
@@ -58,6 +61,17 @@ export function useMailboxes() {
   return useQuery<MailboxRow[]>({
     queryKey: keys.mailboxes,
     queryFn: () => ipc.mailboxesTree(),
+  })
+}
+
+/**
+ * The order of Favourites. Refetched on `mailboxes:changed`, which every command that adds,
+ * removes or moves one emits — and so does deleting a mailbox, which takes its favourite with it.
+ */
+export function useFavourites() {
+  return useQuery<FavouriteRow[]>({
+    queryKey: keys.favourites,
+    queryFn: ipc.favouritesList,
   })
 }
 
@@ -159,6 +173,35 @@ export function useThread(messageId: number | null) {
     queryKey: keys.thread(messageId ?? -1),
     enabled: messageId !== null,
     queryFn: () => ipc.threadGet(messageId ?? -1),
+  })
+}
+
+/**
+ * The selected messages, one query each, for the reader's selection deck.
+ *
+ * Keyed on `keys.message(id)` — which until now nothing read. Every mutation in this file
+ * already invalidates it, so a flag or read-state change on a message in the deck repaints
+ * that card with no new event and no new code path.
+ *
+ * Separate queries rather than one batched command because the cache is per message: the
+ * three cards of a five-message selection are three of the five entries, and narrowing the
+ * selection reuses whichever of them survive instead of refetching a new list.
+ *
+ * **The caller passes only the ids it will actually draw.** Ctrl+A over a hundred thousand
+ * messages must not become a hundred thousand IPC calls, and the deck draws three cards
+ * however many are selected. That bound lives at the call site, not here, because this hook
+ * cannot know how many the caller means to show.
+ *
+ * `null` for a message that has been deleted out from under the selection — the list
+ * reconciles a moment later, and a missing card is better than an empty one.
+ */
+export function useSelectedMessages(ids: number[]): (MessageFull | null)[] {
+  return useQueries({
+    queries: ids.map((id) => ({
+      queryKey: keys.message(id),
+      queryFn: () => ipc.messageGet(id),
+    })),
+    combine: (results) => results.map((result) => result.data ?? null),
   })
 }
 

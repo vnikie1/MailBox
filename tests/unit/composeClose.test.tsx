@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type * as Ipc from '@/lib/ipc'
 
@@ -87,6 +87,27 @@ async function openComposeWithContent() {
   const subject = await screen.findByPlaceholderText('Subject')
   await userEvent.type(subject, 'Quarterly figures')
 }
+
+/**
+ * Pay the compose module graph's one-time cost before anything is timed.
+ *
+ * `openComposeWithContent` imports `ComposeWindow` dynamically, which pulls in Lexical and
+ * its plugins. The first import of a run pays for Vite transforming all of that on demand —
+ * measured at ~2.3s against ~0.7s for every later test in this file, which re-import through
+ * a warm transform cache even though `vi.resetModules()` clears the registry between them.
+ *
+ * That premium sat *inside* the first test, against vitest's 5s default. On an idle machine it
+ * fit; on a busy one it did not, and the first test failed at 5,030ms with "Unable to find an
+ * element by: [placeholder='Subject']" — which reads as the compose window being broken rather
+ * than as a build cost, and sent at least one investigation looking at the wrong thing.
+ *
+ * Warmed here rather than fixed by raising `testTimeout`, so the 5s budget keeps meaning "this
+ * behaviour is fast" instead of silently covering the toolchain. Same reasoning as the e2e
+ * suite's warm-then-measure pass in `firstRun.spec.ts` and `shell.spec.ts`.
+ */
+beforeAll(async () => {
+  await import('@/features/compose/ComposeWindow')
+}, 60_000)
 
 afterEach(() => {
   requestClose = null

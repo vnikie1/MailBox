@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
-import { AtSign, Cloud, ExternalLink, Mail, Server, Loader2 } from 'lucide-react'
+import {
+  AtSign,
+  Cloud,
+  ExternalLink,
+  Mail,
+  Server,
+  Settings as SettingsIcon,
+  Loader2,
+} from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 import type { AccountInput } from '@/lib/generated/AccountInput'
@@ -11,9 +19,10 @@ import {
   accountDiscover,
   accountTest,
   providerOpenSetup,
+  settingsOpen,
 } from '@/lib/ipc'
 import { cx } from '@/lib/cx'
-import { Button, Sheet, TextField, useToast } from '@/ui'
+import { Button, Select, Sheet, TextField, useToast, type SelectOption } from '@/ui'
 
 import { DiagnosticList } from './DiagnosticList'
 import { INITIAL, canContinue, looksLikeEmail, reduce, titleFor } from './model'
@@ -345,6 +354,50 @@ function ProviderStep({
 
       {/* Always rendered, so the tiles above it never move. Standing rule 6. */}
       <div className={styles.noteSlot}>
+        {/* The way out of the first-run trap, and it has to be *here*.
+         *
+         * Picking Google or Microsoft before registering a client disables Continue, and on a
+         * first run there is no Cancel (`firstRun` suppresses it), `onOpenChange` is a
+         * deliberate no-op so Escape and outside-press do nothing, the sheet is a modal
+         * overlay covering the sidebar's Settings button, and `useShortcuts` suppresses
+         * Ctrl+, while any dialog is mounted. The only escape was to pick a different
+         * provider tile, and nothing on screen said so. "Needs setting up in Settings first"
+         * named a place the user could not reach from where they were standing.
+         *
+         * A button rather than lifting one of those four guards: each is there for a reason —
+         * dismissing the first-run sheet would leave somebody in an empty app with nothing to
+         * click — and the actual complaint is that the instruction had no door next to it.
+         *
+         * Settings is a separate window, so it opens over this sheet and the assistant stays
+         * exactly where it was. `oauth_client_set` emits `accounts:changed`, which
+         * `useAccountEvents` turns into an invalidation of the provider list, so the warning
+         * clears and Continue enables the moment the client is saved — without coming back
+         * here to press anything.
+         *
+         * It only appears in a build that carries no client for this provider. The developer's
+         * own builds carry one (`src-tauri/oauth/`), so nobody using those ever sees it; the
+         * wording says "this copy" rather than "Halcyon" because it is a fact about the build,
+         * not about the product — the sentence it replaced said Halcyon "ships without one",
+         * which stopped being true of every build the moment builds could carry one. */}
+        {selected?.needsOauthClient === true && (
+          <div className={styles.note}>
+            <p className={styles.noteText}>
+              {selected.displayName} only lets a registered application sign you in, and this copy
+              of Halcyon was built without one. You can register your own — it takes a few minutes,
+              and you only do it once.
+            </p>
+            <Button
+              variant="plain"
+              icon={SettingsIcon}
+              onClick={() => {
+                void settingsOpen('accounts')
+              }}
+            >
+              Open Settings
+            </Button>
+          </div>
+        )}
+
         {selected?.setupNote !== null && selected?.setupNote !== undefined && (
           <div className={styles.note}>
             <p className={styles.noteText}>{selected.setupNote}</p>
@@ -489,22 +542,27 @@ function ServerFields({
         />
       </div>
 
-      <label className={styles.securityLabel}>
-        <span>Encryption</span>
-        <select
-          className={styles.select}
-          value={value?.security ?? 'tls'}
-          onChange={(event) => {
-            onEdit(which, { security: event.currentTarget.value })
-          }}
-        >
-          <option value="tls">TLS/SSL</option>
-          <option value="starttls">STARTTLS</option>
-        </select>
-      </label>
+      {/* `ServerInput.security` is a plain string on the wire, and these two spellings are the
+          ones the core parses (`ServerInput::into_settings`, case-insensitively). Narrowed here
+          so the popup always shows one of its own options rather than a blank for anything else. */}
+      <Select
+        label="Encryption"
+        className={styles.security}
+        options={SECURITY_OPTIONS}
+        value={value?.security === 'starttls' ? 'starttls' : 'tls'}
+        onValueChange={(security) => {
+          onEdit(which, { security })
+        }}
+      />
     </fieldset>
   )
 }
+
+/** The two spellings `ServerInput::into_settings` accepts. */
+const SECURITY_OPTIONS: readonly SelectOption<'tls' | 'starttls'>[] = [
+  { value: 'tls', label: 'TLS/SSL' },
+  { value: 'starttls', label: 'STARTTLS' },
+]
 
 /**
  * An error from the core is already a sentence written for a user. Anything else is a

@@ -28,6 +28,7 @@ import type { Rendered } from '@/lib/generated/Rendered'
 const enabled = vi.fn<() => Promise<boolean>>()
 const setEnabled = vi.fn<(value: boolean) => Promise<void>>()
 const useBody = vi.fn()
+const refetch = vi.fn<() => Promise<unknown>>()
 
 vi.mock('@/lib/ipc', () => ({
   remoteImagesEnabled: () => enabled(),
@@ -52,6 +53,7 @@ function rendered(over: Partial<Rendered>): Rendered {
     loadedRemote: 0,
     failedRemote: 0,
     fromPlainText: false,
+    css: '',
     ...over,
   }
 }
@@ -59,7 +61,8 @@ function rendered(over: Partial<Rendered>): Rendered {
 async function show(body: Rendered, imagesOn: boolean) {
   enabled.mockResolvedValue(imagesOn)
   setEnabled.mockResolvedValue(undefined)
-  useBody.mockReturnValue({ data: body, isPending: false, isError: false })
+  refetch.mockResolvedValue(undefined)
+  useBody.mockReturnValue({ data: body, isPending: false, isError: false, refetch })
 
   const { MessageBody } = await import('@/features/reader/MessageBody')
   render(<MessageBody messageId={1} />)
@@ -120,15 +123,38 @@ describe('when images were withheld', () => {
 
 describe('when the fetch failed', () => {
   it('claims nothing about what the sender learned', async () => {
-    // The request left this machine and went unanswered. Whether it arrived first is not
-    // knowable from here, and "nothing was shared" would be a comfort the app cannot back.
+    // The request left this machine and did not come back with a picture. Whether it arrived
+    // first is not knowable from here, and "nothing was shared" would be a comfort the app
+    // cannot back.
     await show(rendered({ failedRemote: 4 }), true)
 
     const banner = screen.getByRole('status').textContent
 
     expect(banner).toContain('could not be loaded')
     expect(banner).not.toContain('opened')
-    // Nothing to decide, so nothing to press.
-    expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('does not say the server was silent, because usually it was not', async () => {
+    // Found on a bank's alert: every image failed because the bank had moved domain and the
+    // old addresses redirected to its home page for a while — so an <img> was answered with an
+    // HTML document, which is refused. The server answered; it did not send a picture.
+    await show(rendered({ failedRemote: 10 }), true)
+
+    expect(screen.getByRole('status').textContent).toContain('did not return them')
+  })
+
+  it('offers to try again, and does not try on its own', async () => {
+    // A transient failure used to be a dead end: the banner said the images had not loaded and
+    // left it there, and nothing asked again until the message was opened in another session.
+    //
+    // Asked for, never automatic. A request is what tells a sender the message was opened, so an
+    // app that retried by itself would keep telling them.
+    await show(rendered({ failedRemote: 10 }), true)
+
+    expect(refetch).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Try Again' }))
+
+    expect(refetch).toHaveBeenCalledTimes(1)
   })
 })

@@ -157,10 +157,16 @@ const STANDARD_ROLES: &[(&str, &str)] = &[
     ("archive", "Archive"),
 ];
 
-const ACCOUNTS: &[(&str, &str, &str)] = &[
-    ("Northgate", "vishal@northgate.example", "imap"),
-    ("iCloud", "vishal@icloud.example", "icloud"),
-    ("Gmail", "vishal.singh@gmail.example", "gmail"),
+/// Name, address, provider, and the per-account colour.
+///
+/// Coloured deliberately, and it is the only place a developer sees the colour work without
+/// clicking a swatch: the browser mock needs `?account-colours=1`, and a real account starts
+/// with none. A seeded database that leaves every colour NULL exercises exactly the state the
+/// feature was broken in for a fortnight.
+const ACCOUNTS: &[(&str, &str, &str, &str)] = &[
+    ("Northgate", "vishal@northgate.example", "imap", "purple"),
+    ("iCloud", "vishal@icloud.example", "icloud", "green"),
+    ("Gmail", "vishal.singh@gmail.example", "gmail", "orange"),
 ];
 
 struct Options {
@@ -254,12 +260,12 @@ fn seed(conn: &mut Connection, message_count: usize) -> Result<(), Box<dyn std::
     {
         let tx = conn.transaction()?;
 
-        for (index, (name, email, provider)) in ACCOUNTS.iter().enumerate() {
+        for (index, (name, email, provider, colour)) in ACCOUNTS.iter().enumerate() {
             let account_id = index as i64 + 1;
             tx.execute(
-                "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref, sort_order)
-                 VALUES (?1, ?2, ?3, ?4, 'password', ?5, ?1)",
-                (account_id, name, email, provider, format!("halcyon/{email}")),
+                "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref, sort_order, color)
+                 VALUES (?1, ?2, ?3, ?4, 'password', ?5, ?1, ?6)",
+                (account_id, name, email, provider, format!("halcyon/{email}"), colour),
             )?;
 
             for (order, (role, display)) in STANDARD_ROLES.iter().enumerate() {

@@ -74,6 +74,7 @@ type WriteJob = Box<dyn FnOnce(&mut Connection) + Send>;
 pub struct Db {
     readers: Pool<SqliteConnectionManager>,
     writer: mpsc::Sender<WriteJob>,
+    folder: std::sync::Arc<PathBuf>,
 }
 
 /// Where the mail store lives.
@@ -210,7 +211,18 @@ impl Db {
         Ok(Self {
             readers,
             writer: sender,
+            folder: std::sync::Arc::new(path.parent().map(Path::to_path_buf).unwrap_or_default()),
         })
+    }
+
+    /// The folder the store is in, which is where the files that belong to it go: the cached
+    /// message sources among them.
+    ///
+    /// Asked of the store rather than of `default_path`, because a store opened somewhere else —
+    /// every rig test opens one in a temporary folder — would otherwise write its cache into the
+    /// user's, under message ids that name the user's own messages there.
+    pub fn folder(&self) -> &Path {
+        &self.folder
     }
 
     /// Runs a read on a pooled connection, off the async runtime.

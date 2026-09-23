@@ -6,12 +6,14 @@ import {
   composeUndo,
   onOutboxProgress,
   soundSent,
+  outboxDiscard,
   outboxList,
   outboxRetry,
   outboxSchedule,
+  reasonFor,
   runningInTauri,
 } from '@/lib/ipc'
-import { Button, useToast } from '@/ui'
+import { Button, Sheet, useToast } from '@/ui'
 
 import { SendLaterSheet } from './SendLaterSheet'
 import styles from './OutboxBanner.module.css'
@@ -60,6 +62,8 @@ export function OutboxBanner() {
   const [rows, setRows] = useState<OutboxRow[]>([])
   /** The row a custom Send Later is being chosen for, if any. */
   const [scheduling, setScheduling] = useState<number | null>(null)
+  /** The failed message a Delete is being confirmed for, if any. */
+  const [deleting, setDeleting] = useState<OutboxRow | null>(null)
   const [, forceTick] = useState(0)
   const timer = useRef<number | undefined>(undefined)
   const toast = useToast()
@@ -231,9 +235,76 @@ export function OutboxBanner() {
             >
               Try Again
             </Button>
+            {/* The way out when trying again cannot work. Gmail refusing an attachment fails
+                the same way on every attempt, and with Try Again the only button this banner
+                could never be dismissed — the message sat here for good. */}
+            <Button
+              variant="bordered"
+              onClick={() => {
+                setDeleting(row)
+              }}
+            >
+              Delete
+            </Button>
           </span>
         </div>
       ))}
+
+      <Sheet
+        open={deleting !== null}
+        onOpenChange={(next) => {
+          if (!next) setDeleting(null)
+        }}
+        title="Delete this message?"
+        footer={
+          <>
+            <Button
+              variant="bordered"
+              onClick={() => {
+                setDeleting(null)
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (deleting === null) return
+                const row = deleting
+                // Closed only once the core has answered, and the answer is read: false means
+                // the message stopped being a failure — retried from another window — and
+                // saying "deleted" then would be untrue.
+                outboxDiscard(row.id)
+                  .then((discarded) => {
+                    if (!discarded) {
+                      toast.show({
+                        title: 'The message was not deleted',
+                        description: 'It is no longer waiting as a failed message.',
+                      })
+                    }
+                    setDeleting(null)
+                    refresh()
+                  })
+                  .catch((cause: unknown) => {
+                    toast.show({
+                      title: 'The message was not deleted',
+                      description: reasonFor(cause),
+                    })
+                  })
+              }}
+            >
+              Delete Message
+            </Button>
+          </>
+        }
+      >
+        {/* Said plainly: this is the only copy. A failed message was never sent, so it is in no
+            Sent mailbox, and it was never a draft either. */}
+        <p className={styles.confirmBody}>
+          {deleting === null || deleting.subject === '' ? 'This message' : `“${deleting.subject}”`}{' '}
+          was never sent. Deleting it removes the only copy, attachments included.
+        </p>
+      </Sheet>
 
       <SendLaterSheet
         open={scheduling !== null}

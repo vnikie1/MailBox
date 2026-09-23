@@ -1,19 +1,26 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type DragEvent,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, ChevronRight, PanelLeft, Settings } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
+import { favouriteMove, mailboxSetFavourite, reasonFor } from '@/lib/ipc'
 import { canDropInMailbox, draggedMessageIds } from '@/lib/messageDrag'
+import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 import { useLayoutStore } from '@/store/layout'
 import {
+  keys,
   useAccounts,
+  useFavourites,
   useFlagNames,
   useMailboxes,
   useMoveMessages,
@@ -21,12 +28,31 @@ import {
   useVips,
 } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
-import { Badge, Button, ContextMenu, EmptyState, IconButton, ScrollArea, Tooltip } from '@/ui'
+import {
+  Badge,
+  Button,
+  ContextMenu,
+  EmptyState,
+  IconButton,
+  ScrollArea,
+  Tooltip,
+  useToast,
+} from '@/ui'
 
 import { useSyncState } from '@/app/useSync'
 
 import { SyncStatus } from './SyncStatus'
 import {
+  beforeFor,
+  edgeAt,
+  isSidebarDrag,
+  reordered,
+  startSidebarDrag,
+  type InsertEdge,
+  type SidebarDrag,
+} from './favouriteDrag'
+import {
+  allNodes,
   buildSidebar,
   canOpenMailboxMenu,
   selectionForNode,
@@ -45,6 +71,25 @@ import styles from './Sidebar.module.css'
  */
 const NONE: never[] = []
 
+/** What a row can do in a drag of the sidebar's own. */
+interface RowReorder {
+  /** What dragging this row carries, or null for a row that does not move. */
+  drag: SidebarDrag | null
+  /** Whether a favourite or a mailbox can be dropped beside this row: the Favourites rows. */
+  slot: boolean
+  /** Where the insertion line is drawn on this row, if it is. */
+  edge: InsertEdge | null
+  /** This row is the one being dragged. */
+  dragging: boolean
+  onStart: (drag: SidebarDrag) => void
+  onEnd: () => void
+  onOver: (nodeId: string, edge: InsertEdge) => void
+  onLeave: (nodeId: string) => void
+  onDrop: (nodeId: string, edge: InsertEdge) => void
+  /** Alt+Up (-1) and Alt+Down (+1) on a favourite. */
+  onNudge: (nodeId: string, delta: -1 | 1) => void
+}
+
 interface SidebarRowProps {
   node: SidebarNode
   selected: boolean
@@ -56,6 +101,7 @@ interface SidebarRowProps {
   /** Puts this row's highlight out — but only if it is the row currently lit. */
   onDragLeaveRow: (node: SidebarNode) => void
   onDropRow: (mailboxId: number, messageIds: number[]) => void
+  reorder: RowReorder
 }
 
 function SidebarRow({
@@ -68,6 +114,7 @@ function SidebarRow({
   onDragOverRow,
   onDragLeaveRow,
   onDropRow,
+  reorder,
 }: SidebarRowProps) {
   const Icon = node.icon
   const hasChildren = node.children.length > 0
@@ -112,6 +159,17 @@ function SidebarRow({
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // Alt+Up and Alt+Down move a favourite: the keyboard's way to do what the drag does.
+    if (
+      event.altKey &&
+      (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+      reorder.drag?.kind === 'favourite'
+    ) {
+      event.preventDefault()
+      reorder.onNudge(node.id, event.key === 'ArrowUp' ? -1 : 1)
+      return
+    }
+
     if (event.key === 'ArrowDown') {
       event.preventDefault()
       moveFocus(event.currentTarget, 1)
@@ -149,6 +207,10 @@ function SidebarRow({
       // Read by the tree's context menu, which is mounted once around every row rather than
       // once per row and so has only the event target to work out what was clicked.
       data-node-id={node.id}
+      // Spread rather than passed as undefined, so the CSS can select on the attribute existing.
+      {...(reorder.edge === null ? {} : { 'data-insert': reorder.edge })}
+      {...(reorder.dragging ? { 'data-dragging': '' } : {})}
+      draggable={reorder.drag !== null}
       style={{
         paddingLeft: `calc(var(--sidebar-row-pad-x) + ${String(node.depth)} * var(--sp-8))`,
       }}
@@ -156,7 +218,21 @@ function SidebarRow({
         onSelect(node)
       }}
       onKeyDown={onKeyDown}
+      onDragStart={(event: DragEvent<HTMLDivElement>) => {
+        if (reorder.drag === null) return
+        startSidebarDrag(event.dataTransfer, reorder.drag)
+        reorder.onStart(reorder.drag)
+      }}
+      onDragEnd={() => {
+        if (reorder.drag !== null) reorder.onEnd()
+      }}
       onDragEnter={(event: DragEvent<HTMLDivElement>) => {
+        if (reorder.slot && isSidebarDrag(event.dataTransfer)) {
+          event.preventDefault()
+          reorder.onOver(node.id, edgeAt(event.currentTarget, event.clientY))
+          return
+        }
+
         // `dragover` alone is not enough, which is not obvious and was measured rather than
         // reasoned about: approaching a row from the right — the direction every drag out of
         // the message list arrives from — and stopping just inside its edge fires a single
@@ -169,6 +245,14 @@ function SidebarRow({
         onDragOverRow(node)
       }}
       onDragOver={(event: DragEvent<HTMLDivElement>) => {
+        if (reorder.slot && isSidebarDrag(event.dataTransfer)) {
+          event.preventDefault()
+          event.dataTransfer.dropEffect =
+            event.dataTransfer.effectAllowed === 'copy' ? 'copy' : 'move'
+          reorder.onOver(node.id, edgeAt(event.currentTarget, event.clientY))
+          return
+        }
+
         // Not calling `preventDefault` is how a row refuses: the browser then draws the
         // no-drop cursor and will not deliver a drop here at all. So every reason a move
         // could not work has to be known *now*, before the user lets go — which is why
@@ -193,10 +277,17 @@ function SidebarRow({
         const next = event.relatedTarget
         if (next instanceof Node && event.currentTarget.contains(next)) return
 
+        if (reorder.slot) reorder.onLeave(node.id)
         onDragLeaveRow(node)
       }}
       onDrop={(event: DragEvent<HTMLDivElement>) => {
         event.preventDefault()
+
+        if (reorder.slot && isSidebarDrag(event.dataTransfer)) {
+          reorder.onDrop(node.id, edgeAt(event.currentTarget, event.clientY))
+          return
+        }
+
         onDragOverRow(null)
 
         // Re-checked rather than trusted. A drop only arrives on a row that accepted the
@@ -231,6 +322,7 @@ function SidebarRow({
         // Spread rather than passed as undefined: with `exactOptionalPropertyTypes` an explicit
         // undefined is not an absent attribute, and the CSS selects on the attribute existing.
         {...(node.flagColor === undefined ? {} : { 'data-flag': node.flagColor })}
+        {...(node.accountColor === undefined ? {} : { 'data-account': node.accountColor })}
       />
       <span className={styles.label}>{node.label}</span>
       <Badge count={node.unreadCount} selected={selected} className={cx(styles.badge)} />
@@ -258,6 +350,10 @@ function SidebarRow({
  *    focus, a quiet fill when focus is in another pane, grey when the window is inactive.
  *    The macOS 26 reference captures the middle one, which is what made it look at first
  *    as though the spec's solid-accent selection had been dropped.
+ *  - **Favourites move without anything else moving.** A favourite dragged, or moved with
+ *    Alt+Up and Alt+Down, keeps its place until it is dropped; where it will land is a line
+ *    drawn over the edge of a row, not a gap opened between rows. The new order is shown at
+ *    once and sent to the core after (standing rule 10).
  */
 export interface SidebarProps {
   /** Opens Settings. Optional so the component gallery can render the sidebar alone. */
@@ -274,9 +370,13 @@ export interface SidebarProps {
 export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
   const accountsQuery = useAccounts()
   const mailboxesQuery = useMailboxes()
+  const favouritesQuery = useFavourites()
+  const client = useQueryClient()
+  const toast = useToast()
 
   const accounts = accountsQuery.data ?? NONE
   const mailboxes = mailboxesQuery.data ?? NONE
+  const favourites = favouritesQuery.data ?? NONE
 
   const selectedNodeId = useMailStore((state) => state.selection.nodeId)
   const selectMailbox = useMailStore((state) => state.selectMailbox)
@@ -288,6 +388,11 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
 
   const [dropTargetId, setDropTargetId] = useState<string | null>(null)
   const [menuNode, setMenuNode] = useState<SidebarNode | null>(null)
+  const [dragging, setDragging] = useState<SidebarDrag | null>(null)
+  const [insert, setInsert] = useState<{ nodeId: string; edge: InsertEdge } | null>(null)
+  const [announcement, setAnnouncement] = useState('')
+  const refocus = useRef<string | null>(null)
+  const treeRef = useRef<HTMLDivElement>(null)
 
   // Not "no accounts" — that is first-run, and AccountsGate handles it. This is the query
   // itself failing, which used to render an empty tree and say nothing at all: the sidebar
@@ -305,10 +410,27 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
   const { data: vips = [] } = useVips()
 
   const sections = useMemo(
-    () => buildSidebar(accounts, mailboxes, smart, flagNames, vips),
-    [accounts, mailboxes, smart, flagNames, vips],
+    () => buildSidebar(accounts, mailboxes, smart, flagNames, vips, favourites),
+    [accounts, mailboxes, smart, flagNames, vips, favourites],
   )
   const collapsed = useMemo(() => new Set(collapsedSections), [collapsedSections])
+
+  const favouriteRows = useMemo(
+    () => sections.find((section) => section.id === 'favourites')?.nodes ?? NONE,
+    [sections],
+  )
+
+  // A row moved with the keyboard can be remounted by the reorder; focus goes back to it.
+  useEffect(() => {
+    const id = refocus.current
+    if (id === null) return
+    refocus.current = null
+
+    const row = Array.from(
+      treeRef.current?.querySelectorAll<HTMLElement>('[role="treeitem"]') ?? [],
+    ).find((element) => element.dataset.nodeId === id)
+    row?.focus()
+  }, [sections])
 
   /**
    * Which row a right-click acts on, and whether it may open a menu at all.
@@ -325,7 +447,8 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
       if (element === null) return false
 
       const id = element.getAttribute('data-node-id')
-      const node = sections.flatMap((section) => section.nodes).find((each) => each.id === id)
+      // Children too. The top level alone missed every account row under All Inboxes.
+      const node = allNodes(sections).find((each) => each.id === id)
 
       // Containers, unified rows, Flagged and its colours, VIPs and smart mailboxes: none has a
       // single mailbox or a single account, and every row of the menu needs both.
@@ -347,6 +470,122 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
     // `selectionForNode` is now the single definition of that rule, shared with Ctrl+1-9.
     const selection = selectionForNode(node)
     if (selection !== null) selectMailbox(selection)
+  }
+
+  /**
+   * Moves one favourite, on screen at once and in the store after.
+   *
+   * Shown first because a row that springs back to where it was dragged from, and then jumps to
+   * where it was dropped when the core answers, reads as a drag that failed.
+   */
+  const moveFavourite = useCallback(
+    (favouriteId: number, before: number | null) => {
+      const order = favourites.map((entry) => entry.id)
+      const next = reordered(order, favouriteId, before)
+      if (next.every((id, index) => id === order[index])) return
+
+      const byId = new Map(favourites.map((entry) => [entry.id, entry]))
+      client.setQueryData<FavouriteRow[]>(
+        keys.favourites,
+        next.map((id) => byId.get(id)).filter((entry) => entry !== undefined),
+      )
+
+      favouriteMove(favouriteId, before).catch((cause: unknown) => {
+        void client.invalidateQueries({ queryKey: keys.favourites })
+        toast.show({ title: 'Favourites could not be reordered', description: reasonFor(cause) })
+      })
+    },
+    [client, favourites, toast],
+  )
+
+  const dropBeside = useCallback(
+    (nodeId: string, edge: InsertEdge) => {
+      setInsert(null)
+      const moving = dragging
+      setDragging(null)
+      if (moving === null) return
+
+      const target = favouriteRows.find((node) => node.id === nodeId)
+      if (target?.favouriteId === undefined) return
+
+      const order = favourites.map((entry) => entry.id)
+      const before = beforeFor(order, target.favouriteId, edge)
+
+      if (moving.kind === 'favourite') {
+        moveFavourite(moving.favouriteId, before)
+        return
+      }
+
+      // A mailbox dragged in from its account: moved there if it is a favourite already.
+      const existing = favourites.find((entry) => entry.mailboxId === moving.mailboxId)
+      if (existing !== undefined) {
+        moveFavourite(existing.id, before)
+        return
+      }
+
+      mailboxSetFavourite(moving.mailboxId, true, before).catch((cause: unknown) => {
+        toast.show({ title: 'That mailbox could not be added', description: reasonFor(cause) })
+      })
+    },
+    [dragging, favouriteRows, favourites, moveFavourite, toast],
+  )
+
+  const nudge = useCallback(
+    (nodeId: string, delta: -1 | 1) => {
+      const movable = favouriteRows.filter((node) => node.favouriteId !== undefined)
+      const index = movable.findIndex((node) => node.id === nodeId)
+      const moving = movable[index]
+      const neighbour = movable[index + delta]
+      if (moving?.favouriteId === undefined || neighbour?.favouriteId === undefined) return
+
+      const order = favourites.map((entry) => entry.id)
+      const before = beforeFor(order, neighbour.favouriteId, delta < 0 ? 'before' : 'after')
+
+      refocus.current = nodeId
+      moveFavourite(moving.favouriteId, before)
+      setAnnouncement(
+        `${moving.label} moved to position ${String(index + delta + 1)} of ${String(movable.length)}`,
+      )
+    },
+    [favouriteRows, favourites, moveFavourite],
+  )
+
+  const reorderFor = (node: SidebarNode, sectionId: string): RowReorder => {
+    const inFavourites = sectionId === 'favourites' && node.depth === 0
+    const single = node.mailboxIds[0]
+
+    let drag: SidebarDrag | null = null
+    if (inFavourites && node.favouriteId !== undefined) {
+      drag = { kind: 'favourite', favouriteId: node.favouriteId, nodeId: node.id }
+    } else if (
+      sectionId.startsWith('account-') &&
+      canOpenMailboxMenu(node) &&
+      single !== undefined
+    ) {
+      drag = { kind: 'mailbox', mailboxId: single, nodeId: node.id }
+    }
+
+    return {
+      drag,
+      slot: inFavourites && node.favouriteId !== undefined,
+      edge: insert?.nodeId === node.id ? insert.edge : null,
+      dragging: dragging?.nodeId === node.id,
+      onStart: setDragging,
+      onEnd: () => {
+        setDragging(null)
+        setInsert(null)
+      },
+      onOver: (nodeId, edge) => {
+        setInsert((current) =>
+          current?.nodeId === nodeId && current.edge === edge ? current : { nodeId, edge },
+        )
+      },
+      onLeave: (nodeId) => {
+        setInsert((current) => (current?.nodeId === nodeId ? null : current))
+      },
+      onDrop: dropBeside,
+      onNudge: nudge,
+    }
   }
 
   return (
@@ -398,7 +637,7 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
               the message list. `onOpen` refuses any row that is not a single real mailbox in a
               known account, which is every container, unified and smart row. */}
           <ScrollArea className={styles.sidebar}>
-            <div role="tree" aria-label="Mailboxes" className={styles.tree}>
+            <div ref={treeRef} role="tree" aria-label="Mailboxes" className={styles.tree}>
               {sections.map((section) => (
                 <div
                   key={section.id}
@@ -430,6 +669,7 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
                       onDropRow={(mailboxId, messageIds) => {
                         moveMessages.mutate({ ids: messageIds, mailboxId })
                       }}
+                      reorder={reorderFor(node, section.id)}
                     />
                   ))}
                 </div>
@@ -438,6 +678,11 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
           </ScrollArea>
         </ContextMenu>
       )}
+
+      {/* Said aloud after Alt+Up or Alt+Down, which otherwise move a row with no word. */}
+      <span className="srOnly" role="status" aria-live="polite">
+        {announcement}
+      </span>
 
       {/* Outside the ScrollArea on purpose: a problem that scrolls out of sight is one the
           user stops seeing, and this is the one part of the sidebar that has to stay put. */}

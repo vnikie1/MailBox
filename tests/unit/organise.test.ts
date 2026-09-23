@@ -77,6 +77,7 @@ const ACCOUNT: AccountRow = {
   displayName: 'Test',
   email: 'me@example.test',
   provider: 'other',
+  color: null,
 }
 
 const INBOX: MailboxRow = {
@@ -87,6 +88,12 @@ const INBOX: MailboxRow = {
   role: 'inbox',
   unreadCount: 3,
   totalCount: 10,
+  favouriteOrder: null,
+  roleChosen: false,
+  delimiter: '/',
+  editable: false,
+  descendants: 0,
+  canContain: false,
 }
 
 describe('sidebar', () => {

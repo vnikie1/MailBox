@@ -61,8 +61,16 @@ fn now() -> i64 {
 }
 
 /// Tells the UI something changed, so it can invalidate rather than poll (standing rule 14).
+///
+/// A change to mail — a colour flag, a rule run, an undo — may have queued work for a server, so
+/// that is sent shortly too. When nothing was queued the push finds an empty queue and opens no
+/// connection.
 fn announce(app: &AppHandle, what: &str) {
     let _ = app.emit(what, ());
+
+    if what == "mailbox:changed" {
+        super::sync::push_soon(app);
+    }
 }
 
 /* ---------------------------------------------------------------------- smart mailboxes */

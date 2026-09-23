@@ -386,3 +386,261 @@ bars would be the loudest thing in a window whose job is to be scanned.
 - **`assets/reference/` still has no macOS Mail *settings* capture.** The form shape here is
   from the description in docs/01 and from the platform convention both macOS and Windows
   settings follow, not from a measured reference. No claim of pixel fidelity is made.
+
+---
+
+## 10. The icon set (2026-09-17)
+
+The designer's export replaced every icon the app ships. The source is `assets/brand/` (its
+README says what each file is for); `npm run icon` (`tools/build-icons.ps1`) writes the rest.
+
+### 10.1 Deviations
+
+| Where | What the brief or docs say | What was done, and why |
+| --- | --- | --- |
+| docs/07 §2.4 | Generate the MSIX set from one source rather than by hand | The designer's export *is* that source: its `msix/` files already carry the `scale-`, `targetsize-` and `altform-` qualifiers, and are copied as named. The four generators that drew the Phase 0 art were removed so none can repaint it. |
+| The designer's manifest snippet | Declares `uap:SplashScreen` and `Description="Mail for Windows"` | Neither used. The manifest's existing comment records why there is no splash screen (never shown for a full-trust app; declaring one failed the App Certification Kit once). The product description stays. `BackgroundColor="#EC3013"` **was** taken, as the snippet and the brief both ask. |
+| Tray | — | The tray had no icon at all (see the changelog); it now uses the hand-drawn size for the display scale rather than the window icon, which is the 32px entry Tauri takes from `icon.ico`. |
+
+### 10.2 What was verified, and how
+
+| Claim | How |
+| --- | --- |
+| `icon.ico` holds the eight hand-drawn sizes, each the size its directory entry says | Parsed: 8 entries, IHDR width and height checked against every entry |
+| Windows loads every size | Win32 `LoadImage` at 16, 32, 48, 64 and 256: all loaded, top-left pixel `#EC3013`. (.NET's `Icon.ToBitmap` fails on the 64 and 256 entries — and on Tauri's own generated icon from 32 up — which is a limit of .NET's reader, not of the file.) |
+| The tray icons decode, at the size they are filed under | `platform::tray` unit test, through the same `Image::from_bytes` the app uses — the PNGs carry a C2PA chunk a decoder must skip |
+| The right tray size for each scale | Unit test over 100–400% |
+| Every image the Store manifest names exists | Listed: Square150x150, Square44x44 (scale and targetsize, plated, unplated, light-unplated), Wide310x150, Square71x71, Square310x310, StoreLogo |
+| The plated assets are full-bleed red, the unplated ones transparent | Corner and top-edge pixels read from five of them |
+| The installer images | Viewed: 164×314 welcome page and 150×57 header, 24-bit, the new icon on the neutral plate with the accent rule |
+| The browser build's tab icon | The WebView's own target list reports `faviconUrl: http://tauri.localhost/favicon.svg` |
+| The installed exe carries the new icon | `ExtractIconEx` on the installed `halcyon.exe`: 32 and 16 px, `#EC3013`. **This failed at first** — three builds linked the old `resource.lib`, because nothing told Cargo to rerun the build script for a new `icon.ico`. `build.rs` now watches it; see the changelog |
+
+## 11. The mailbox menu (2026-09-17)
+
+### 11.1 Deviations from docs/01 §3
+
+docs/01 §3 lists the mailbox menu as *New Mailbox, Rename, Delete, Export Mailbox, Rebuild, Get
+Account Info, Use This Mailbox As ▸*, and Favourites as *user-curated … reorderable by drag*.
+The capture the menu was built against (macOS Mail on an account's inbox) shows New Mailbox, Add
+to Favourites, Export Mailbox, Erase Deleted Items, Erase Junk Mail, Mark All Messages as Read,
+Synchronise, Edit and Get Account Info.
+
+| Item | Status | Why |
+| --- | --- | --- |
+| Everything in the capture | Built, with Rename and Delete on folders the user made | Rename and Delete are what make New Mailbox safe to offer: a menu that makes folders and cannot remove them leaves the user with every typo |
+| Rebuild | Not built | Not in the capture, and in current Mail it lives in the Mailbox menu, not this one. It would drop a folder's local copy and fetch it again — the engine has that path (a `UIDVALIDITY` reset) but no command for it |
+| Use This Mailbox As ▸ | Not built | Not in the capture. Reassigning roles means persisting a user override that `sync::mailboxes::persist` currently rewrites from the server on every sync; that is its own change |
+| New Mailbox inside another folder | Not offered: new folders go at the top of the account | The sidebar lists an account's folders flat (`parent_id` has never been populated), so a folder made inside another would show beside it under its leaf name. Rename keeps a folder where it is, and folders made elsewhere still sync |
+| Favourites reordered by drag | Not built | Favourites are appended in the order they are added (`mailbox.favourite_order`) so Ctrl+1–9 never renumber. Reordering needs a drag target the sidebar does not have |
+| Removing the five default favourites | Not built | They are built rows (All Inboxes, VIPs, Flagged, All Drafts, All Sent), not stored favourites; the menu does not open on them |
+
+### 11.2 Design decisions a reader will want the reasons for
+
+- **Folder changes are optimistic** — standing rule 10 — and queued like moves and flags. The
+  risk that comes with it is the sync: a `LIST` taken before a queued rename reaches the server
+  still shows the old name. `ops::PendingTree` makes `persist` skip names with a rename or
+  delete on its way, and `prune` keep names with a create or rename on its way.
+- **A refusal is final.** The drain gives up on a refused mailbox change at once, puts the local
+  tree back (`folders::abandon_created`, `abandon_rename`), and emits `mailbox:refused`, which
+  the window shows as a toast. A refused *create* also sends mail that was moved into the
+  folder back to where the server still has it.
+- **Erase is `1:*`, read when the operation runs.** The store holds only the newest messages of
+  any folder but the Inbox, so a UID list would leave older mail on the server. Everything
+  queued before the erase runs first, so a message deleted a moment earlier is erased with the
+  rest.
+- **The Delete confirmation gives no count**, for the same reason: the local count can be
+  smaller than what the server deletes.
+- **Queued changes are pushed within about two seconds** (`SyncEngine::push_soon`). Before, the
+  queue went at the start of a sync — which, with IDLE, means when the Inbox changes or at the
+  five-minute safety net. docs/03 §3 describes a worker draining `pending_op`; this is it.
+- **A sync no longer overwrites a flag the user changed during it** (`ops::unsent_flags`).
+  This is not a change to docs/03 §3’s “on conflict, server state wins”: a flag the
+  server has not been told about yet is not in conflict with the server, only newer than its
+  report. When the operation is refused, it is dropped and the next sync takes the server’s
+  word, as before.
+
+### 11.3 What was verified, and how
+
+| Layer | What | Result |
+| --- | --- | --- |
+| Rust unit | `sync::folders` (create, rename, delete, erase, favourites, refusals, the pending tree against `persist` and `prune`), the modified UTF-7 codec, `ops` (new operations, paths, refusal wording, sequence sets), `persist` (unsent flags), `query` (new row fields), rules and undo against a deleted folder | pass |
+| Vitest | The menu's rows, order, greyed states and arguments; name checks; Favourites in the sidebar model; the browser store's folder commands | pass |
+| Playwright (browser store) | `tests/e2e/mailboxMenu.spec.ts`: every row, both sheets' validation and refusals, favourites and Ctrl-numbers, erase, mark read, Settings opened on the account | pass |
+| Dovecot rig | `src-tauri/tests/folders_gate.rs`, seven tests: create (plain and accented) → rename with children and mail → delete; the stale-listing race; erase of mail the store never downloaded; a refused create and a refused rename, each with the server's own words; a 20,000-UID scattered flag change; the push | 7 / 7 |
+| The built app, against the rig | The release build, run with its store, logs and WebView2 profile redirected to a scratch folder, driven over WebView2's debugging port by a Playwright script; every server-side claim checked with a separate IMAP client, never through the app | 19 / 19 — see below |
+
+The nineteen, in order: the menu on the account under All Inboxes is Mail's row for row; New
+Mailbox refuses `/` as it is typed; the folder appears at once; the server has it; an accented
+name reaches the server as `Re&AOc-us …` and shows as typed; Rename reaches the server; Add to
+Favourites; **the favourite survives quitting and relaunching**; mail appended on the server
+arrives unread; Mark All Messages as Read clears it here and on the server, and the row then
+greys; Erase Deleted Items and Erase Junk Mail each empty the mailbox here and on the server; a
+rename the server refuses (another client took the name) is reported in the server's words and
+the folder keeps its name; Get Account Info names the account; Edit opens Settings on that
+account with its name field focused; Delete removes both folders here and on the server, and the
+favourite with them.
+
+Two faults were found by this run and fixed before it passed: queued changes waited minutes for
+a sync, and a flag changed during a sync was overwritten by it. Both are in the changelog.
+
+The user's own store was not touched: its last write is the moment the installed app was closed
+for the run. The window-position file the test instance wrote to was restored from a copy.
+
+---
+
+## 12. The rest of the mailbox menu, and the rig's certificate (2026-09-19)
+
+### 12.1 The four things §11.1 listed as not built
+
+| Item | Status | What it does |
+| --- | --- | --- |
+| Rebuild | Built | Reads the whole mailbox from the server again — every envelope and flag, removing what the server no longer has, downloading every cached body again — in a pass of its own over that mailbox, after the queue |
+| Use This Mailbox As ▸ | Built | Drafts / Sent / Junk / Bin / Archive, ticked on the mailbox that has the role. The choice is kept apart from the row, so a sync cannot undo it |
+| A folder inside another | Built | New Mailbox's Location lists each account and every mailbox that can hold another; the sidebar nests by path and opens and closes |
+| Favourites reordered by drag | Built | The whole section, built-in rows included, by drag or with Alt+↑ / Alt+↓. A mailbox dragged in from its account becomes a favourite where it is dropped |
+
+Two of Mail's rows in §11.1's table are still deliberately absent: the five built-in favourites
+cannot be *removed* (they are rows every sidebar starts with, and the menu does not open on them),
+and Rebuild is offered on the mailbox rather than in a menu bar Halcyon does not have.
+
+### 12.2 Decisions a reader will want the reasons for
+
+- **Rebuild reads in place; it does not drop the mailbox and fetch it again.** Mail's Rebuild
+  "discards and downloads again", and dropping would be simpler — `UIDVALIDITY` recovery already
+  does exactly that. But a message row here carries things no server has: a flag colour, a snooze,
+  a follow-up, the junk classifier's verdict, and the row id that undo holds. Dropping them to fix
+  a wrong subject would be a repair that costs more than the fault. So the envelope and the flags
+  are written again over the row that is already there (`persist::Refresh::Everything`), what the
+  server no longer lists is removed, and every cached body is downloaded again.
+- **A rebuild is a pass over that mailbox alone** (`SyncEngine::sync_mailboxes`), not a full sync:
+  on an account with a 50,000-message Inbox a full pass is minutes, and the user asked about one
+  folder.
+- **A rebuild waits for the queue.** A message deleted here and not yet on the server would
+  otherwise be read straight back and reappear. The drain runs first, as in every pass; if
+  anything queued still names the mailbox, the rebuild waits for the next one
+  (`ops::names_mailbox`).
+- **Use This Mailbox As is stored in `mailbox_role`, not on the mailbox row.** Every sync rewrites
+  `mailbox.role` from what the server says, so a choice written there would last until the next
+  one. `mailboxes::persist` reads the choice back over the server's answer, and only while the
+  chosen mailbox is still listed — so a folder deleted in webmail does not leave the account with
+  no Bin.
+- **Gmail is not offered the choice.** Gmail decides which of its folders is which and acts on it:
+  a message "deleted" into a label rather than into Gmail's Bin is not deleted at all.
+- **Nesting is worked out from the paths, never stored.** `mailbox.parent_id` existed from the
+  first migration and was never written; a stored parent has to be kept in step with renames on
+  other devices, and the path already is the answer. `db::query::mailboxes_tree` computes it —
+  **never the Inbox**, because servers that keep every folder inside it (Courier, cPanel) would
+  otherwise show the whole account as the Inbox's children.
+- **One table for the whole of Favourites** (migration 0014). docs/01 §3 makes the section
+  reorderable, and a mailbox dragged above Flagged has to stay there; 0013's per-mailbox position
+  could order the user's mailboxes among themselves and never against the rows every sidebar
+  starts with, which had no row at all.
+- **Where a dragged favourite will land is a line drawn over the edge of a row**, not a gap opened
+  between rows: standing rule 6, the same reason a drop target here is a fill and not a border.
+  The new order is shown before the core answers (standing rule 10) — a row that springs back and
+  then jumps reads as a drag that failed.
+- **"After" a row means "before whatever the store has next"**, which may be a row the sidebar is
+  not drawing — VIPs with no VIPs. The dropped row then lands between the two rows the user saw,
+  whatever sits unseen between them.
+
+### 12.3 Three faults found while building it
+
+- **A sync read back a message the user had removed.** A move or a delete is optimistic: the row
+  goes here and the server is told at the next drain. Until then the server still lists it, and
+  the next pass wrote it back as a new row — a deleted message returned, a moved one showed in
+  both folders, until the change landed and a later sync tidied up. `ops::unsent_removals` is the
+  removals' counterpart of `unsent_flags`, and `write_batch` skips them.
+- **A mailbox emptied on another device stayed full here.** `remove_missing` will not act on an
+  empty `UID SEARCH`, rightly — an empty answer is more often a fault than a fact. But `EXISTS 0`
+  from the `SELECT` *is* a fact, and nothing acted on it: a Bin emptied in webmail kept every
+  message here for good.
+- **A test store's body cache wrote into the user's.** `fetch_body` built its cache path from
+  `db::default_path`, not from the store it was given, so a rig test that downloaded a body would
+  have written `bodies/1/<id>.eml` in the user's own folder, under ids that name the user's own
+  messages. `Db::folder()` is the store's own directory now. Nothing had exercised it — bodies
+  were fetched only by the app — but the rebuild gate does.
+
+### 12.4 The rig's certificate, and the flags it was said to have cleared
+
+The CA in `test/dovecot/certs.sh` lived 30 days and kept its key. That is two problems: a key on
+disk that this machine would accept for **any** site, and a rig that stops working every month —
+it expires on 2026-09-25. `certs.sh` now signs one server certificate, deletes the CA's key
+straight after, and gives the CA critical name constraints naming only `mac-studio.local`,
+`localhost`, `127.0.0.1` and `192.168.1.15`. Both last 397 days.
+
+Checked before anything was trusted, against Windows' own chain engine with the new CA as its
+only root (`hExclusiveRoot`, so no store was touched): the rig's four names validate, any other
+name fails with `CERT_E_CN_NO_MATCH`, the chain expires when it should, and a certificate for a
+name outside the constraints fails with `CERT_TRUST_HAS_NOT_PERMITTED_NAME_CONSTRAINT` — so the
+constraints are enforced rather than decorative. The new certificate is on the rig host, staged
+beside the live one; the server still serves the old certificate, because trusting a root is the
+one step that should need a person. `test/dovecot/trust-ca.ps1` does that half, and refuses a CA
+without name constraints.
+
+**The flags.** A scratch probe on 2026-09-17 sent `UID STORE 2,4,…,40000 -FLAGS (\Flagged)` to the
+rig's Inbox, and the changelog recorded that it may have cleared flags earlier runs had left. It
+cleared nothing: every even UID up to 40,000 still carried the modification sequence it was given
+when the mailbox was seeded, and a flag change that changes anything raises it. The Inbox had no
+flagged message before the probe and none after.
+
+### 12.5 What was verified, and how
+
+| Layer | What | Result |
+| --- | --- | --- |
+| Rust unit | Migration 0014 against a version-13 store; `folders` (create inside another, the roles, the rebuild request, favourites and their order, a refused folder taking what was made inside it); `ops` (removals and what names a mailbox); `persist` (the refresh, removals not read back, an emptied mailbox, the rebuild's bookkeeping); `mailboxes::effective_roles`; `query` (nesting, Favourites, chosen roles) | pass |
+| Vitest | The menu's new rows and the role submenu; the sidebar's tree and Favourites in the store's order; New Mailbox's locations; the browser store's nesting, roles, rebuild and favourite moves | pass |
+| Playwright | `tests/e2e/mailboxMenu.spec.ts`, 41 tests: folders inside folders (made, listed, renamed, deleted, named), Use This Mailbox As (ticks, moves the role, absent on Gmail), Rebuild's two messages, and Favourites reordered by drag, by drop from an account, and by Alt+↑ / Alt+↓ — with the insertion line drawn and no row moved until the drop | pass |
+| Dovecot rig | `src-tauri/tests/folders_gate.rs`, 11 tests: the seven before, plus a folder made inside another and renamed and deleted with it; a chosen Bin that outlasts a real listing and is what Erase empties; a rebuild that puts a damaged copy right and keeps what is only here; a folder emptied on the server | 11 / 11 |
+| Dovecot rig, again | `dovecot_gate`, after the Inbox was re-seeded — the cold sync of fifty thousand, the killed connection, a flag changed elsewhere, the `UIDVALIDITY` reset | 5 / 5 |
+| The gate | `npm run verify`: format, lint, stylelint, types, 308 unit, 154 e2e, 998 Rust | green |
+
+| The built app, against the rig | Rebuilt, installed over the running copy, and run with its store, logs and WebView2 profile redirected to a scratch folder, driven over the debugging port; every server claim checked with a separate IMAP client | 26 / 26 |
+
+The twenty-six, in order: the rig's 50,000 messages sync in; New Mailbox opens on the account from
+a mailbox that can hold none, and inside the folder it was opened on; the folder inside appears
+nested at once; the server has it as `Rig E2E …/Re&AOc-us …`; Use This Mailbox As moves the role
+and the row with it; the menu stops offering Rename and Delete on it; **the choice outlasts a
+Synchronise**; a flag colour is set, which no server has; Rebuild says it has started and says it
+has finished; all three messages are still here; **the flag colour survived the rebuild**; the
+server still has three; the folder is added to Favourites and goes to the end; the drag is
+delivered with the insertion line on exactly one row; it lands above All Inboxes; Alt+↓ moves it
+one place. Then, after quitting and relaunching: the favourite is where it was dragged; the chosen
+role survived the restart, and another sync; the folder inside is still inside; the role is handed
+back to the server's own Archive; Delete says it takes the folder inside with it, and both go,
+here and on the server, and out of Favourites.
+
+Two things about driving the app are worth keeping. **Playwright's `dragTo` never returns against
+WebView2** — it asks Chromium to intercept drags (`Input.setInterceptDrags`) and this WebView2
+does not answer — so the drag is dispatched as DOM events, **with a pause between them**: fired in
+one task, React has not committed the state `dragstart` sets before `drop` reads it, and the
+sidebar refuses a drop it does not think is happening. And the run's own helper read a folder's
+name as part of its unread count, by stripping trailing digits from a row whose name ends in a
+timestamp — the same trap as §11.3's, now fixed the same way, by taking the badge's own text off
+the end.
+
+The user's own store was migrated to schema 14 by the installed build on its first launch, and the
+window-position file the test instance wrote to was restored from a copy.
+
+### 12.6 Incidents
+
+- **The new gate test emptied the rig's Inbox.** Its tidy-up step named `"INBOX"` where it meant
+  the account's Bin, and a real `\Deleted` on `1:*` plus an expunge took all 50,253 seeded
+  messages. The rig is disposable and `seed.sh` is deterministic, so it was re-seeded to exactly
+  the corpus it started with (50,000; 45,000 read), with the index and UID list removed first so
+  UIDs begin at 1 again, which the other gate's fixtures depend on. `empty_on_server` now refuses
+  an Inbox outright — the refusal, not the care, is what stops it happening twice. No real account
+  was involved.
+- **Four doc comments lost a character.** Git Bash rewrites an argument that begins with `//` (it
+  is a Windows-style switch), so block markers passed to an edit script matched one character
+  late: `/// Takes back …` became `//// Takes back …` and its neighbour lost its third slash.
+  Found by the compiler, fixed, and markers now travel in a file rather than in an argument.
+- **The stress run's 19 failures were the machine suspending.** 820 runs of the menu spec, of
+  which 801 passed; every failure landed in the two repeats around the moment the machine slept,
+  the first of them `net::ERR_NETWORK_IO_SUSPENDED`, and eleven of twelve workers failed together.
+  Not a race in the tests.
+- **The intermittent failure of 2026-09-17 was not reproduced.** 820 parallel runs, 123 more with
+  the window's source being edited underneath them (Vite reloads the page when a file changes,
+  which was the likeliest cause of a single unexplained failure while that day's work was being
+  written), and the gate runs since: nothing. It stays in the changelog as unexplained rather than
+  as fixed.

@@ -6,6 +6,7 @@ pub mod engine;
 pub mod envelope;
 pub mod events;
 pub mod fetch;
+pub mod folders;
 pub mod idle;
 pub mod mailboxes;
 pub mod ops;
@@ -16,6 +17,7 @@ pub mod session;
 pub mod smtp;
 pub mod threading;
 pub mod upkeep;
+pub mod utf7;
 
 #[cfg(test)]
 mod threading_tests;

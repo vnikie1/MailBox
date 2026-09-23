@@ -84,7 +84,10 @@ mod tests {
         );
 
         assert!(body.contains("mail store"), "says what failed");
-        assert!(body.contains("database is locked"), "quotes the underlying error");
+        assert!(
+            body.contains("database is locked"),
+            "quotes the underlying error"
+        );
         assert!(body.contains("diagnostics"), "points at the log");
     }
 }

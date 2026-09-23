@@ -149,6 +149,56 @@ describe('sidebar tree', () => {
     )
   })
 
+  it('puts the account colour on the rows that have to tell accounts apart', () => {
+    // The bug this pins: a colour could be picked in Settings, stored, and ticked in the
+    // pane that set it, while every row of the mailbox window stayed the accent. The colour
+    // was never on `AccountRow` at all, so the sidebar had nothing to draw even in principle.
+    const target = accounts[0]
+    expect(target).toBeDefined()
+    if (!target) return
+
+    // `finally`, not a line at the end. The mock's overlay is module state shared by every
+    // test in this file, and the assertions below sit behind early-return guards — so a
+    // failure, or a guard tripping, would have left the first account purple for whatever
+    // ran next and made this test's own colour someone else's mystery.
+    try {
+      store.accountUpdate(target.id, { color: 'purple' })
+
+      const coloured = buildSidebar(store.accountsList(), mailboxes)
+      const rows = coloured.flatMap((section) => visibleRows(section.nodes, new Set()))
+
+      // Its own section: every mailbox belonging to that account.
+      const owned = mailboxes.filter((mailbox) => mailbox.accountId === target.id)
+      expect(owned.length).toBeGreaterThan(0)
+      for (const mailbox of owned) {
+        const row = rows.find((node) => node.id === `mailbox-${String(mailbox.id)}`)
+        expect(row?.accountColor, mailbox.displayName).toBe('purple')
+      }
+
+      // And the per-account children of All Inboxes, which are labelled by account name and
+      // are where three grey inboxes are hardest to tell apart.
+      const inbox = owned.find((mailbox) => mailbox.role === 'inbox')
+      expect(inbox).toBeDefined()
+      if (!inbox) return
+      expect(rows.find((node) => node.id === `all-inboxes-${String(inbox.id)}`)?.accountColor).toBe(
+        'purple',
+      )
+
+      // An account with no colour carries no key at all, rather than an empty attribute the
+      // CSS would still match on.
+      const other = accounts.find((account) => account.id !== target.id)
+      expect(other).toBeDefined()
+      if (!other) return
+      const untouched = rows.find(
+        (node) => node.accountId === other.id && node.id.startsWith('mailbox-'),
+      )
+      expect(untouched).toBeDefined()
+      expect(untouched && 'accountColor' in untouched).toBe(false)
+    } finally {
+      store.accountUpdate(target.id, { color: null })
+    }
+  })
+
   it('leaves container rows unselectable rather than pointing them at a mailbox', () => {
     expect(nodes.find((node) => node.id === 'flagged')?.mailboxIds).toEqual([])
   })

@@ -70,6 +70,12 @@
   align-items: center;
 }
 
+/* The Delete confirmation's one paragraph. */
+.confirmBody {
+  margin: 0;
+  color: var(--label-1);
+}
+
 .banner[data-tone='failed'] .icon {
   color: var(--destructive);
 }

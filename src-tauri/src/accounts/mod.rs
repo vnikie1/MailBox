@@ -34,17 +34,131 @@ fn client_secret_reference(provider: Provider) -> String {
     format!("halcyon:oauth:{}", provider.id())
 }
 
-/// Reads the configured OAuth client for a provider.
+/// A sign-in application compiled into this build.
 ///
-/// docs/05 §2 recommends offering "bring your own OAuth client", and nothing is compiled in,
-/// so this returning `None` is the normal state of a fresh install rather than an error. The
+/// ## Why this exists, reversing the Phase 4 decision
+///
+/// Phase 4 shipped with nothing compiled in, so Google and Microsoft were unusable on every
+/// install until the user registered an application of their own — docs/05 §2 offers "bring
+/// your own client" as a mitigation *for advanced users*, and the deviation made it the only
+/// path. On a fresh install that meant the first thing anyone saw after choosing Google was a
+/// note telling them to go and register something with Google Cloud. A mail client whose
+/// Gmail support starts with that is, from the outside, a mail client without Gmail support.
+///
+/// ## Why it is a build input and not a constant in this file
+///
+/// The source is public, and docs/05 §9 is right that a secret in public source is not a
+/// secret. So the values are **never in the repository**. `build.rs` reads them from the
+/// environment or from the gitignored `src-tauri/oauth/clients.env`, and they reach this file
+/// through `option_env!`. A build from a clean checkout has none and behaves exactly as Phase 4
+/// did — which is also what docs/05 §9 asks of an open-source build. The same pattern the
+/// updater's signing key already follows.
+///
+/// ## Why a Google client secret may be compiled in at all
+///
+/// Standing rule 12 keeps *secrets* out of SQLite, config, logs and error messages. A Desktop
+/// OAuth client's "secret" is not one: Google issues it to installed applications knowing it
+/// ships inside them, and the protection against a stolen authorisation code is PKCE, which is
+/// why `oauth.rs` makes PKCE unconditional. It is still carried as `credentials::Secret` from
+/// the moment it is read, so the type system keeps it out of logs and off the IPC boundary
+/// exactly as it does for a user-supplied one. What rule 12 protects — the user's password and
+/// tokens — is untouched: those still live only in the Credential Manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinClient {
+    pub client_id: &'static str,
+    pub client_secret: Option<&'static str>,
+}
+
+/// The sign-in application this build carries for a provider, if any.
+///
+/// `build.rs` only emits the Google pair when **both** halves are present: Google refuses every
+/// token exchange from a Desktop client without its secret, so an id alone would enable the
+/// provider tile, send the user through a full browser consent, and then fail at the last step.
+/// No built-in client is better than a broken one.
+pub fn builtin_client(provider: Provider) -> Option<BuiltinClient> {
+    let (client_id, client_secret) = match provider {
+        Provider::Google => (
+            option_env!("HALCYON_GOOGLE_CLIENT_ID"),
+            option_env!("HALCYON_GOOGLE_CLIENT_SECRET"),
+        ),
+        Provider::Microsoft => (option_env!("HALCYON_MICROSOFT_CLIENT_ID"), None),
+        _ => (None, None),
+    };
+
+    builtin_from(provider, client_id, client_secret)
+}
+
+/// The rules `builtin_client` applies, over values that are not fixed at compile time.
+///
+/// `option_env!` is resolved when the crate is built, so no test can vary it — which would
+/// leave the one rule here that protects users, "never half a Google client", untestable.
+fn builtin_from(
+    provider: Provider,
+    client_id: Option<&'static str>,
+    client_secret: Option<&'static str>,
+) -> Option<BuiltinClient> {
+    let client_id = client_id.map(str::trim).filter(|id| !id.is_empty())?;
+    let client_secret = client_secret.map(str::trim).filter(|s| !s.is_empty());
+
+    // Belt and braces behind `build.rs`, which already refuses to emit half a Google pair: a
+    // value can also arrive through a stale `rustc-env` left by an earlier build script run.
+    if provider.requires_client_secret() && client_secret.is_none() {
+        return None;
+    }
+
+    Some(BuiltinClient {
+        client_id,
+        // A Microsoft public client is *rejected* if it sends a secret, so one is never passed
+        // on for a provider that does not use them, whatever the build was given.
+        client_secret: client_secret.filter(|_| provider.requires_client_secret()),
+    })
+}
+
+/// Where the client in use came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum ClientSource {
+    /// The one compiled into this build.
+    Builtin,
+    /// One the user registered and pasted into Settings. Always wins over the built-in.
+    Custom,
+}
+
+/// Reads the OAuth client for a provider: the user's own if they have set one, otherwise the
+/// one compiled into this build, otherwise nothing.
+///
+/// `None` is not an error. It is the normal state of a build from public source, and the
 /// provider picker uses it to say "this needs setting up first" instead of opening a browser
 /// onto a Google error page.
 pub fn client_config(
     conn: &Connection,
     provider: Provider,
 ) -> Result<Option<ClientConfig>, DbError> {
-    let client_id: Option<String> = conn
+    Ok(resolve_client(conn, provider, builtin_client(provider))?.map(|(client, _)| client))
+}
+
+/// `client_config`, plus which of the two sources answered. Settings needs the second half to
+/// say "Halcyon's own application is in use" rather than showing an empty field as a fault.
+pub fn client_config_with_source(
+    conn: &Connection,
+    provider: Provider,
+) -> Result<Option<(ClientConfig, ClientSource)>, DbError> {
+    resolve_client(conn, provider, builtin_client(provider))
+}
+
+/// The resolution itself, with the built-in client passed in rather than read.
+///
+/// Separated for one reason: `builtin_client` depends on the machine that compiled the crate.
+/// Every test that asserted "a fresh install has no client" would pass on a clean checkout and
+/// fail on the developer's own machine, where `clients.env` exists — a suite whose result
+/// depends on a gitignored file is not a suite. Tests call this with the built-in they mean.
+pub fn resolve_client(
+    conn: &Connection,
+    provider: Provider,
+    builtin: Option<BuiltinClient>,
+) -> Result<Option<(ClientConfig, ClientSource)>, DbError> {
+    let custom_id: Option<String> = conn
         .query_row(
             "SELECT value FROM setting WHERE key = ?1",
             params![client_id_key(provider)],
@@ -52,17 +166,54 @@ pub fn client_config(
         )
         .optional()?;
 
-    let Some(client_id) = client_id.filter(|id| !id.trim().is_empty()) else {
-        return Ok(None);
-    };
+    if let Some(client_id) = custom_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+    {
+        let mut client_secret =
+            credentials::load(&client_secret_reference(provider), Kind::ClientSecret).ok();
 
-    let client_secret =
-        credentials::load(&client_secret_reference(provider), Kind::ClientSecret).ok();
+        // A user who pasted the very id this build already carries, and no secret, has not
+        // chosen a different application — they have typed the same one in again, which the
+        // old setup instructions told them to do. The built-in secret belongs to that id, so
+        // it is used rather than failing the refresh for want of a secret that is right here.
+        //
+        // Only for an *identical* id. A different id with the built-in secret would be a
+        // guaranteed `invalid_client`: a client secret is only valid for the client it was
+        // issued to, which is why a custom client never otherwise borrows from the built-in.
+        if client_secret.is_none() {
+            if let Some(builtin) = builtin.filter(|b| b.client_id == client_id) {
+                client_secret = builtin.client_secret.map(Secret::new);
+            }
+        }
 
-    Ok(Some(ClientConfig {
-        client_id,
-        client_secret,
+        return Ok(Some((
+            ClientConfig {
+                client_id,
+                client_secret,
+            },
+            ClientSource::Custom,
+        )));
+    }
+
+    Ok(builtin.map(|builtin| {
+        (
+            ClientConfig {
+                client_id: builtin.client_id.to_string(),
+                client_secret: builtin.client_secret.map(Secret::new),
+            },
+            ClientSource::Builtin,
+        )
     }))
+}
+
+/// Whether the user's own client has a secret stored — never whether the built-in one has.
+///
+/// Settings uses this to say "a secret is saved". Answering from the resolved client instead
+/// would report the built-in secret as the user's, and invite them to "replace" something they
+/// never entered.
+pub fn custom_client_has_secret(provider: Provider) -> bool {
+    credentials::exists(&client_secret_reference(provider), Kind::ClientSecret)
 }
 
 /// Stores an OAuth client. The id goes to `setting`; the secret, if any, to the Credential
@@ -75,8 +226,11 @@ pub fn client_config(
 /// destroyed the secret the moment anyone edited the client id and saved, which is a thing
 /// people do. The account then failed to sign in with nothing on screen to explain why.
 ///
-/// Clearing the client id is what deconfigures a provider, and that does remove the secret —
-/// there is nothing left for it to belong to.
+/// Clearing the client id removes the user's own client, and its secret with it — there is
+/// nothing left for the secret to belong to. In a build that carries a built-in client that is
+/// "go back to Halcyon's application", not "disable the provider": `resolve_client` falls
+/// through to the built-in. It used to be the second, and clearing the field stopped every
+/// OAuth account at once.
 pub fn set_client_config(
     conn: &Connection,
     provider: Provider,
@@ -204,15 +358,260 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_install_has_no_oauth_client_and_that_is_not_an_error() {
-        // Nothing is compiled in (docs/05 §2, bring your own client), so this is the normal
+    fn a_build_with_nothing_compiled_in_has_no_oauth_client_and_that_is_not_an_error() {
+        // A build from public source carries no client (docs/05 §9), so this is its normal
         // starting state. Returning an error here would make the picker show a failure on
         // first launch.
+        //
+        // Through `resolve_client` with `None`, not `client_config`: the latter reads what
+        // *this* machine compiled in, and on the developer's own machine that is a client.
         let conn = store();
 
-        assert!(client_config(&conn, Provider::Google)
+        assert!(resolve_client(&conn, Provider::Google, None)
             .expect("read")
             .is_none());
+    }
+
+    const BUILTIN_GOOGLE: BuiltinClient = BuiltinClient {
+        client_id: "builtin.apps.googleusercontent.com",
+        client_secret: Some("GOCSPX-builtin-test-secret"),
+    };
+
+    #[test]
+    fn a_built_in_client_is_used_when_the_user_has_not_set_one() {
+        // The reason this exists. A build that carries a client must not greet a new user with
+        // "register your own sign-in application" — the tile has to just work.
+        let conn = store();
+
+        let (client, source) = resolve_client(&conn, Provider::Google, Some(BUILTIN_GOOGLE))
+            .expect("read")
+            .expect("the built-in client should be offered");
+
+        assert_eq!(source, ClientSource::Builtin);
+        assert_eq!(client.client_id, "builtin.apps.googleusercontent.com");
+        assert_eq!(
+            client.client_secret.as_ref().map(Secret::expose),
+            Some("GOCSPX-builtin-test-secret")
+        );
+    }
+
+    #[test]
+    fn the_users_own_client_always_wins_over_the_built_in() {
+        let _preserved = credentials::Preserved::new(
+            client_secret_reference(Provider::Google),
+            Kind::ClientSecret,
+        );
+        let conn = store();
+
+        set_client_config(
+            &conn,
+            Provider::Google,
+            "mine.apps.googleusercontent.com",
+            Some("GOCSPX-mine"),
+        )
+        .expect("set");
+
+        let (client, source) = resolve_client(&conn, Provider::Google, Some(BUILTIN_GOOGLE))
+            .expect("read")
+            .expect("configured");
+
+        assert_eq!(source, ClientSource::Custom);
+        assert_eq!(client.client_id, "mine.apps.googleusercontent.com");
+        assert_eq!(
+            client.client_secret.as_ref().map(Secret::expose),
+            Some("GOCSPX-mine"),
+            "a custom client must use its own secret, never the built-in one"
+        );
+    }
+
+    #[test]
+    fn clearing_your_own_client_goes_back_to_the_built_in_rather_than_disabling_the_provider() {
+        // With nothing compiled in, clearing the field disables the provider. With a built-in it
+        // must not: that used to stop every OAuth account on the machine at once, and in a build
+        // that has a perfectly good client to fall back to there is no reason for it.
+        let _preserved = credentials::Preserved::new(
+            client_secret_reference(Provider::Google),
+            Kind::ClientSecret,
+        );
+        let conn = store();
+
+        set_client_config(
+            &conn,
+            Provider::Google,
+            "mine.apps.googleusercontent.com",
+            None,
+        )
+        .expect("set");
+        set_client_config(&conn, Provider::Google, "", None).expect("clear");
+
+        let (client, source) = resolve_client(&conn, Provider::Google, Some(BUILTIN_GOOGLE))
+            .expect("read")
+            .expect("the built-in client should take over again");
+
+        assert_eq!(source, ClientSource::Builtin);
+        assert_eq!(client.client_id, BUILTIN_GOOGLE.client_id);
+    }
+
+    #[test]
+    fn retyping_the_built_in_id_without_a_secret_uses_the_built_in_secret() {
+        // The old setup instructions told people to paste their client id into Settings. Someone
+        // who does that in a build carrying the same client, and leaves the secret box empty, has
+        // not chosen a different application — failing their refresh for want of a secret the
+        // build already holds would be our fault, not theirs.
+        let reference = client_secret_reference(Provider::Google);
+        let _preserved = credentials::Preserved::new(reference.clone(), Kind::ClientSecret);
+        let _ = credentials::delete(&reference, Kind::ClientSecret);
+        let conn = store();
+
+        set_client_config(&conn, Provider::Google, BUILTIN_GOOGLE.client_id, None).expect("set");
+
+        let (client, source) = resolve_client(&conn, Provider::Google, Some(BUILTIN_GOOGLE))
+            .expect("read")
+            .expect("configured");
+
+        assert_eq!(source, ClientSource::Custom);
+        assert_eq!(
+            client.client_secret.as_ref().map(Secret::expose),
+            BUILTIN_GOOGLE.client_secret
+        );
+    }
+
+    #[test]
+    fn a_different_id_never_borrows_the_built_in_secret() {
+        // A client secret is only valid for the client it was issued to. Lending the built-in
+        // one to another id would turn "you have not entered a secret" — which the sync engine
+        // explains properly — into an `invalid_client` from Google, which explains nothing.
+        let reference = client_secret_reference(Provider::Google);
+        let _preserved = credentials::Preserved::new(reference.clone(), Kind::ClientSecret);
+        let _ = credentials::delete(&reference, Kind::ClientSecret);
+        let conn = store();
+
+        set_client_config(
+            &conn,
+            Provider::Google,
+            "other.apps.googleusercontent.com",
+            None,
+        )
+        .expect("set");
+
+        let (client, _) = resolve_client(&conn, Provider::Google, Some(BUILTIN_GOOGLE))
+            .expect("read")
+            .expect("configured");
+
+        assert!(client.client_secret.is_none());
+    }
+
+    #[test]
+    fn half_a_google_client_is_no_client_at_all() {
+        // An id without its secret would light up the Google tile, send the user through a whole
+        // browser consent, and then fail at the token exchange. Nothing is better than that.
+        assert_eq!(
+            builtin_from(Provider::Google, Some("x.apps.googleusercontent.com"), None),
+            None
+        );
+        assert_eq!(
+            builtin_from(
+                Provider::Google,
+                Some("x.apps.googleusercontent.com"),
+                Some("  ")
+            ),
+            None,
+            "a blank secret is no secret"
+        );
+        assert_eq!(builtin_from(Provider::Google, None, Some("GOCSPX-x")), None);
+        assert_eq!(
+            builtin_from(Provider::Google, Some("   "), Some("GOCSPX-x")),
+            None
+        );
+
+        assert_eq!(
+            builtin_from(
+                Provider::Google,
+                Some(" x.apps.googleusercontent.com "),
+                Some(" GOCSPX-x ")
+            ),
+            Some(BuiltinClient {
+                client_id: "x.apps.googleusercontent.com",
+                client_secret: Some("GOCSPX-x"),
+            }),
+            "whitespace from a hand-edited file is trimmed rather than sent to Google"
+        );
+    }
+
+    #[test]
+    fn a_microsoft_built_in_never_carries_a_secret() {
+        // Microsoft public clients have no secret and reject a request that sends one. Needing
+        // no secret is also what makes a Microsoft client safe to build in unconditionally.
+        let id = "00000000-0000-0000-0000-000000000000";
+
+        assert_eq!(
+            builtin_from(Provider::Microsoft, Some(id), None),
+            Some(BuiltinClient {
+                client_id: id,
+                client_secret: None,
+            })
+        );
+        assert_eq!(
+            builtin_from(Provider::Microsoft, Some(id), Some("should-never-be-sent")),
+            Some(BuiltinClient {
+                client_id: id,
+                client_secret: None,
+            })
+        );
+    }
+
+    #[test]
+    fn providers_that_sign_in_with_a_password_never_have_a_built_in_client() {
+        // `builtin_client` is what keeps them out — `builtin_from` is only ever handed values
+        // for an OAuth provider, so the guard that matters is the match arm above it.
+        for provider in [Provider::ICloud, Provider::Yahoo, Provider::Other] {
+            assert_eq!(builtin_client(provider), None, "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn the_file_holding_the_built_in_client_is_never_committed() {
+        // It holds a Google client secret, and the repository is public (docs/05 §9). Three
+        // ways that could go wrong, each checked: the ignore rule removed, the committed template
+        // filled in by someone who copied the wrong file, or the real file force-added.
+        //
+        // Paths are relative to src-tauri/, which is where cargo runs tests.
+        let gitignore = std::fs::read_to_string("../.gitignore").expect("read .gitignore");
+        assert!(
+            gitignore
+                .lines()
+                .any(|line| line.trim() == "src-tauri/oauth/clients.env"),
+            "src-tauri/oauth/clients.env must be listed in .gitignore"
+        );
+
+        let example =
+            std::fs::read_to_string("oauth/clients.env.example").expect("read the template");
+        for line in example
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let (name, value) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("`{line}` is not NAME=value"));
+            assert!(
+                value.trim().is_empty(),
+                "{name} has a value in clients.env.example, which is committed"
+            );
+        }
+
+        // `--error-unmatch` exits 0 only for a tracked path. Skipped where git is not installed;
+        // outside a work tree git exits non-zero, which correctly passes.
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["ls-files", "--error-unmatch", "oauth/clients.env"])
+            .output()
+        {
+            assert!(
+                !output.status.success(),
+                "src-tauri/oauth/clients.env is tracked by git — remove it with \
+                 `git rm --cached` and rotate the Google client secret"
+            );
+        }
     }
 
     #[test]
@@ -238,10 +637,10 @@ mod tests {
             .expect("configured");
         assert_eq!(client.client_id, "123.apps.googleusercontent.com");
 
-        // Clearing the field in the settings pane must disable the provider rather than
+        // With nothing compiled in, clearing the field must disable the provider rather than
         // leave a blank id that opens the browser onto an error page.
         set_client_config(&conn, Provider::Google, "   ", None).expect("set");
-        assert!(client_config(&conn, Provider::Google)
+        assert!(resolve_client(&conn, Provider::Google, None)
             .expect("read")
             .is_none());
     }

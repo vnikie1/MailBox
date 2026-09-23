@@ -57,18 +57,21 @@ type Response<T> = Result<T, AppError>;
 /// Payload for `mailbox:changed`. docs/03 §4.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MailboxChanged {
-    mailbox_id: i64,
-    unread: i64,
-    total: i64,
+pub(crate) struct MailboxChanged {
+    pub(crate) mailbox_id: i64,
+    pub(crate) unread: i64,
+    pub(crate) total: i64,
 }
 
 /// Tells the UI which mailboxes moved, so it can invalidate exactly those query keys.
 ///
 /// Emitted after the transaction has committed, never before: an event that arrives while
 /// the write could still roll back would have the UI showing a change that then unhappens.
-fn announce(app: &AppHandle, db: &Db, mailbox_ids: Vec<i64>, message_ids: &[i64]) {
+pub(crate) fn announce(app: &AppHandle, db: &Db, mailbox_ids: Vec<i64>, message_ids: &[i64]) {
     let _ = app.emit("messages:updated", message_ids);
+
+    // Every command that announces here has just queued work for a server.
+    super::sync::push_soon(app);
 
     let handle = app.clone();
     let db = db.clone();

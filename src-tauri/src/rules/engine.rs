@@ -375,6 +375,14 @@ fn queue_flags(
 fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), DbError> {
     match action {
         Action::MoveTo(mailbox_id) => {
+            // A rule outlives its folder when the folder is deleted, here or on the server.
+            // Moving into a mailbox that no longer exists fails the foreign key, and with it the
+            // whole run — so the action is skipped and the other rules still apply.
+            if crate::sync::ops::mailbox_path(tx, *mailbox_id)?.is_none() {
+                tracing::debug!(mailbox_id, "rule names a mailbox that no longer exists");
+                return Ok(());
+            }
+
             queue_move(tx, message_id, *mailbox_id)?;
             crate::db::write::move_to(tx, &[message_id], *mailbox_id)?;
         }

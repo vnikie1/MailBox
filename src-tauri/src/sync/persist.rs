@@ -31,6 +31,16 @@ pub struct Written {
     pub inserted_ids: Vec<i64>,
 }
 
+/// How a batch treats the messages it already has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refresh {
+    /// Only the flags can have changed. An ordinary sync.
+    Flags,
+    /// Everything the server said is written again, envelope included. Rebuild, which exists
+    /// for the copy that has gone wrong.
+    Everything,
+}
+
 /// Inserts or updates a batch of fetched messages.
 ///
 /// Idempotent by `(mailbox_id, uid)`: running the same batch twice writes the same rows and
@@ -41,6 +51,17 @@ pub fn write_batch(
     mailbox_id: i64,
     fetched: &[Fetched],
 ) -> Result<Written, DbError> {
+    write_batch_as(tx, account_id, mailbox_id, fetched, Refresh::Flags)
+}
+
+/// `write_batch`, saying how much of a message already here is written again.
+pub fn write_batch_as(
+    tx: &Transaction<'_>,
+    account_id: i64,
+    mailbox_id: i64,
+    fetched: &[Fetched],
+    refresh: Refresh,
+) -> Result<Written, DbError> {
     if fetched.is_empty() {
         return Ok(Written::default());
     }
@@ -49,6 +70,14 @@ pub fn write_batch(
         lowest_uid: u32::MAX,
         ..Written::default()
     };
+
+    // Flags the user changed here that are still on their way to the server. See
+    // `ops::unsent_flags`; the server's copy of those is older than ours.
+    let unsent = super::ops::unsent_flags_in(tx, mailbox_id)?;
+
+    // And messages the user moved or deleted here, which the server has not heard about yet and
+    // so still lists. See `ops::unsent_removals`.
+    let removed = super::ops::unsent_removals_in(tx, mailbox_id)?;
 
     for message in fetched {
         written.lowest_uid = written.lowest_uid.min(message.uid);
@@ -60,6 +89,10 @@ pub fn write_batch(
                 |row| row.get(0),
             )
             .ok();
+
+        if existing.is_none() && removed.contains(message.uid) {
+            continue;
+        }
 
         let envelope = &message.envelope;
 
@@ -128,9 +161,12 @@ pub fn write_batch(
         if let Some(id) = existing {
             // A message already here: only its mutable parts can have changed. Rewriting the
             // envelope would churn the FTS index for nothing on every incremental sync.
+            let keep = unsent.get(&message.uid).copied().unwrap_or_default();
             tx.execute(
                 "UPDATE message
-                    SET flag_seen = ?2, flag_answered = ?3, flag_flagged = ?4,
+                    SET flag_seen    = CASE WHEN ?7 THEN flag_seen ELSE ?2 END,
+                        flag_answered = ?3,
+                        flag_flagged = CASE WHEN ?8 THEN flag_flagged ELSE ?4 END,
                         flag_draft = ?5, flag_deleted = ?6
                   WHERE id = ?1",
                 params![
@@ -140,8 +176,49 @@ pub fn write_batch(
                     i64::from(message.flags.flagged),
                     i64::from(message.flags.draft),
                     i64::from(message.flags.deleted),
+                    keep.seen,
+                    keep.flagged,
                 ],
             )?;
+
+            // Rebuild writes the rest again too: the copy it is replacing is the one in doubt.
+            // What only this computer knows — a flag colour, a snooze, a junk verdict, the
+            // cached body — is in other columns, and stays.
+            if refresh == Refresh::Everything {
+                tx.execute(
+                    "UPDATE message
+                        SET message_id = ?2, in_reply_to = ?3, references_ = ?4, gm_msgid = ?5,
+                            gm_thrid = ?6, subject = ?7, subject_base = ?8, from_name = ?9,
+                            from_addr = ?10, to_json = ?11, cc_json = ?12, reply_to_json = ?13,
+                            date_sent = ?14, date_received = ?15, size = ?16, from_all = ?17,
+                            to_all = ?18
+                      WHERE id = ?1",
+                    params![
+                        id,
+                        envelope.message_id,
+                        envelope.in_reply_to,
+                        if references.is_empty() {
+                            None
+                        } else {
+                            Some(references)
+                        },
+                        message.gm_msgid,
+                        message.gm_thrid,
+                        envelope.subject,
+                        envelope.subject_base,
+                        envelope.from_name(),
+                        envelope.from_addr(),
+                        addresses_json(&envelope.to),
+                        addresses_json(&envelope.cc),
+                        addresses_json(&envelope.reply_to),
+                        envelope.date_sent,
+                        date_received,
+                        message.size as i64,
+                        envelope.from_all(),
+                        envelope.to_all(),
+                    ],
+                )?;
+            }
 
             written.updated += 1;
             continue;
@@ -514,9 +591,15 @@ pub fn apply_flag_changes(
         return Ok(0);
     }
 
+    // A flag the user changed here and has not yet sent is newer than the server's report of
+    // it. See `ops::unsent_flags`.
+    let unsent = super::ops::unsent_flags_in(tx, mailbox_id)?;
+
     let mut statement = tx.prepare(
         "UPDATE message
-            SET flag_seen = ?3, flag_answered = ?4, flag_flagged = ?5,
+            SET flag_seen    = CASE WHEN ?8 THEN flag_seen ELSE ?3 END,
+                flag_answered = ?4,
+                flag_flagged = CASE WHEN ?9 THEN flag_flagged ELSE ?5 END,
                 flag_draft = ?6, flag_deleted = ?7
           WHERE mailbox_id = ?1 AND uid = ?2",
     )?;
@@ -524,6 +607,7 @@ pub fn apply_flag_changes(
     let mut updated = 0;
 
     for change in changes {
+        let keep = unsent.get(&change.uid).copied().unwrap_or_default();
         updated += statement.execute(params![
             mailbox_id,
             change.uid,
@@ -532,6 +616,8 @@ pub fn apply_flag_changes(
             change.flags.flagged,
             change.flags.draft,
             change.flags.deleted,
+            keep.seen,
+            keep.flagged,
         ])?;
     }
 
@@ -620,6 +706,100 @@ pub fn remove_missing(
     Ok(removed)
 }
 
+/// Removes every message the server numbered, for a mailbox the server says is empty.
+///
+/// `remove_missing` will not act on an empty list, rightly — a `UID SEARCH` that returns
+/// nothing is more often a fault than an answer. An `EXISTS` of zero from the `SELECT` is an
+/// answer. Without this, a Bin emptied in webmail kept every message here for good.
+///
+/// Placeholders (`uid <= 0`, a move on its way) are left, as `remove_missing` leaves them.
+pub fn remove_all_numbered(tx: &Transaction<'_>, mailbox_id: i64) -> Result<usize, DbError> {
+    let ids: Vec<i64> = {
+        let mut statement =
+            tx.prepare("SELECT id FROM message WHERE mailbox_id = ?1 AND uid > 0")?;
+        let rows = statement.query_map(params![mailbox_id], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // Row by row, for the FTS5 triggers — see `drop_mailbox_contents`.
+    let mut removed = 0usize;
+    for id in ids {
+        removed += tx.execute("DELETE FROM message WHERE id = ?1", params![id])?;
+    }
+
+    if removed > 0 {
+        recount(tx, mailbox_id)?;
+    }
+
+    Ok(removed)
+}
+
+/// Whether the user asked for this mailbox to be rebuilt.
+pub fn rebuild_requested(conn: &rusqlite::Connection, mailbox_id: i64) -> Result<bool, DbError> {
+    Ok(conn
+        .query_row(
+            "SELECT rebuild_requested FROM mailbox WHERE id = ?1",
+            params![mailbox_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false))
+}
+
+/// The start of a rebuild: forgets how far the mailbox had been read, so this sync reads it all.
+///
+/// `uid_validity` stays, so a server that renumbered meanwhile is still caught, and so does
+/// `uid_next`, which is what tells mail that arrived since the last sync from mail that was
+/// already here — rules and notifications must not run again over the whole mailbox.
+pub fn begin_rebuild(tx: &Transaction<'_>, mailbox_id: i64) -> Result<(), DbError> {
+    tx.execute(
+        "UPDATE mailbox SET highest_modseq = NULL, backfill_uid = NULL WHERE id = ?1",
+        params![mailbox_id],
+    )?;
+    Ok(())
+}
+
+/// The end of a rebuild. Returns how many messages the mailbox holds now.
+pub fn finish_rebuild(tx: &Transaction<'_>, mailbox_id: i64) -> Result<i64, DbError> {
+    recount(tx, mailbox_id)?;
+    tx.execute(
+        "UPDATE mailbox SET rebuild_requested = 0 WHERE id = ?1",
+        params![mailbox_id],
+    )?;
+
+    Ok(tx
+        .query_row(
+            "SELECT total_count FROM mailbox WHERE id = ?1",
+            params![mailbox_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0))
+}
+
+/// The messages whose source is cached, by row and UID: what a rebuild downloads again.
+pub fn cached_bodies(
+    conn: &rusqlite::Connection,
+    mailbox_id: i64,
+) -> Result<Vec<(i64, u32)>, DbError> {
+    let mut statement = conn.prepare(
+        "SELECT id, uid FROM message
+          WHERE mailbox_id = ?1 AND body_state = 'full' AND uid > 0
+          ORDER BY uid DESC",
+    )?;
+    let rows = statement.query_map(params![mailbox_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as u32))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// The UIDs held for a mailbox, newest first: what a rebuild of a folder reads again beyond its
+/// newest page.
+pub fn held_uids(conn: &rusqlite::Connection, mailbox_id: i64) -> Result<Vec<u32>, DbError> {
+    let mut statement = conn
+        .prepare("SELECT uid FROM message WHERE mailbox_id = ?1 AND uid > 0 ORDER BY uid DESC")?;
+    let rows = statement.query_map(params![mailbox_id], |row| Ok(row.get::<_, i64>(0)? as u32))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Drops every message in a mailbox. docs/03 §5's `UIDVALIDITY` recovery.
 ///
 /// *Drop and re-sync that mailbox. Do not try to be clever.* Row by row rather than by a
@@ -697,6 +877,324 @@ mod tests {
             gm_msgid: None,
             references: Vec::new(),
         }
+    }
+
+    fn flags_of(tx: &rusqlite::Transaction<'_>, uid: u32) -> (bool, bool, bool) {
+        tx.query_row(
+            "SELECT flag_seen, flag_flagged, flag_answered FROM message
+              WHERE mailbox_id = 1 AND uid = ?1",
+            params![uid],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("row")
+    }
+
+    /// A change the user made during a sync is not overwritten by the flags that sync fetched.
+    ///
+    /// Found driving the built app: Mark All Messages as Read while the account was syncing, and
+    /// the pass that was already running wrote the server's older "unread" back over three of the
+    /// six — which then stayed unread until the next sync.
+    #[test]
+    fn a_flag_still_on_its_way_to_the_server_is_not_overwritten_by_it() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        write_batch(
+            &tx,
+            1,
+            1,
+            &[fetched(1, "<a@x>", "one"), fetched(2, "<b@x>", "two")],
+        )
+        .expect("write");
+
+        // The user reads both and flags the first; only the reading is still queued for 1, and
+        // nothing is queued for 2 — its change has already been sent.
+        tx.execute("UPDATE message SET flag_seen = 1", [])
+            .expect("read");
+        tx.execute("UPDATE message SET flag_flagged = 1 WHERE uid = 1", [])
+            .expect("flag");
+        crate::sync::ops::enqueue(
+            &tx,
+            1,
+            &crate::sync::ops::Op::Flag {
+                mailbox: "INBOX".into(),
+                uids: vec![1],
+                seen: Some(true),
+                flagged: None,
+            },
+        )
+        .expect("queue");
+
+        // The server still says unread and unflagged, and has marked 1 answered meanwhile.
+        let mut stale_one = fetched(1, "<a@x>", "one");
+        stale_one.flags.answered = true;
+        write_batch(&tx, 1, 1, &[stale_one, fetched(2, "<b@x>", "two")]).expect("write");
+
+        // 1: the queued read survives; the flag, not queued, and the answer take the server's.
+        assert_eq!(flags_of(&tx, 1), (true, false, true));
+        // 2: nothing queued, so the server's word stands.
+        assert_eq!(flags_of(&tx, 2), (false, false, false));
+
+        // The same through the CONDSTORE path.
+        tx.execute("UPDATE message SET flag_seen = 1", [])
+            .expect("read");
+        let changes = [
+            crate::sync::fetch::FlagChange {
+                uid: 1,
+                flags: Flags::default(),
+            },
+            crate::sync::fetch::FlagChange {
+                uid: 2,
+                flags: Flags::default(),
+            },
+        ];
+        apply_flag_changes(&tx, 1, &changes).expect("apply");
+
+        assert!(flags_of(&tx, 1).0, "the queued read was undone");
+        assert!(!flags_of(&tx, 2).0);
+    }
+
+    fn inbox_uids(tx: &rusqlite::Transaction<'_>) -> Vec<i64> {
+        tx.prepare("SELECT uid FROM message WHERE mailbox_id = 1 ORDER BY uid")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows")
+    }
+
+    /// A message moved or deleted here is not read back while the server still lists it.
+    ///
+    /// Before, the next sync wrote it back as a new row: a deleted message returned, and a moved
+    /// one showed in both folders, until the change reached the server and a later sync tidied
+    /// up. Rebuild, which reads the whole mailbox again, made it plain.
+    #[test]
+    fn a_message_removed_here_is_not_read_back_before_the_server_has_heard() {
+        use crate::sync::ops::{enqueue, Op};
+
+        let mut conn = store();
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (2, 1, 'Archive', 'Archive', 'archive')",
+            [],
+        )
+        .expect("archive");
+        let tx = conn.transaction().expect("tx");
+
+        let three = || {
+            vec![
+                fetched(1, "<a@x>", "one"),
+                fetched(2, "<b@x>", "two"),
+                fetched(3, "<c@x>", "three"),
+            ]
+        };
+        write_batch(&tx, 1, 1, &three()).expect("write");
+
+        // 1 moved to the Archive and 2 deleted, here only.
+        tx.execute(
+            "UPDATE message SET mailbox_id = 2, uid = -1, origin_mailbox_id = 1, origin_uid = 1
+              WHERE uid = 1",
+            [],
+        )
+        .expect("park");
+        tx.execute("DELETE FROM message WHERE uid = 2", [])
+            .expect("delete");
+        enqueue(
+            &tx,
+            1,
+            &Op::Move {
+                from: "INBOX".into(),
+                to: "Archive".into(),
+                uids: vec![1],
+            },
+        )
+        .expect("queue");
+        enqueue(
+            &tx,
+            1,
+            &Op::Delete {
+                mailbox: "INBOX".into(),
+                uids: vec![2],
+            },
+        )
+        .expect("queue");
+
+        // The server still lists all three.
+        let written = write_batch(&tx, 1, 1, &three()).expect("write");
+        assert_eq!(written.inserted, 0);
+        assert_eq!(inbox_uids(&tx), vec![3]);
+
+        // An erase on its way keeps out everything the mailbox had.
+        enqueue(
+            &tx,
+            1,
+            &Op::EraseMailbox {
+                mailbox: "INBOX".into(),
+            },
+        )
+        .expect("queue");
+        tx.execute("DELETE FROM message WHERE mailbox_id = 1", [])
+            .expect("erase here");
+        let written = write_batch(&tx, 1, 1, &three()).expect("write");
+        assert_eq!(written.inserted, 0);
+        assert!(inbox_uids(&tx).is_empty());
+
+        // Once the server has been told, a listed message is a message again.
+        tx.execute("DELETE FROM pending_op", []).expect("sent");
+        let written = write_batch(&tx, 1, 1, &[fetched(4, "<d@x>", "four")]).expect("write");
+        assert_eq!(written.inserted, 1);
+    }
+
+    #[test]
+    fn a_rebuild_writes_the_whole_message_again_and_keeps_what_only_this_computer_knows() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        write_batch(&tx, 1, 1, &[fetched(1, "<a@x>", "Wrong subject")]).expect("write");
+        tx.execute(
+            "UPDATE message SET flag_color = 'blue', snooze_until = 99, junk_by_user = 1,
+                                body_state = 'full', body_text = 'kept'",
+            [],
+        )
+        .expect("what only this computer knows");
+
+        let subject = |tx: &rusqlite::Transaction<'_>| -> String {
+            tx.query_row("SELECT subject FROM message WHERE uid = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("subject")
+        };
+
+        // An ordinary sync leaves the envelope alone.
+        write_batch(&tx, 1, 1, &[fetched(1, "<a@x>", "Right subject")]).expect("write");
+        assert_eq!(subject(&tx), "Wrong subject");
+
+        let written = write_batch_as(
+            &tx,
+            1,
+            1,
+            &[fetched(1, "<a@x>", "Right subject")],
+            Refresh::Everything,
+        )
+        .expect("rebuild");
+        assert_eq!((written.inserted, written.updated), (0, 1));
+        assert_eq!(subject(&tx), "Right subject");
+
+        let kept: (Option<String>, Option<i64>, bool, String, Option<String>) = tx
+            .query_row(
+                "SELECT flag_color, snooze_until, junk_by_user, body_state, body_text
+                   FROM message WHERE uid = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("row");
+        assert_eq!(
+            kept,
+            (
+                Some("blue".to_string()),
+                Some(99),
+                true,
+                "full".to_string(),
+                Some("kept".to_string())
+            )
+        );
+
+        // The search index follows the subject it now has.
+        let hits = |term: &str| -> i64 {
+            tx.query_row(
+                "SELECT COUNT(*) FROM message_fts WHERE message_fts MATCH ?1",
+                [term],
+                |row| row.get(0),
+            )
+            .expect("match")
+        };
+        assert_eq!(hits("right"), 1);
+        assert_eq!(hits("wrong"), 0);
+    }
+
+    #[test]
+    fn a_mailbox_the_server_says_is_empty_is_emptied_here_but_for_moves_on_their_way() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        write_batch(
+            &tx,
+            1,
+            1,
+            &[fetched(1, "<a@x>", "one"), fetched(2, "<b@x>", "two")],
+        )
+        .expect("write");
+        // A message moved in a moment ago, which the server has not placed yet.
+        tx.execute(
+            "INSERT INTO message (account_id, mailbox_id, uid, subject, date_sent, date_received,
+                                  from_all, to_all)
+             VALUES (1, 1, -5, 'moving in', 0, 0, '', '')",
+            [],
+        )
+        .expect("placeholder");
+
+        assert_eq!(remove_all_numbered(&tx, 1).expect("remove"), 2);
+        assert_eq!(inbox_uids(&tx), vec![-5]);
+
+        let total: i64 = tx
+            .query_row("SELECT total_count FROM mailbox WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn a_rebuild_starts_from_the_top_and_keeps_what_tells_new_mail_from_old() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        tx.execute(
+            "UPDATE mailbox SET rebuild_requested = 1, highest_modseq = 7, backfill_uid = 1,
+                                uid_validity = 3, uid_next = 10
+              WHERE id = 1",
+            [],
+        )
+        .expect("state");
+
+        assert!(rebuild_requested(&tx, 1).expect("asked"));
+        begin_rebuild(&tx, 1).expect("begin");
+
+        let state: (Option<i64>, Option<i64>, Option<i64>, Option<i64>, bool) = tx
+            .query_row(
+                "SELECT highest_modseq, backfill_uid, uid_validity, uid_next, rebuild_requested
+                   FROM mailbox WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("row");
+        assert_eq!(state, (None, None, Some(3), Some(10), true));
+
+        write_batch(&tx, 1, 1, &[fetched(1, "<a@x>", "one")]).expect("write");
+        tx.execute("UPDATE message SET body_state = 'full'", [])
+            .expect("cached");
+        assert_eq!(cached_bodies(&tx, 1).expect("cached"), vec![(1, 1)]);
+        assert_eq!(held_uids(&tx, 1).expect("held"), vec![1]);
+
+        assert_eq!(finish_rebuild(&tx, 1).expect("finish"), 1);
+        assert!(!rebuild_requested(&tx, 1).expect("asked"));
+        assert!(!rebuild_requested(&tx, 99).expect("a mailbox that has gone"));
     }
 
     /// Two messages Gmail says are one conversation, with nothing else linking them.

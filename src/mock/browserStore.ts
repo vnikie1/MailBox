@@ -1,12 +1,17 @@
 import type { AccountRow } from '@/lib/generated/AccountRow'
+import type { BuiltinFavourite } from '@/lib/generated/BuiltinFavourite'
 import type { Cursor } from '@/lib/generated/Cursor'
+import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 import type { FlagPatch } from '@/lib/generated/FlagPatch'
 import type { ListQuery } from '@/lib/generated/ListQuery'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
+import type { MailboxUse } from '@/lib/generated/MailboxUse'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import type { MessageRow } from '@/lib/generated/MessageRow'
 import type { Page } from '@/lib/generated/Page'
 import type { SearchQuery } from '@/lib/generated/SearchQuery'
+
+import { mailboxNameProblem } from '@/lib/mailboxName'
 
 import {
   ATTACHMENT_NAMES,
@@ -68,7 +73,26 @@ interface Store {
   messages: Map<number, StoredMessage>
   /** Message ids per mailbox, newest first — the same order `ix_msg_list` provides. */
   byMailbox: Map<number, number[]>
+  /**
+   * Each mailbox's path, "/"-separated, as the core keeps `remote_path`. Beside the rows rather
+   * than on them because `MailboxRow` does not carry it: the window never needs a server's
+   * spelling of a name.
+   */
+  paths: Map<number, string>
+  /** Favourites in order, as the `favourite` table holds them. */
+  favourites: FavouriteRow[]
+  /** The mailboxes whose role the user chose, as `mailbox_role` holds them. */
+  chosen: Set<number>
 }
+
+/** The rows every sidebar's Favourites starts with, in the migration's order. */
+const BUILTIN_FAVOURITES: BuiltinFavourite[] = [
+  'allInboxes',
+  'vips',
+  'flagged',
+  'allDrafts',
+  'allSent',
+]
 
 const ACCOUNTS: { name: string; email: string; provider: string; folders: string[] }[] = [
   {
@@ -122,32 +146,19 @@ function build(): Store {
       displayName: spec.name,
       email: spec.email,
       provider: spec.provider,
+      // Null exactly as a freshly added account is in the real database. The colour a user
+      // picks lives in the overlay, and `accountsList` reads it back from there.
+      color: null,
     })
 
     for (const { role, name } of ROLES) {
       const id = nextMailboxId++
-      mailboxes.push({
-        id,
-        accountId,
-        displayName: name,
-        parentId: null,
-        role,
-        unreadCount: 0,
-        totalCount: 0,
-      })
+      mailboxes.push(folderRow(id, accountId, name, role))
       if (role === 'inbox') inboxIds.push(id)
     }
 
     for (const folder of spec.folders) {
-      mailboxes.push({
-        id: nextMailboxId++,
-        accountId,
-        displayName: folder,
-        parentId: null,
-        role: null,
-        unreadCount: 0,
-        totalCount: 0,
-      })
+      mailboxes.push(folderRow(nextMailboxId++, accountId, folder, null))
     }
   })
 
@@ -240,12 +251,60 @@ function build(): Store {
     byMailbox.set(mailboxId, ids)
   }
 
-  const store: Store = { accounts, mailboxes, messages, byMailbox }
+  const paths = new Map(
+    mailboxes.map((mailbox) => [
+      mailbox.id,
+      mailbox.role === 'inbox' ? 'INBOX' : mailbox.displayName,
+    ]),
+  )
+  const favourites = BUILTIN_FAVOURITES.map((builtin, index) => ({
+    id: index + 1,
+    builtin,
+    mailboxId: null,
+  }))
+
+  const store: Store = {
+    accounts,
+    mailboxes,
+    messages,
+    byMailbox,
+    paths,
+    favourites,
+    chosen: new Set(),
+  }
   recount(
     store,
     mailboxes.map((mailbox) => mailbox.id),
   )
   return store
+}
+
+/**
+ * A mailbox row as `mailboxes_tree` returns one, before `mailboxesTree` works out where it sits.
+ * The browser's folders separate with "/".
+ */
+function folderRow(
+  id: number,
+  accountId: number,
+  displayName: string,
+  role: string | null,
+): MailboxRow {
+  return {
+    id,
+    accountId,
+    displayName,
+    parentId: null,
+    role,
+    unreadCount: 0,
+    totalCount: 0,
+    favouriteOrder: null,
+    roleChosen: false,
+    delimiter: '/',
+    // `sync::folders::editable`: the user's own folders, not the ones the account files into.
+    editable: role === null,
+    descendants: 0,
+    canContain: role !== 'inbox',
+  }
 }
 
 function recount(store: Store, mailboxIds: number[]): void {
@@ -289,12 +348,63 @@ function current(): Store {
   return store
 }
 
+/**
+ * The sidebar's view of the accounts, with the user's edits applied.
+ *
+ * This returned the seed rows untouched, which made the browser mock disagree with the core
+ * on three fields at once: `accounts_list` in Rust reads `display_name`, `color` and
+ * `ORDER BY sort_order` straight from the table the settings pane writes to. So renaming,
+ * recolouring or reordering an account changed the settings pane and left the sidebar on the
+ * original seed — a divergence that would have made a real bug look like a mock artefact,
+ * and a mock artefact look like a real bug.
+ */
 export function accountsList(): AccountRow[] {
-  return current().accounts
+  const store = current()
+
+  return store.accounts
+    .map((account, index) => {
+      const overlay = overlayFor(account.id, account.displayName, index)
+      return {
+        row: { ...account, displayName: overlay.displayName, color: overlay.color },
+        sortOrder: overlay.sortOrder,
+      }
+    })
+    .sort((left, right) => left.sortOrder - right.sortOrder)
+    .map((entry) => entry.row)
 }
 
+/**
+ * Copies, not the stored rows. The store edits its rows and its array in place, and TanStack
+ * Query decides whether anything changed by comparing what it is given with what it had: handed
+ * the very same array back after a folder was added to it, structural sharing keeps the old
+ * reference and a component watching `data` has no reason to render again. The core's answers
+ * are fresh objects every time; these now are too.
+ */
 export function mailboxesTree(accountId?: number): MailboxRow[] {
-  const all = current().mailboxes
+  const data = current()
+
+  const all = data.mailboxes.map((mailbox): MailboxRow => {
+    const path = pathOf(mailbox)
+    const others = data.mailboxes.filter(
+      (other) => other.accountId === mailbox.accountId && other.id !== mailbox.id,
+    )
+
+    // `db::query::mailboxes_tree`: the longest path that contains this one, never the Inbox.
+    const parent = others
+      .filter((other) => !isInboxPath(pathOf(other)) && path.startsWith(`${pathOf(other)}/`))
+      .sort((a, b) => pathOf(b).length - pathOf(a).length)[0]
+    const position = data.favourites.findIndex((entry) => entry.mailboxId === mailbox.id)
+
+    return {
+      ...mailbox,
+      parentId: parent?.id ?? null,
+      descendants: others.filter((other) => pathOf(other).startsWith(`${path}/`)).length,
+      canContain: !isInboxPath(path),
+      favouriteOrder: position < 0 ? null : position + 1,
+      roleChosen: data.chosen.has(mailbox.id),
+    }
+  })
+
   return accountId === undefined ? all : all.filter((mailbox) => mailbox.accountId === accountId)
 }
 
@@ -534,6 +644,304 @@ export function remove(
   return { changed, mailboxIds }
 }
 
+/**
+ * Mark All Messages as Read, the way `mailbox_mark_read` does it: every unread message in the
+ * mailbox. The browser path used to return 0 and change nothing, which the menu then reported
+ * as "Nothing was unread" over a badge that said otherwise.
+ */
+export function mailboxMarkRead(mailboxId: number): number {
+  const data = current()
+  const unread = (data.byMailbox.get(mailboxId) ?? []).filter(
+    (id) => data.messages.get(id)?.seen === false,
+  )
+
+  return setFlags(unread, { seen: true, flagged: null }).changed
+}
+
+/* ------------------------------------------------------------ mailbox structure */
+
+/**
+ * The mailbox context menu's commands, against the in-memory store. `sync::folders` in the core.
+ *
+ * The same rules and the same sentences, so the sheets the Playwright suite drives behave as they
+ * do in the app. The one simplification is the one the browser's folders already have: a name is
+ * its own path, so "taken" means another folder in the account with that name.
+ */
+
+function folderOrThrow(mailboxId: number): MailboxRow {
+  const mailbox = current().mailboxes.find((entry) => entry.id === mailboxId)
+  if (mailbox === undefined) throw new Error('That mailbox no longer exists.')
+  return mailbox
+}
+
+/** A mailbox's path, as the core keeps `remote_path`. */
+function pathOf(mailbox: MailboxRow): string {
+  return current().paths.get(mailbox.id) ?? mailbox.displayName
+}
+
+function isInboxPath(path: string): boolean {
+  return path.toLowerCase() === 'inbox'
+}
+
+/** Whether a mailbox is at `path` or inside it. */
+function within(candidate: string, path: string): boolean {
+  return candidate === path || candidate.startsWith(`${path}/`)
+}
+
+/**
+ * A name the user typed, checked as `sync::folders` checks it: the rules, then whether the
+ * account already has a mailbox at that path — ignoring case, as the core does.
+ */
+function checkName(
+  accountId: number,
+  parentPath: string | null,
+  parentName: string | null,
+  name: string,
+  except: number | null,
+): { name: string; path: string } {
+  const problem = mailboxNameProblem(name, '/')
+  if (problem !== null) throw new Error(problem)
+
+  const trimmed = name.trim()
+  const path = parentPath === null ? trimmed : `${parentPath}/${trimmed}`
+
+  if (isInboxPath(path)) {
+    throw new Error('“Inbox” is the name of the account’s inbox.')
+  }
+
+  const taken = current().mailboxes.some(
+    (entry) =>
+      entry.accountId === accountId &&
+      entry.id !== except &&
+      pathOf(entry).toLowerCase() === path.toLowerCase(),
+  )
+  if (taken) {
+    throw new Error(
+      parentName === null
+        ? `There’s already a mailbox called “${trimmed}”.`
+        : `There’s already a mailbox called “${trimmed}” in “${parentName}”.`,
+    )
+  }
+
+  return { name: trimmed, path }
+}
+
+export function mailboxCreate(accountId: number, parentId: number | null, name: string): number {
+  const data = current()
+  if (!data.accounts.some((account) => account.id === accountId)) {
+    throw new Error('That mailbox no longer exists.')
+  }
+
+  let parentPath: string | null = null
+  let parentName: string | null = null
+  if (parentId !== null) {
+    const parent = folderOrThrow(parentId)
+    if (parent.accountId !== accountId) throw new Error('That mailbox no longer exists.')
+    if (isInboxPath(pathOf(parent))) {
+      throw new Error(`A mailbox can’t be made inside “${parent.displayName}”.`)
+    }
+    parentPath = pathOf(parent)
+    parentName = parent.displayName
+  }
+
+  const checked = checkName(accountId, parentPath, parentName, name, null)
+  const id = Math.max(0, ...data.mailboxes.map((mailbox) => mailbox.id)) + 1
+  data.mailboxes.push(folderRow(id, accountId, checked.name, null))
+  data.paths.set(id, checked.path)
+  return id
+}
+
+/** Returns the account, for the event. */
+export function mailboxRename(mailboxId: number, name: string): number {
+  const data = current()
+  const mailbox = folderOrThrow(mailboxId)
+  if (!mailbox.editable) {
+    throw new Error('This mailbox belongs to the account and can’t be renamed.')
+  }
+
+  const from = pathOf(mailbox)
+  const cut = from.lastIndexOf('/')
+  const parentPath = cut < 0 ? null : from.slice(0, cut)
+  const parent =
+    parentPath === null
+      ? undefined
+      : data.mailboxes.find(
+          (entry) => entry.accountId === mailbox.accountId && pathOf(entry) === parentPath,
+        )
+
+  const checked = checkName(
+    mailbox.accountId,
+    parentPath,
+    parent?.displayName ?? null,
+    name,
+    mailbox.id,
+  )
+
+  // Everything inside goes with it, as a server's RENAME takes the children.
+  for (const entry of data.mailboxes) {
+    const entryPath = pathOf(entry)
+    if (entry.accountId === mailbox.accountId && within(entryPath, from)) {
+      data.paths.set(entry.id, checked.path + entryPath.slice(from.length))
+    }
+  }
+  mailbox.displayName = checked.name
+  return mailbox.accountId
+}
+
+export function mailboxDelete(mailboxId: number): {
+  accountId: number
+  mailboxIds: number[]
+  messages: number
+} {
+  const data = current()
+  const mailbox = folderOrThrow(mailboxId)
+  if (!mailbox.editable) {
+    throw new Error('This mailbox belongs to the account and can’t be deleted.')
+  }
+
+  const root = pathOf(mailbox)
+  const doomed = data.mailboxes.filter(
+    (entry) => entry.accountId === mailbox.accountId && within(pathOf(entry), root),
+  )
+  const ids = doomed.map((entry) => entry.id)
+
+  let messages = 0
+  for (const id of ids) {
+    const held = data.byMailbox.get(id) ?? []
+    for (const messageId of held) data.messages.delete(messageId)
+    messages += held.length
+    data.byMailbox.delete(id)
+    data.paths.delete(id)
+    data.chosen.delete(id)
+  }
+  data.mailboxes = data.mailboxes.filter((entry) => !ids.includes(entry.id))
+  // `favourite.mailbox_id ... ON DELETE CASCADE`.
+  data.favourites = data.favourites.filter(
+    (entry) => entry.mailboxId === null || !ids.includes(entry.mailboxId),
+  )
+
+  return { accountId: mailbox.accountId, mailboxIds: ids, messages }
+}
+
+export function mailboxErase(
+  accountId: number,
+  target: 'trash' | 'junk',
+): { mailboxId: number; messages: number } {
+  const data = current()
+  const mailbox = data.mailboxes.find(
+    (entry) => entry.accountId === accountId && entry.role === target,
+  )
+  if (mailbox === undefined) {
+    throw new Error(
+      target === 'junk' ? 'This account has no Junk mailbox.' : 'This account has no Bin.',
+    )
+  }
+
+  const ids = data.byMailbox.get(mailbox.id) ?? []
+  for (const id of ids) data.messages.delete(id)
+  data.byMailbox.set(mailbox.id, [])
+  recount(data, [mailbox.id])
+
+  return { mailboxId: mailbox.id, messages: ids.length }
+}
+
+/** Favourites in order. Copies, for the reason `mailboxesTree` gives. */
+export function favouritesList(): FavouriteRow[] {
+  return current().favourites.map((entry) => ({ ...entry }))
+}
+
+/** `folders::move_favourite`: in front of `before`, or at the end. */
+export function favouriteMove(favouriteId: number, before: number | null): void {
+  const data = current()
+  const moving = data.favourites.find((entry) => entry.id === favouriteId)
+  if (moving === undefined) throw new Error('That mailbox no longer exists.')
+  if (before === favouriteId) return
+
+  const rest = data.favourites.filter((entry) => entry.id !== favouriteId)
+  const at = before === null ? rest.length : rest.findIndex((entry) => entry.id === before)
+  if (at < 0) throw new Error('That mailbox no longer exists.')
+
+  rest.splice(at, 0, moving)
+  data.favourites = rest
+}
+
+/** Returns the account, for the event. */
+export function mailboxSetFavourite(
+  mailboxId: number,
+  favourite: boolean,
+  before: number | null = null,
+): number {
+  const data = current()
+  const mailbox = folderOrThrow(mailboxId)
+
+  if (!favourite) {
+    data.favourites = data.favourites.filter((entry) => entry.mailboxId !== mailboxId)
+    return mailbox.accountId
+  }
+
+  let entry = data.favourites.find((each) => each.mailboxId === mailboxId)
+  if (entry === undefined) {
+    entry = {
+      id: Math.max(0, ...data.favourites.map((each) => each.id)) + 1,
+      builtin: null,
+      mailboxId,
+    }
+    data.favourites.push(entry)
+  }
+  if (before !== null) favouriteMove(entry.id, before)
+
+  return mailbox.accountId
+}
+
+/** `folders::CHOOSABLE_ROLES`. */
+const CHOOSABLE: ReadonlySet<string> = new Set(['drafts', 'sent', 'junk', 'trash', 'archive'])
+
+/** `folders::use_as`. Returns the account, for the event. */
+export function mailboxUseAs(mailboxId: number, usage: MailboxUse): number {
+  const data = current()
+  const mailbox = folderOrThrow(mailboxId)
+  const account = data.accounts.find((entry) => entry.id === mailbox.accountId)
+
+  if (isInboxPath(pathOf(mailbox))) {
+    throw new Error('The Inbox can’t be used as another mailbox.')
+  }
+  if (account?.provider === 'gmail' || account?.provider === 'google') {
+    throw new Error('Gmail decides which of its mailboxes are Drafts, Sent, Junk and Bin.')
+  }
+  if (!CHOOSABLE.has(usage)) {
+    throw new Error('A mailbox can only be used as Drafts, Sent, Junk, Bin or Archive.')
+  }
+
+  for (const entry of data.mailboxes) {
+    if (entry.accountId !== mailbox.accountId || entry.id === mailbox.id) continue
+    if (entry.role === usage) {
+      entry.role = null
+      entry.editable = true
+      data.chosen.delete(entry.id)
+    }
+  }
+
+  mailbox.role = usage
+  mailbox.editable = false
+  data.chosen.add(mailbox.id)
+  return mailbox.accountId
+}
+
+/** Rebuild. The browser's mail is generated, so there is nothing to read again. */
+export function mailboxRebuild(mailboxId: number): {
+  accountId: number
+  mailboxId: number
+  messages: number
+} {
+  const data = current()
+  const mailbox = folderOrThrow(mailboxId)
+  return {
+    accountId: mailbox.accountId,
+    mailboxId,
+    messages: (data.byMailbox.get(mailboxId) ?? []).length,
+  }
+}
+
 /** Counts as the sidebar reads them, after a mutation. */
 export function mailboxCounts(
   mailboxIds: number[],
@@ -660,7 +1068,7 @@ export function providersList(): ProviderInfo[] {
       needsManualSetup: false,
       setupNote: 'Sign in happens in your browser. Halcyon never sees your Google password.',
       setupUrl: null,
-      needsOauthClient: !oauthClients.has('google'),
+      needsOauthClient: !oauthClients.has('google') && !builtinClient('google'),
       requiresClientSecret: true,
     },
     {
@@ -671,7 +1079,7 @@ export function providersList(): ProviderInfo[] {
       setupNote:
         'Sign in happens in your browser. If your work or school account fails, your administrator may have blocked IMAP for third-party apps.',
       setupUrl: null,
-      needsOauthClient: !oauthClients.has('microsoft'),
+      needsOauthClient: !oauthClients.has('microsoft') && !builtinClient('microsoft'),
       requiresClientSecret: false,
     },
     {
@@ -774,13 +1182,32 @@ export function accountAdd(): AddedAccount {
   throw new Error(NO_NETWORK)
 }
 
+/**
+ * `?account-colours=1` gives the seeded accounts a colour each.
+ *
+ * The same device as `?first-run=1` below, and for the same reason: a browser page holds the
+ * overlay in module memory, so Settings at `/?settings=1` and the mailbox at `/` are two page
+ * loads that share nothing. A colour picked in one is gone by the time the other renders, and
+ * without this there is no way for a test — or for anyone looking at the app in a browser — to
+ * see a coloured sidebar at all.
+ *
+ * The seeds stay `null` rather than being coloured outright, because a freshly added account
+ * has no colour in the real database and the committed visual baselines are of that state.
+ */
+const SEEDED_COLOURS = ['purple', 'green', 'orange']
+
+function seededColour(index: number): string | null {
+  if (!new URLSearchParams(window.location.search).has('account-colours')) return null
+  return SEEDED_COLOURS[index % SEEDED_COLOURS.length] ?? null
+}
+
 function overlayFor(id: number, fallbackName: string, index: number): AccountOverlay {
   const existing = overlays.get(id)
   if (existing) return existing
 
   const created: AccountOverlay = {
     displayName: fallbackName,
-    color: null,
+    color: seededColour(index),
     sortOrder: index,
     syncEnabled: true,
   }
@@ -885,14 +1312,41 @@ export function accountRemove(id: number): void {
   overlays.delete(id)
 }
 
+/**
+ * Whether this page is standing in for a build that carries its own client for `provider`.
+ *
+ * By default the browser store is a build with **nothing compiled in** — a build from public
+ * source, which is what docs/05 §9 requires such a build to be — so the Playwright suite
+ * exercises the bring-your-own path that such a build takes.
+ *
+ * `?builtin-clients=google,microsoft` makes it the other kind: the developer's own build, where
+ * `src-tauri/oauth/clients.env` supplied a client. The same device as `?first-run=1` and
+ * `?account-colours=1`. Without it, no browser test could ever render the state that a user of
+ * a real build is actually in — which is how a note reading "Halcyon ships without one" could
+ * have gone on appearing in a build that shipped with one.
+ */
+function builtinClient(provider: string): boolean {
+  const listed = new URLSearchParams(window.location.search).get('builtin-clients')
+  if (listed === null) return false
+  return listed.split(',').some((entry) => entry.trim() === provider)
+}
+
 export function oauthClientGet(provider: string): OAuthClientStatus {
   const clientId = oauthClients.get(provider)
+  const builtin = builtinClient(provider)
+  const source = clientId !== undefined ? 'custom' : builtin ? 'builtin' : null
 
   return {
     provider,
-    configured: clientId !== undefined,
+    configured: source !== null,
+    source,
+    builtin,
     clientId: clientId ?? null,
     hasSecret: false,
+    // The browser store never keeps a secret — `oauthClientSet` here takes only the id — so a
+    // Google client entered in a browser is one the real core would refuse to use. The built-in
+    // one always has its secret: the build refuses to carry half a Google client.
+    missingSecret: source === 'custom' && provider === 'google',
   }
 }
 

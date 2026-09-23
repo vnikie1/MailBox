@@ -12,17 +12,21 @@ import {
   composeReply,
   composeSend,
   composeBlank,
+  composeDescribeFiles,
   composeSizeLimit,
   onCloseRequested,
+  onFileDrop,
+  reasonFor,
 } from '@/lib/ipc'
 import { useAppearanceSync } from '@/app/useAppearanceSync'
-import { Button, IconButton, Sheet, TextField, type Token } from '@/ui'
+import { Button, IconButton, Select, Sheet, TextField, type Token } from '@/ui'
 
 import { formatFileSize as formatSize } from '@/lib/date'
 
 import type { OutgoingMessage } from '@/lib/generated/OutgoingMessage'
 
 import { looksLikeAddress } from './address'
+import { cannotAttach } from './attachments'
 import { Editor } from './Editor'
 import { RecipientField } from './RecipientField'
 import { useAutosave } from './useAutosave'
@@ -144,6 +148,65 @@ export function ComposeWindow() {
     () => attachments.reduce((sum, file) => sum + file.size, 0),
     [attachments],
   )
+
+  const [dropping, setDropping] = useState(false)
+
+  /**
+   * Adds files to the message — from the picker or from a drop, which must behave identically.
+   *
+   * Appended rather than replaced: attaching twice is how people add a file they forgot, and
+   * replacing would silently drop the first set. And de-duplicated by path, because dropping a
+   * file that is already attached is an easy thing to do and two chips for one file would send
+   * it twice.
+   */
+  const addAttachments = useCallback((files: PickedFile[]) => {
+    setAttachments((current) => {
+      const seen = new Set(current.map((file) => file.path))
+      return [...current, ...files.filter((file) => !seen.has(file.path))]
+    })
+  }, [])
+
+  /**
+   * Files dragged in from Explorer, as Mail allows (asked for on 2026-09-17; docs/01 §6 specifies
+   * only that attachments show as chips).
+   *
+   * The drop arrives as paths from Tauri's native handler — see `onFileDrop` — so it goes
+   * through the same description the picker's choices do, and the chips it produces are
+   * indistinguishable from picked ones. A folder cannot be attached, and says so; quietly
+   * leaving it out would read as the drop not having worked.
+   */
+  useEffect(() => {
+    let cancelled = false
+    let unlisten: (() => void) | undefined
+
+    void onFileDrop((event) => {
+      if (event.type === 'hover') {
+        setDropping(true)
+        return
+      }
+
+      setDropping(false)
+      if (event.type !== 'drop' || event.paths.length === 0) return
+
+      composeDescribeFiles(event.paths)
+        .then(({ files, skipped }) => {
+          if (cancelled) return
+          addAttachments(files)
+          if (skipped.length > 0) setProblem(cannotAttach(skipped))
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled) setProblem(reasonFor(cause))
+        })
+    }).then((off) => {
+      if (cancelled) off()
+      else unlisten = off
+    })
+
+    return () => {
+      cancelled = true
+      unlisten?.()
+    }
+  }, [addAttachments])
 
   // The limit is the core's to decide, so the warning and the format agree with whatever the
   // builder actually enforces.
@@ -387,19 +450,20 @@ export function ComposeWindow() {
 
   return (
     <div className={styles.window} onKeyDown={onKeyDown}>
+      {dropping && (
+        // A pointer affordance, and only that: the drop is announced by the chip it produces.
+        <div className={styles.dropTarget} aria-hidden="true">
+          <Paperclip className={styles.dropIcon} strokeWidth={1.5} />
+          <span className={styles.dropLabel}>Drop to attach</span>
+        </div>
+      )}
+
       <header className={styles.toolbar} data-tauri-drag-region>
         <IconButton
           icon={Paperclip}
           label="Attach Files"
           onClick={() => {
-            void composePickFiles().then((picked) => {
-              // Appended rather than replaced: attaching twice is how people add a file they
-              // forgot, and replacing would silently drop the first set.
-              setAttachments((current) => {
-                const seen = new Set(current.map((file) => file.path))
-                return [...current, ...picked.filter((file) => !seen.has(file.path))]
-              })
-            })
+            void composePickFiles().then(addAttachments)
           }}
         />
         <span className={styles.spacer} />
@@ -455,20 +519,24 @@ export function ComposeWindow() {
         {accounts.length > 1 && (
           <div className={styles.subjectRow}>
             <span className={styles.subjectLabel}>From:</span>
-            <select
+            {/* The shared popup button, not a `<select>` of its own.
+
+                It was one, styled `background: none` with the light label colour. Windows draws
+                the list itself and takes its surface from the control, so in the dark theme the
+                list opened white with white text: every account unreadable except the one under
+                the pointer, which Windows paints with its own highlight. `ui/Select` had already
+                been fixed for exactly that; this control never used it. */}
+            <Select
+              label="Send from"
+              hideLabel
               className={styles.from}
-              aria-label="Send from"
-              value={accountId ?? ''}
-              onChange={(event) => {
-                setAccountId(Number(event.target.value))
-              }}
-            >
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.displayName} — {account.email}
-                </option>
-              ))}
-            </select>
+              options={accounts.map((account) => ({
+                value: account.id,
+                label: `${account.displayName} — ${account.email}`,
+              }))}
+              value={accountId}
+              onValueChange={setAccountId}
+            />
           </div>
         )}
 

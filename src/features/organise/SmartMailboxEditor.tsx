@@ -105,6 +105,7 @@ export function SmartMailboxEditor({ open, onClose }: SmartMailboxEditorProps) {
         onOpenChange={(next) => {
           if (!next) setDraft(null)
         }}
+        className={styles.sheet}
         title={draft.id === null ? 'New Smart Mailbox' : 'Edit Smart Mailbox'}
         footer={
           <>

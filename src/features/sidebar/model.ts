@@ -13,6 +13,8 @@ import {
 } from 'lucide-react'
 
 import type { AccountRow } from '@/lib/generated/AccountRow'
+import type { BuiltinFavourite } from '@/lib/generated/BuiltinFavourite'
+import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 import type { FlagName } from '@/lib/generated/FlagName'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
 import type { Predicate } from '@/lib/generated/Predicate'
@@ -61,6 +63,20 @@ export interface SidebarNode {
    */
   flagColor?: string
   /**
+   * The colour of the account this row belongs to, when the user has pinned one.
+   *
+   * Separate from `flagColor` although both end up tinting the same icon, because they are
+   * different questions with different answers: a flag colour says what the row *is*, and
+   * an account colour says who it *belongs to*. Collapsing them into one field would make
+   * a row under Flagged and a row under an account indistinguishable to the CSS, and the
+   * two have to lose to selection in the same way but for different reasons.
+   *
+   * Set on the rows where telling accounts apart is the point: every mailbox inside an
+   * account's own section, and the per-account children of the unified rows, which are
+   * labelled by account name and were otherwise seven identical grey inboxes.
+   */
+  accountColor?: string
+  /**
    * Set on rows that are a saved search rather than a folder: smart mailboxes, Flagged, and
    * each flag colour under it. The list queries by this instead of by mailbox id.
    *
@@ -68,6 +84,12 @@ export interface SidebarNode {
    * same question and no rule about which wins.
    */
   predicate?: Predicate
+  /**
+   * The Favourites entry this row is, on the rows of that section, once the store's order has
+   * been read. What a drag or Alt+Up and Alt+Down report to `favourite_move`; a row without one
+   * does not move.
+   */
+  favouriteId?: number
   unreadCount: number
   children: SidebarNode[]
   depth: number
@@ -129,6 +151,9 @@ function unifiedNode(
         icon: iconFor(role),
         mailboxIds: [mailbox.id],
         accountId: mailbox.accountId,
+        // Spread rather than set to `undefined`: with `exactOptionalPropertyTypes` an
+        // explicit undefined is not an absent key, and the row branches on absence.
+        ...(account?.color == null ? {} : { accountColor: account.color }),
         unreadCount: mailbox.unreadCount,
         children: [],
         depth: 1,
@@ -224,6 +249,161 @@ function flaggedNode(flagNames: FlagName[]): SidebarNode {
   }
 }
 
+/** The roles every account has one of, whose names say nothing about which account. */
+const SHARED_ROLES = new Set(['inbox', 'drafts', 'sent', 'junk', 'trash', 'archive', 'all'])
+
+/** The rows every sidebar's Favourites starts with, in the order a new store has them. */
+const BUILTIN_ORDER: BuiltinFavourite[] = ['allInboxes', 'vips', 'flagged', 'allDrafts', 'allSent']
+
+/**
+ * Favourites in the order to draw them.
+ *
+ * The store's order once it has been read. Before that — the first frame, or a store too old to
+ * have one — the order a new store starts with, with the mailboxes added after the built-in rows.
+ * Those entries carry an id of 0, which is how the sidebar knows not to offer a drag it could
+ * not report.
+ */
+function orderedFavourites(mailboxes: MailboxRow[], favourites: FavouriteRow[]): FavouriteRow[] {
+  if (favourites.length > 0) return favourites
+
+  const added = mailboxes
+    .filter((mailbox) => mailbox.favouriteOrder !== null)
+    .sort((a, b) => (a.favouriteOrder ?? 0) - (b.favouriteOrder ?? 0))
+    .map((mailbox) => ({ id: 0, builtin: null, mailboxId: mailbox.id }))
+
+  return [...BUILTIN_ORDER.map((builtin) => ({ id: 0, builtin, mailboxId: null })), ...added]
+}
+
+/**
+ * Favourites: the rows every sidebar starts with and the mailboxes the user added, in the order
+ * the user left them. docs/01 §3 — "reorderable by drag".
+ *
+ * A mailbox is labelled with its account where the name alone would not say which mailbox it is.
+ * Every account has an Inbox, so an account's Inbox is always "Inbox – Google"; a folder the user
+ * made is just its name, unless two favourites share it.
+ */
+function favouritesNodes(
+  accounts: AccountRow[],
+  mailboxes: MailboxRow[],
+  flagNames: FlagName[],
+  vips: Vip[],
+  favourites: FavouriteRow[],
+): SidebarNode[] {
+  const order = orderedFavourites(mailboxes, favourites)
+  const chosen = order
+    .map((entry) => mailboxes.find((mailbox) => mailbox.id === entry.mailboxId))
+    .filter((mailbox) => mailbox !== undefined)
+
+  const builtin = (key: BuiltinFavourite): SidebarNode | null => {
+    switch (key) {
+      case 'allInboxes':
+        return unifiedNode(mailboxes, accounts, 'all-inboxes', 'All Inboxes', 'inbox')
+      case 'vips':
+        return vipNode(vips)
+      case 'flagged':
+        return flaggedNode(flagNames)
+      case 'allDrafts':
+        return unifiedNode(mailboxes, accounts, 'all-drafts', 'All Drafts', 'drafts')
+      case 'allSent':
+        return unifiedNode(mailboxes, accounts, 'all-sent', 'All Sent', 'sent')
+    }
+  }
+
+  const added = (mailbox: MailboxRow): SidebarNode => {
+    const account = accounts.find((entry) => entry.id === mailbox.accountId)
+    const ambiguous =
+      (mailbox.role !== null && SHARED_ROLES.has(mailbox.role)) ||
+      chosen.some((other) => other.id !== mailbox.id && other.displayName === mailbox.displayName)
+
+    return {
+      id: `favourite-${String(mailbox.id)}`,
+      label:
+        ambiguous && account !== undefined
+          ? `${mailbox.displayName} – ${account.displayName}`
+          : mailbox.displayName,
+      icon: iconFor(mailbox.role),
+      mailboxIds: [mailbox.id],
+      accountId: mailbox.accountId,
+      ...(account?.color == null ? {} : { accountColor: account.color }),
+      unreadCount: mailbox.unreadCount,
+      children: [],
+      depth: 0,
+    }
+  }
+
+  return order.flatMap((entry) => {
+    let node: SidebarNode | null = null
+
+    if (entry.builtin !== null) {
+      node = builtin(entry.builtin)
+    } else {
+      const mailbox = mailboxes.find((each) => each.id === entry.mailboxId)
+      // A favourite whose mailbox the tree has not caught up with yet.
+      if (mailbox !== undefined) node = added(mailbox)
+    }
+
+    // Spread rather than set to `undefined`, for `exactOptionalPropertyTypes`.
+    return node === null ? [] : [{ ...node, ...(entry.id > 0 ? { favouriteId: entry.id } : {}) }]
+  })
+}
+
+/**
+ * One account's mailboxes, as a tree.
+ *
+ * The folders the account files into come first, in Mail's order and at the top whatever their
+ * path, because that is where Mail puts them; their own subfolders nest under them. Everything
+ * else nests under the mailbox it is inside (`MailboxRow.parentId`), alphabetically at each level
+ * — the one place in the sidebar where alphabetical is right, because the user made these and
+ * there is no other order to respect. A mailbox whose parent is not shown — Gmail's All Mail —
+ * sits at the top.
+ */
+function accountNodes(account: AccountRow, owned: MailboxRow[]): SidebarNode[] {
+  const shown = owned.filter(
+    (mailbox) => mailbox.role === null || ACCOUNT_ROLE_ORDER.includes(mailbox.role),
+  )
+  const shownIds = new Set(shown.map((mailbox) => mailbox.id))
+  const alphabetical = (a: MailboxRow, b: MailboxRow) => a.displayName.localeCompare(b.displayName)
+
+  const roles = ACCOUNT_ROLE_ORDER.map((role) =>
+    shown.find((mailbox) => mailbox.role === role),
+  ).filter((mailbox) => mailbox !== undefined)
+  const roots = shown
+    .filter(
+      (mailbox) =>
+        mailbox.role === null && (mailbox.parentId === null || !shownIds.has(mailbox.parentId)),
+    )
+    .sort(alphabetical)
+
+  // Guards against a tree that loops, which paths cannot make but a bad row could.
+  const placed = new Set<number>()
+
+  const node = (mailbox: MailboxRow, depth: number): SidebarNode => {
+    placed.add(mailbox.id)
+
+    const children = shown
+      .filter(
+        (child) => child.role === null && child.parentId === mailbox.id && !placed.has(child.id),
+      )
+      .sort(alphabetical)
+
+    return {
+      // Derived from the mailbox id, which is what lets the shell open on a specific account's
+      // inbox rather than on the unified row above it.
+      id: `mailbox-${String(mailbox.id)}`,
+      label: mailbox.displayName,
+      icon: iconFor(mailbox.role),
+      mailboxIds: [mailbox.id],
+      accountId: mailbox.accountId,
+      ...(account.color == null ? {} : { accountColor: account.color }),
+      unreadCount: mailbox.unreadCount,
+      depth,
+      children: children.map((child) => node(child, depth + 1)),
+    }
+  }
+
+  return [...roles, ...roots].map((mailbox) => node(mailbox, 0))
+}
+
 /**
  * The store payload for selecting a row, or `null` when the row is not selectable.
  *
@@ -251,53 +431,22 @@ export function buildSidebar(
   smart: SmartMailbox[] = [],
   flagNames: FlagName[] = [],
   vips: Vip[] = [],
+  favourites: FavouriteRow[] = [],
 ): SidebarSection[] {
-  const vip = vipNode(vips)
-
-  const favourites: SidebarSection = {
+  const favouritesSection: SidebarSection = {
     id: 'favourites',
     title: 'Favourites',
-    nodes: [
-      unifiedNode(mailboxes, accounts, 'all-inboxes', 'All Inboxes', 'inbox'),
-      ...(vip === null ? [] : [vip]),
-      flaggedNode(flagNames),
-      unifiedNode(mailboxes, accounts, 'all-drafts', 'All Drafts', 'drafts'),
-      unifiedNode(mailboxes, accounts, 'all-sent', 'All Sent', 'sent'),
-    ],
+    nodes: favouritesNodes(accounts, mailboxes, flagNames, vips, favourites),
   }
 
-  const accountSections: SidebarSection[] = accounts.map((account) => {
-    const owned = mailboxes.filter((mailbox) => mailbox.accountId === account.id)
-
-    const ordered = [
-      ...ACCOUNT_ROLE_ORDER.map((role) => owned.find((mailbox) => mailbox.role === role)).filter(
-        (mailbox) => mailbox !== undefined,
-      ),
-      // Custom folders below the standard set, alphabetically — the one place in the
-      // sidebar where alphabetical is right, because the user made these and there is no
-      // other order to respect.
-      ...owned
-        .filter((mailbox) => mailbox.role === null)
-        .sort((a, b) => a.displayName.localeCompare(b.displayName)),
-    ]
-
-    return {
-      id: `account-${String(account.id)}`,
-      title: account.displayName,
-      // The node id is derived from the mailbox id, which is what lets the shell open on a
-      // specific account's inbox rather than on the unified row above it.
-      nodes: ordered.map((mailbox) => ({
-        id: `mailbox-${String(mailbox.id)}`,
-        label: mailbox.displayName,
-        icon: iconFor(mailbox.role),
-        mailboxIds: [mailbox.id],
-        accountId: mailbox.accountId,
-        unreadCount: mailbox.unreadCount,
-        children: [],
-        depth: 0,
-      })),
-    }
-  })
+  const accountSections: SidebarSection[] = accounts.map((account) => ({
+    id: `account-${String(account.id)}`,
+    title: account.displayName,
+    nodes: accountNodes(
+      account,
+      mailboxes.filter((mailbox) => mailbox.accountId === account.id),
+    ),
+  }))
 
   const smartSection: SidebarSection = {
     id: 'smart',
@@ -317,7 +466,21 @@ export function buildSidebar(
     })),
   }
 
-  return [favourites, smartSection, ...accountSections]
+  return [favouritesSection, smartSection, ...accountSections]
+}
+
+/**
+ * Every row in the tree, collapsed or not, children included.
+ *
+ * For finding a row by id. Looking only at `section.nodes` finds the top level and nothing
+ * else — which is how right-clicking an account under All Inboxes, the very row Mail's own
+ * menu is shown on, opened no menu at all.
+ */
+export function allNodes(sections: SidebarSection[]): SidebarNode[] {
+  const walk = (nodes: SidebarNode[]): SidebarNode[] =>
+    nodes.flatMap((node) => [node, ...walk(node.children)])
+
+  return walk(sections.flatMap((section) => section.nodes))
 }
 
 /** Flattens the tree to the rows actually on screen, honouring what is collapsed. */

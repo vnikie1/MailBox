@@ -11,8 +11,8 @@
 use rusqlite::{Connection, OptionalExtension, Row};
 
 use super::model::{
-    AccountRow, AttachmentRow, Cursor, ListQuery, MailboxCounts, MailboxRow, MessageFull,
-    MessageRow, Page, SearchQuery,
+    AccountRow, AttachmentRow, BuiltinFavourite, Cursor, FavouriteRow, ListQuery, MailboxCounts,
+    MailboxRow, MessageFull, MessageRow, Page, SearchQuery,
 };
 use super::DbError;
 
@@ -29,7 +29,7 @@ fn placeholders(count: usize, start: usize) -> String {
 
 pub fn accounts_list(conn: &Connection) -> Result<Vec<AccountRow>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT id, display_name, email, provider
+        "SELECT id, display_name, email, provider, color
            FROM account
           ORDER BY sort_order, id",
     )?;
@@ -41,6 +41,7 @@ pub fn accounts_list(conn: &Connection) -> Result<Vec<AccountRow>, DbError> {
                 display_name: row.get(1)?,
                 email: row.get(2)?,
                 provider: row.get(3)?,
+                color: row.get(4)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -48,9 +49,9 @@ pub fn accounts_list(conn: &Connection) -> Result<Vec<AccountRow>, DbError> {
     Ok(rows)
 }
 
-/// Every mailbox, flat, in display order. The tree shape is a view concern — the sidebar
-/// already builds it (see `src/features/sidebar/model.ts`), and it builds rows the database
-/// has no notion of, such as All Inboxes.
+/// Every mailbox, flat, in display order. The sidebar builds the tree from `parent_id` (see
+/// `src/features/sidebar/model.ts`), and it builds rows the database has no notion of, such as
+/// All Inboxes.
 ///
 /// Index: `ix_mailbox_account`.
 pub fn mailboxes_tree(
@@ -58,38 +59,137 @@ pub fn mailboxes_tree(
     account_id: Option<i64>,
 ) -> Result<Vec<MailboxRow>, DbError> {
     let map = |row: &Row<'_>| {
-        Ok(MailboxRow {
-            id: row.get(0)?,
-            account_id: row.get(1)?,
-            display_name: row.get(2)?,
-            parent_id: row.get(3)?,
-            role: row.get(4)?,
-            unread_count: row.get(5)?,
-            total_count: row.get(6)?,
-        })
+        let role: Option<String> = row.get(3)?;
+        let path: String = row.get(8)?;
+        let delimiter: Option<String> = row.get(7)?;
+
+        Ok((
+            MailboxRow {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                display_name: row.get(2)?,
+                parent_id: None,
+                editable: crate::sync::folders::editable(role.as_deref(), &path),
+                can_contain: crate::sync::folders::can_contain(&path, delimiter.as_deref()),
+                role,
+                unread_count: row.get(4)?,
+                total_count: row.get(5)?,
+                favourite_order: row.get(6)?,
+                role_chosen: row.get(9)?,
+                delimiter,
+                descendants: 0,
+            },
+            path,
+        ))
     };
 
-    const COLUMNS: &str =
-        "id, account_id, display_name, parent_id, role, unread_count, total_count";
+    // The path is read to decide `editable`, `parent_id` and `descendants`, and is not returned.
+    // The window has no use for the server's spelling of a name, and every command it sends
+    // names a mailbox by id.
+    const COLUMNS: &str = "mailbox.id, mailbox.account_id, mailbox.display_name, mailbox.role, \
+         mailbox.unread_count, mailbox.total_count, favourite.position, mailbox.delimiter, \
+         mailbox.remote_path, chosen.mailbox_id IS NOT NULL";
+    const FROM: &str = "mailbox \
+         LEFT JOIN favourite ON favourite.mailbox_id = mailbox.id \
+         LEFT JOIN mailbox_role AS chosen ON chosen.mailbox_id = mailbox.id";
 
-    let rows = match account_id {
+    let mut rows = match account_id {
         Some(id) => {
             let sql = format!(
-                "SELECT {COLUMNS} FROM mailbox WHERE account_id = ?1 ORDER BY sort_order, id"
+                "SELECT {COLUMNS} FROM {FROM} WHERE mailbox.account_id = ?1
+                 ORDER BY mailbox.sort_order, mailbox.id"
             );
             conn.prepare(&sql)?
                 .query_map([id], map)?
                 .collect::<Result<Vec<_>, _>>()?
         }
         None => {
-            let sql = format!("SELECT {COLUMNS} FROM mailbox ORDER BY account_id, sort_order, id");
+            let sql = format!(
+                "SELECT {COLUMNS} FROM {FROM}
+                 ORDER BY mailbox.account_id, mailbox.sort_order, mailbox.id"
+            );
             conn.prepare(&sql)?
                 .query_map([], map)?
                 .collect::<Result<Vec<_>, _>>()?
         }
     };
 
-    Ok(rows)
+    // Worked out here rather than in SQL: "inside" depends on each mailbox's separator, which is
+    // a column, and on a prefix test a LIKE would get wrong for any name containing `%` or `_`.
+    // Quadratic in the number of mailboxes, which is a few hundred at the very most.
+    let structure: Vec<(Option<i64>, i64)> = rows
+        .iter()
+        .map(|(mailbox, path)| {
+            let separator = mailbox.delimiter.as_deref();
+            let same_account = rows.iter().filter(|(other, _)| {
+                other.id != mailbox.id && other.account_id == mailbox.account_id
+            });
+
+            let descendants = same_account
+                .clone()
+                .filter(|(_, other_path)| crate::sync::ops::within(other_path, path, separator))
+                .count() as i64;
+
+            // The nearest mailbox this one is inside — the longest path that contains it, since
+            // a container's path is always a prefix of its contents'. A missing level between
+            // the two (a `\Noselect` folder, which is never stored) is skipped rather than
+            // leaving the mailbox at the top. Never the Inbox: see `MailboxRow::parent_id`.
+            let parent = same_account
+                .filter(|(_, other_path)| {
+                    !other_path.eq_ignore_ascii_case("INBOX")
+                        && crate::sync::ops::within(path, other_path, separator)
+                })
+                .max_by_key(|(_, other_path)| other_path.len())
+                .map(|(other, _)| other.id);
+
+            (parent, descendants)
+        })
+        .collect();
+
+    for ((mailbox, _), (parent, descendants)) in rows.iter_mut().zip(structure) {
+        mailbox.parent_id = parent;
+        mailbox.descendants = descendants;
+    }
+
+    Ok(rows.into_iter().map(|(mailbox, _)| mailbox).collect())
+}
+
+/// Favourites, in the order the sidebar shows them.
+///
+/// Every entry, including a built-in row the window may choose not to draw — VIPs, when there
+/// are none — so that a position means the same thing to the window and to `favourite_move`.
+pub fn favourites_list(conn: &Connection) -> Result<Vec<FavouriteRow>, DbError> {
+    let mut statement =
+        conn.prepare("SELECT id, builtin, mailbox_id FROM favourite ORDER BY position, id")?;
+
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // A built-in key this build does not know is a row from a newer one, and is skipped rather
+    // than shown as nothing.
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, builtin, mailbox_id)| match (builtin, mailbox_id) {
+            (Some(key), None) => BuiltinFavourite::from_key(&key).map(|builtin| FavouriteRow {
+                id,
+                builtin: Some(builtin),
+                mailbox_id: None,
+            }),
+            (None, Some(mailbox_id)) => Some(FavouriteRow {
+                id,
+                builtin: None,
+                mailbox_id: Some(mailbox_id),
+            }),
+            _ => None,
+        })
+        .collect())
 }
 
 const MESSAGE_ROW_COLUMNS: &str = "id, thread_id, mailbox_id, account_id, subject, from_name, \

@@ -1,5 +1,10 @@
 /* The rules list and editor. docs/01 §8. */
 
+/* The draft sheets for a rule and for a smart mailbox — wide enough for a condition row. */
+.sheet {
+  max-width: min(var(--rule-sheet-width), 100%);
+}
+
 .list,
 .form {
   display: flex;

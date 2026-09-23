@@ -616,6 +616,52 @@ mod tests {
         assert!(!account.sync_enabled);
     }
 
+    /// The colour has to survive the seam the *sidebar* reads, not just the one Settings does.
+    ///
+    /// `get` and the settings pane always returned it, and that is why this looked fine for
+    /// weeks: the pane that set the colour was also the only pane that read it back. The
+    /// mailbox window goes through `query::accounts_list`, which did not select the column at
+    /// all — so a colour could be picked, stored, ticked in the UI, and stay invisible to every
+    /// part of the app that draws mail. Asserting on the settings path alone would pass again
+    /// tomorrow with the same bug in place.
+    #[test]
+    fn a_colour_reaches_the_sidebar_and_not_only_the_settings_pane() {
+        let mut conn = store();
+
+        let id = {
+            let tx = conn.transaction().expect("tx");
+            let id = insert(&tx, &sample("ada@example.test")).expect("insert");
+            tx.commit().expect("commit");
+            id
+        };
+
+        let row = |conn: &Connection| {
+            crate::db::query::accounts_list(conn)
+                .expect("accounts_list")
+                .into_iter()
+                .find(|account| account.id == id)
+                .expect("present")
+        };
+
+        assert_eq!(row(&conn).color.as_deref(), Some("blue"), "as inserted");
+
+        {
+            let tx = conn.transaction().expect("tx");
+            update(&tx, id, None, Some(Some("green")), None).expect("update");
+            tx.commit().expect("commit");
+        }
+
+        assert_eq!(row(&conn).color.as_deref(), Some("green"), "after a change");
+
+        {
+            let tx = conn.transaction().expect("tx");
+            update(&tx, id, None, Some(None), None).expect("update");
+            tx.commit().expect("commit");
+        }
+
+        assert_eq!(row(&conn).color, None, "after being cleared");
+    }
+
     /// Small helper so the ordering test reads without three nested blocks.
     trait CommitAndReopen {
         fn commit_and_reopen(self);

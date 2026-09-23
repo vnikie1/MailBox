@@ -242,6 +242,48 @@ pub async fn cancel(db: &Db, id: i64) -> Result<bool, DbError> {
     }
 }
 
+/// Deletes a message that has **failed**, at the user's request. The banner's Delete button.
+///
+/// The failure banner used to offer only Try Again. For a refusal about the message's content —
+/// Gmail blocking an attachment — retrying sends the same bytes to the same answer, so the
+/// banner could never be cleared and the message never be let go of. docs/06 Phase 7 says never
+/// to drop a message *silently*; this is the opposite, an explicit choice with a confirmation in
+/// front of it.
+///
+/// Only `failed`. A message in `holding` is Undo Send's (`cancel`), and one that is queued or
+/// sending may be on the wire already.
+pub async fn discard_failed(db: &Db, id: i64) -> Result<bool, DbError> {
+    let removed = db
+        .write(move |tx| {
+            let path: Option<String> = tx
+                .query_row(
+                    "SELECT eml_path FROM outbox WHERE id = ?1 AND state = 'failed'",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let Some(path) = path else {
+                return Ok(None);
+            };
+
+            tx.execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+            Ok(Some(path))
+        })
+        .await?;
+
+    match removed {
+        Some(path) => {
+            // An empty path is a row whose bytes were never written — see `sweep_unwritten`.
+            if !path.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            }
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
 /// Messages whose hold has elapsed, promoted to `queued`.
 ///
 /// Promotion happens in the same transaction as the read, so two ticks cannot both pick up the
@@ -686,5 +728,100 @@ mod tests_support {
             .expect("attempts");
 
         assert_eq!(attempts, 0);
+    }
+}
+
+#[cfg(test)]
+mod discard_tests {
+    use super::*;
+
+    /// A real store on disk, with one account and an outbox row in each of the given states,
+    /// each pointing at a file that exists.
+    async fn store_with(
+        states: &[&str],
+    ) -> (tempfile::TempDir, Db, Vec<(i64, std::path::PathBuf)>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open(&dir.path().join("halcyon.db")).expect("open");
+
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+                 VALUES (1, 'Test', 'me@halcyon.test', 'other', 'password', 'halcyon:me')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("account");
+
+        let mut rows = Vec::new();
+        for (index, state) in states.iter().enumerate() {
+            let eml = dir.path().join(format!("{index}.eml"));
+            std::fs::write(&eml, b"Subject: x\r\n\r\nbody").expect("eml");
+
+            let state = (*state).to_string();
+            let path = eml.to_string_lossy().to_string();
+            let id = db
+                .write(move |tx| {
+                    tx.execute(
+                        "INSERT INTO outbox (account_id, eml_path, state, send_after, attempts,
+                                             message_id, subject, created_at)
+                         VALUES (1, ?1, ?2, 0, 0, '<m@halcyon.test>', 'Subject', 0)",
+                        params![path, state],
+                    )?;
+                    Ok(tx.last_insert_rowid())
+                })
+                .await
+                .expect("insert");
+
+            rows.push((id, eml));
+        }
+
+        (dir, db, rows)
+    }
+
+    async fn still_there(db: &Db, id: i64) -> bool {
+        db.read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT 1 FROM outbox WHERE id = ?1",
+                    params![id],
+                    |_| Ok(()),
+                )
+                .is_ok())
+        })
+        .await
+        .expect("read")
+    }
+
+    #[tokio::test]
+    async fn a_failed_message_can_be_deleted_and_its_file_goes_with_it() {
+        // The banner's only button was Try Again, and a message Gmail refuses for its content
+        // fails the same way every time — so the banner could never be cleared.
+        let (_dir, db, rows) = store_with(&["failed"]).await;
+        let (id, eml) = &rows[0];
+
+        assert!(discard_failed(&db, *id).await.expect("discard"));
+        assert!(!still_there(&db, *id).await);
+        assert!(!eml.exists(), "the message file is removed with the row");
+    }
+
+    #[tokio::test]
+    async fn only_a_failed_message_can_be_deleted_this_way() {
+        // Holding is Undo Send's; queued, sending and sent may already be on the wire. Deleting
+        // any of those from here would lose a message the user never chose to delete.
+        let (_dir, db, rows) = store_with(&["holding", "queued", "sending", "sent"]).await;
+
+        for (id, eml) in &rows {
+            assert!(!discard_failed(&db, *id).await.expect("discard"));
+            assert!(still_there(&db, *id).await);
+            assert!(eml.exists());
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_a_message_that_is_already_gone_reports_nothing_done() {
+        let (_dir, db, _rows) = store_with(&[]).await;
+        assert!(!discard_failed(&db, 42).await.expect("discard"));
     }
 }

@@ -154,6 +154,83 @@ fn handler_in_tag(tag: &str) -> Option<String> {
     None
 }
 
+/// What a stylesheet may never contain once the renderer has decoded it, and why.
+///
+/// The stylesheet is a separate output from the body HTML — it goes into the frame's `<head>` —
+/// so it needs its own list. The body's list above still forbids `<style` outright, and still
+/// holds: the stylesheet never travels inside the HTML.
+const FORBIDDEN_IN_CSS: &[(&str, &str)] = &[
+    (
+        "://",
+        "an absolute URL in a stylesheet is something to fetch",
+    ),
+    (
+        "url(//",
+        "a protocol-relative URL is fetched as much as an absolute one",
+    ),
+    ("@import", "an import pulls a remote stylesheet"),
+    ("image-set(", "image-set takes a URL as a plain string"),
+    ("cross-fade(", "cross-fade takes images, including by URL"),
+    ("src(", "src() is url() that accepts a variable"),
+    ("expression(", "a CSS expression executes in old renderers"),
+    ("javascript:", "an executable URL scheme"),
+    ("behavior:", "a CSS behaviour binds script"),
+    ("-moz-binding", "an XBL binding binds script"),
+    (
+        "halcyon",
+        "the frame's guard layer is called halcyon-guard, and joining it outranks it",
+    ),
+    (
+        "100vh",
+        "viewport-height sizing feeds the frame's height back into itself",
+    ),
+];
+
+/// A stylesheet as the renderer reads it: escapes decoded, comments gone, case folded.
+///
+/// Written again here rather than borrowed from the filter, so the corpus is not the filter
+/// grading its own homework. It does less than the real decoder — no newline continuations, no
+/// surrogate handling — and only needs to be good enough that an escaped `url(` is seen.
+fn css_as_read(css: &str) -> String {
+    let mut out = String::new();
+    let mut chars = css.chars().peekable();
+
+    while let Some(here) = chars.next() {
+        if here == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            let mut previous = ' ';
+            for next in chars.by_ref() {
+                if previous == '*' && next == '/' {
+                    break;
+                }
+                previous = next;
+            }
+            continue;
+        }
+
+        if here != '\\' {
+            out.push(here);
+            continue;
+        }
+
+        let mut hex = String::new();
+        while hex.len() < 6 && chars.peek().is_some_and(char::is_ascii_hexdigit) {
+            hex.extend(chars.next());
+        }
+
+        if hex.is_empty() {
+            out.extend(chars.next());
+        } else {
+            if chars.peek().is_some_and(|next| next.is_whitespace()) {
+                chars.next();
+            }
+            out.extend(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32));
+        }
+    }
+
+    out.to_lowercase()
+}
+
 /// Renders every payload and returns a description of each one that kept something dangerous.
 fn survivors(load_remote: bool) -> (usize, Vec<String>) {
     let payloads = payloads();
@@ -170,6 +247,25 @@ fn survivors(load_remote: bool) -> (usize, Vec<String>) {
                 failures.push(format!(
                     "  {payload}\n    -> kept {needle:?} ({why})\n    -> rendered: {}",
                     rendered.html
+                ));
+            }
+        }
+
+        // The raw text for a `<`, before decoding: the filter spells one `\3c` on purpose, and
+        // the decoder would turn that back into the very character it replaced.
+        if rendered.css.contains('<') {
+            failures.push(format!(
+                "  {payload}\n    -> the stylesheet kept a raw \"<\", which could close its <style>\n    -> css: {}",
+                rendered.css
+            ));
+        }
+
+        let read = css_as_read(&rendered.css);
+        for (needle, why) in FORBIDDEN_IN_CSS {
+            if read.contains(needle) {
+                failures.push(format!(
+                    "  {payload}\n    -> the stylesheet kept {needle:?} ({why})\n    -> css: {}",
+                    rendered.css
                 ));
             }
         }
@@ -250,5 +346,17 @@ fn the_check_can_actually_fail() {
     assert!(
         FORBIDDEN.iter().any(|(needle, _)| *needle == "<script"),
         "the forbidden list no longer covers script elements"
+    );
+    assert!(
+        css_as_read(r"body{background:u\72 l(https://evil.test/p.gif)}").contains("url(https://"),
+        "an escaped url( was not decoded, so an escaped load would pass the corpus unseen"
+    );
+    assert!(
+        css_as_read(r"@\69mport 'x'").contains("@import"),
+        "an escaped @import was not decoded"
+    );
+    assert!(
+        !css_as_read("a{color:red}/* https://evil.test */").contains("://"),
+        "a URL inside a comment was counted, and a comment loads nothing"
     );
 }

@@ -81,6 +81,30 @@
 <div style="behavior: url(#default#time2)">x</div>
 <style>@font-face { src: url("https://evil.test/x.woff"); }</style>
 
+# --- stylesheets now reach the frame, filtered: nothing in one may load, execute or escape -----
+<style>body { background: url(//evil.test/beacon.png); }</style>
+<style>body { background: u\72 l(https://evil.test/beacon.png); }</style>
+<style>body { background: \75 rl(https://evil.test/beacon.png); }</style>
+<style>body { background: u/**/rl(https://evil.test/beacon.png); }</style>
+<style>body { background-image: image-set("https://evil.test/beacon.png" 1x); }</style>
+<style>body { background-image: -webkit-image-set("https://evil.test/beacon.png" 1x); }</style>
+<style>body { background-image: cross-fade("https://evil.test/a.png", red 50%); }</style>
+<style>body { background-image: src("https://evil.test/beacon.png"); }</style>
+<style>@\69mport "https://evil.test/x.css";</style>
+<style>@IMPORT 'https://evil.test/x.css';</style>
+<style>li { list-style: url(https://evil.test/b.png); }</style>
+<style>a { cursor: url(https://evil.test/c.cur), auto; }</style>
+<style>div { width: expression(alert(1)); }</style>
+<style>div { background: url(javascript:alert(1)); }</style>
+<style>div { -moz-binding: url(https://evil.test/x.xml#x); }</style>
+<style>a { content: "</style><img src=x onerror=alert(1)>"; }</style>
+<style>a { font-family: '<'; }</style><img src=x onerror=alert(1)>
+<style>} @layer halcyon-guard { html { overflow: auto !important } }</style>
+<style>} @layer h\61lcyon-guard { html { height: 100% !important } }</style>
+<style>.halcyon-quote-toggle { display: none }</style>
+<style>.hero { min-height: 100vh; padding: 24px; }</style>
+<style><!-- body { background: url(https://evil.test/beacon.png) } --></style>
+
 # --- meta, base and things that change how the whole document behaves --------------------------
 <meta http-equiv="refresh" content="0;url=https://evil.test/">
 <base href="https://evil.test/">

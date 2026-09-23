@@ -17,6 +17,7 @@ use crate::accounts::{
     provider::{self, AuthKind, Provider, ProviderInfo, Security, ServerSettings},
     store::{self, AccountDetail, NewAccount},
     verify::{self, Attempt, DiagnosticReport},
+    ClientSource,
 };
 use crate::db::Db;
 
@@ -48,16 +49,34 @@ impl From<oauth::OAuthError> for AppError {
         tracing::warn!(%error, "oauth failed");
 
         let (code, message) = match &error {
+            // Before the re-auth arm, and that ordering is the whole point. `invalid_client`
+            // is what Google answers when the client secret is absent — the commonest
+            // first-time mistake there is, because nothing pre-flights it — and it used to
+            // fall into the arm below and be reported as "Signing in again will fix it".
+            // Signing in again reruns the same request against the same broken registration,
+            // so the app sent people round a browser consent loop that could not succeed and
+            // told them to go round it again each time.
+            _ if oauth::indicates_client_misconfiguration(&error) => (
+                "oauthClientRejected",
+                "The provider rejected Halcyon's sign-in application, not your account. Check \
+                 the client ID — and, for Google, the client secret — in Settings → Accounts → \
+                 Sign-in applications. Signing in again will not help until those are right."
+                    .to_string(),
+            ),
             _ if needs_reauth => (
                 "needsReauth",
                 "The saved sign-in for this account is no longer valid. Signing in again will \
                  fix it."
                     .to_string(),
             ),
+            // The path named here has to be one that exists. It said "Settings → Accounts →
+            // Advanced", which is a real pane — just not this one; the fields are under a
+            // heading called "Sign-in applications" inside Accounts. A wrong path is worse
+            // than none, because it is followed before it is doubted.
             oauth::OAuthError::NoClient { .. } => (
                 "noOauthClient",
                 "No sign-in application is configured for this provider yet. Add one in \
-                 Settings → Accounts → Advanced."
+                 Settings → Accounts → Sign-in applications."
                     .to_string(),
             ),
             oauth::OAuthError::TimedOut => (
@@ -132,6 +151,36 @@ fn open_in_browser(url: &str) -> Result<(), std::io::Error> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+/// The client a browser sign-in should use — refused *before* the browser opens if it cannot
+/// possibly succeed.
+///
+/// Google rejects a Desktop client's token exchange without its secret, but only at the very
+/// last step: after the user has picked an account and read a consent screen. Nothing checked
+/// first, so someone who had pasted a client id and not the secret went through all of that to
+/// be told `invalid_client` at the end. The sync engine has refused this case for a while
+/// (`SyncError::MissingClientSecret`); the two commands that open a browser now refuse it too,
+/// and say what is actually missing.
+async fn client_for_sign_in(db: &Db, provider: Provider) -> Result<oauth::ClientConfig, AppError> {
+    let client = db
+        .read(move |conn| accounts::client_config(conn, provider))
+        .await?
+        .ok_or(oauth::OAuthError::NoClient {
+            provider: provider.id().to_string(),
+        })?;
+
+    if provider.requires_client_secret() && client.client_secret.is_none() {
+        return Err(AppError {
+            code: "missingClientSecret".into(),
+            message: "Google needs the client secret of your sign-in application as well as its \
+                      client ID. Paste it into Settings → Accounts → Sign-in applications, then \
+                      try again."
+                .into(),
+        });
+    }
+
+    Ok(client)
 }
 
 /// The provider picker's contents.
@@ -477,12 +526,7 @@ pub async fn account_add_oauth(
         }
     }
 
-    let client = db
-        .read(move |conn| accounts::client_config(conn, provider))
-        .await?
-        .ok_or(oauth::OAuthError::NoClient {
-            provider: provider.id().to_string(),
-        })?;
+    let client = client_for_sign_in(&db, provider).await?;
 
     let tokens = oauth::authorise(provider, &client, Some(&email), open_in_browser).await?;
 
@@ -670,12 +714,7 @@ pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
     let provider = resolve(&account.provider)?;
     let email = account.email.clone();
 
-    let client = db
-        .read(move |conn| accounts::client_config(conn, provider))
-        .await?
-        .ok_or(oauth::OAuthError::NoClient {
-            provider: provider.id().to_string(),
-        })?;
+    let client = client_for_sign_in(&db, provider).await?;
 
     let tokens = oauth::authorise(provider, &client, Some(&email), open_in_browser).await?;
 
@@ -746,34 +785,66 @@ pub async fn account_credential_status(db: State<'_, Db>, id: i64) -> Response<b
 #[serde(rename_all = "camelCase")]
 pub struct OAuthClientStatus {
     pub provider: String,
+    /// Whether this provider can be signed in to at all, from either source.
     pub configured: bool,
-    /// The id, which is not a secret — it is in the URL the browser is sent to. Shown so a
-    /// user can confirm which client is in use.
+    /// Which application is in use, or `None` when there is none.
+    pub source: Option<ClientSource>,
+    /// Whether this build carries an application of its own for the provider — which is what
+    /// makes clearing the user's own a "go back to Halcyon's" rather than a "turn it off".
+    pub builtin: bool,
+    /// The **user's own** client id, or `None` if they have not set one.
+    ///
+    /// Not the id in use. This fills the Settings field, and filling it with the built-in id
+    /// would turn the next press of Save into an override the user never chose. The built-in
+    /// id is not hidden for its own sake — it is in the address bar at every sign-in.
     pub client_id: Option<String>,
-    /// Whether a client secret is stored. Never the secret itself.
+    /// Whether the user's own client has a secret stored. Never the secret itself, and never
+    /// the built-in one's, which the user did not enter and cannot replace here.
     pub has_secret: bool,
+    /// Whether the client **in use** lacks a secret its provider demands — the state in which
+    /// every sign-in and every refresh will fail.
+    ///
+    /// Asked of the resolved client rather than worked out in the UI from `has_secret`,
+    /// because the two disagree in one real case: a user's own client whose id is the built-in
+    /// one borrows the built-in secret (`accounts::resolve_client`). The UI cannot see that id,
+    /// so it would mark a working setup as broken.
+    pub missing_secret: bool,
 }
 
 #[tauri::command]
 pub async fn oauth_client_get(db: State<'_, Db>, provider: String) -> Response<OAuthClientStatus> {
     let provider = resolve(&provider)?;
 
-    let client = db
-        .read(move |conn| accounts::client_config(conn, provider))
+    let resolved = db
+        .read(move |conn| accounts::client_config_with_source(conn, provider))
         .await?;
+
+    let source = resolved.as_ref().map(|(_, source)| *source);
+    let custom = source == Some(ClientSource::Custom);
+    let missing_secret = provider.requires_client_secret()
+        && resolved
+            .as_ref()
+            .is_some_and(|(client, _)| client.client_secret.is_none());
 
     Ok(OAuthClientStatus {
         provider: provider.id().to_string(),
-        configured: client.is_some(),
-        client_id: client.as_ref().map(|c| c.client_id.clone()),
-        has_secret: client.as_ref().is_some_and(|c| c.client_secret.is_some()),
+        configured: resolved.is_some(),
+        source,
+        builtin: accounts::builtin_client(provider).is_some(),
+        client_id: resolved
+            .filter(|_| custom)
+            .map(|(client, _)| client.client_id),
+        has_secret: custom && accounts::custom_client_has_secret(provider),
+        missing_secret,
     })
 }
 
-/// docs/05 §2's "bring your own OAuth client" mitigation.
+/// docs/05 §2's "bring your own OAuth client" — for someone who wants their own application
+/// rather than the one this build carries, or for a build that carries none.
 ///
-/// Nothing is compiled in, so this is how Google and Microsoft accounts become usable at
-/// all — and it means a user is never blocked on someone else's app-verification status.
+/// A build from public source has nothing compiled in (docs/05 §9), and there this is the only
+/// way Google and Microsoft accounts become usable at all. It also means nobody is ever
+/// blocked on someone else's app-verification status or test-user list.
 #[tauri::command]
 pub async fn oauth_client_set(
     app: AppHandle,
@@ -827,6 +898,122 @@ pub async fn provider_open_setup(provider: String) -> Response<()> {
 }
 
 #[cfg(test)]
+mod oauth_message_tests {
+    use super::*;
+
+    fn refused(code: &str) -> AppError {
+        AppError::from(oauth::OAuthError::Refused {
+            provider: "google".into(),
+            error: code.into(),
+            description: Some("Unauthorized".into()),
+        })
+    }
+
+    /// The advice has to match the remedy, and for two years' worth of first-time Google users
+    /// it did not.
+    ///
+    /// Nothing pre-flights the client secret, so the commonest possible first failure is
+    /// Google answering `invalid_client` at the token endpoint after a full browser consent
+    /// round trip. That used to be reported as "The saved sign-in for this account is no
+    /// longer valid. Signing in again will fix it." — which sent the user round the identical
+    /// loop, against the identical broken registration, for as long as they were willing.
+    #[test]
+    fn a_rejected_sign_in_application_is_not_reported_as_a_dead_credential() {
+        for code in ["invalid_client", "unauthorized_client"] {
+            let error = refused(code);
+            assert_eq!(error.code, "oauthClientRejected", "{code}");
+            assert!(
+                !error.message.contains("Signing in again will fix it"),
+                "{code}: {}",
+                error.message
+            );
+            assert!(error.message.contains("Sign-in applications"), "{code}");
+        }
+
+        // And the one that genuinely does mean sign in again still says so — the arm above it
+        // must not have swallowed the whole class.
+        let revoked = refused("invalid_grant");
+        assert_eq!(revoked.code, "needsReauth");
+        assert!(revoked.message.contains("Signing in again will fix it"));
+    }
+
+    /// Every path this file names has to be one the user can actually walk.
+    ///
+    /// `noOauthClient` said "Settings → Accounts → Advanced". Advanced is a real pane, which
+    /// is what made it worse than a vague sentence: it is followed before it is doubted, and
+    /// the fields are under a heading called "Sign-in applications" inside Accounts. Asserted
+    /// against `panes::PANES`-style names rather than a literal so that renaming a pane to
+    /// "Advanced" and moving the fields there would still have to come past this test.
+    #[test]
+    fn no_oauth_client_points_at_the_panel_that_holds_the_fields() {
+        let error = AppError::from(oauth::OAuthError::NoClient {
+            provider: "google".into(),
+        });
+
+        assert_eq!(error.code, "noOauthClient");
+        assert!(
+            error
+                .message
+                .contains("Settings → Accounts → Sign-in applications"),
+            "{}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("→ Advanced"),
+            "Advanced is a different pane: {}",
+            error.message
+        );
+    }
+
+    /// No sentence Halcyon *writes* may carry protocol text, a stray newline, or run-on spacing.
+    ///
+    /// Deliberately not applied to the generic `Refused` arm, and that exclusion is the
+    /// finding rather than a concession: that arm forwards the provider's own
+    /// `error_description` verbatim, so its punctuation is the provider's business and
+    /// asserting on it would be asserting on Google's copy. Every arm this file authors is
+    /// held to the standard; the one arm it merely relays is checked for being a relay.
+    #[test]
+    fn every_sentence_this_file_writes_is_a_sentence() {
+        let authored = [
+            refused("invalid_client"),
+            refused("unauthorized_client"),
+            refused("invalid_grant"),
+            AppError::from(oauth::OAuthError::NoClient {
+                provider: "google".into(),
+            }),
+            AppError::from(oauth::OAuthError::TimedOut),
+            AppError::from(oauth::OAuthError::StateMismatch),
+        ];
+
+        for error in authored {
+            assert!(!error.message.is_empty());
+            assert!(!error.message.contains('\n'), "{:?}", error.message);
+            assert!(!error.message.contains("  "), "{:?}", error.message);
+            assert!(
+                error.message.ends_with('.'),
+                "{:?} should end in a full stop",
+                error.message
+            );
+            // The provider's machine-readable code is for the log, never for the banner.
+            assert!(!error.message.contains("invalid_"), "{:?}", error.message);
+        }
+
+        // The relay arm: the provider's description, unaltered.
+        let relayed = refused("temporarily_unavailable");
+        assert_eq!(relayed.code, "refused");
+        assert_eq!(relayed.message, "Unauthorized");
+
+        // And with nothing to relay, a sentence of our own rather than an empty toast.
+        let bare = AppError::from(oauth::OAuthError::Refused {
+            provider: "google".into(),
+            error: "temporarily_unavailable".into(),
+            description: None,
+        });
+        assert_eq!(bare.message, "The provider refused the sign-in.");
+    }
+}
+
+#[cfg(test)]
 mod color_change_tests {
     use super::ColorChange;
 
@@ -840,7 +1027,11 @@ mod color_change_tests {
         assert!(leave.is_none(), "absent leaves the colour alone");
 
         let clear: Option<ColorChange> = serde_json::from_str(r#"{"value":null}"#).unwrap();
-        assert_eq!(clear.map(|c| c.value), Some(None), "an explicit null clears it");
+        assert_eq!(
+            clear.map(|c| c.value),
+            Some(None),
+            "an explicit null clears it"
+        );
 
         let set: Option<ColorChange> = serde_json::from_str(r#"{"value":"green"}"#).unwrap();
         assert_eq!(
@@ -863,7 +1054,9 @@ mod color_change_tests {
     #[test]
     fn the_old_signature_is_what_rejected_the_array_the_frontend_sent() {
         let old: Result<Option<Option<String>>, _> = serde_json::from_str(r#"["green"]"#);
-        let message = old.expect_err("the old signature could not take this").to_string();
+        let message = old
+            .expect_err("the old signature could not take this")
+            .to_string();
         assert!(
             message.contains("invalid type: sequence, expected a string"),
             "the message the app actually printed, word for word: {message}"

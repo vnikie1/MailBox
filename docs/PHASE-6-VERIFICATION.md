@@ -42,6 +42,59 @@ gets waved through as "probably the xmp thing again". The detector now scans onl
 boundaries, and `the_check_can_actually_fail` asserts both that a live handler is caught and that
 escaped text is not.
 
+### Stylesheets reach the frame now, filtered — 2026-09-22
+
+Until this date every `<style>` element was thrown away, and the corpus's `FORBIDDEN` list says so:
+`<style` may not appear in rendered output, because "a stylesheet can fetch a remote resource and
+hide content". Reported from using the app: a Pi-hole daily report showed its numbers but not its
+bar chart or any of its layout — its chart is a column of empty spans that only a class in a
+`<style>` block gives a size and a colour. Mail styled that way, which is a large share of
+generated mail, rendered as bare text.
+
+The corpus rule still holds for the **body HTML**, which never carries a stylesheet. What changed is
+a second output beside it, `Rendered.css`, which the frame puts in its `<head>`:
+
+- **Taken out by a second ammonia parse** with an allowlist of exactly `style` and no attributes, so
+  the parse that decides what *is* a stylesheet is the same html5ever parse as everything else — a
+  `<style>` inside a comment, a `<textarea>` or a `<script>` is text there and text here.
+- **Filtered by `src-tauri/src/mail/css.rs`**, which is now also the filter for `style` attributes,
+  so the two paths cannot drift. Whole declarations go, never parts: every `url()` that is not an
+  inline image, every function that takes a URL as a plain string (`image-set`, `cross-fade`,
+  `image`, `src`), `@import` in every spelling, what once executed (`expression`, `javascript:`,
+  `behavior`, `-moz-binding`), viewport-height units, colour-scheme queries, and anything naming
+  `halcyon`. Every check runs on the text **with CSS escapes decoded** — `u\72 l(` is `url(` to the
+  renderer — and whatever survives is checked once more as a whole, so the tokeniser's mistakes
+  cost styling and never safety. The output never contains a `<`, so it cannot close its element.
+- **Contained in the frame by cascade layers.** `halcyon-guard` is declared first and every rule in
+  it is `!important`, and among important declarations the first layer wins — so no message rule,
+  important or not, can undo the frame's "size by content, never scroll" rules. The one way round
+  that is to *join* the layer by name, which is why the filter refuses the name.
+
+The inline-style filter gained the same coverage in passing: before this, `image-set("https://…")`
+and escape-spelled `url(` passed `style=` attributes untouched, and only the CSP stopped the load.
+
+**Corpus: 91 payloads**, 22 of them new and all about stylesheets — escaped `url(`, comment-split
+`url(`, `image-set` and friends, escaped and upper-case `@import`, `</style>` inside a string, an
+attempt to write into the guard layer by name and by escape, a `100vh` root, a `<!-- -->`-wrapped
+sheet. The harness checks the new output with **its own escape decoder** rather than the filter's,
+so the corpus is not the filter grading its own homework, and `the_check_can_actually_fail` proves
+that decoder sees an escaped `url(` and an escaped `@import`.
+
+    XSS corpus: 91 payloads, images blocked, 0 survived
+    XSS corpus: 91 payloads, images allowed, 0 survived
+
+**One thing the design rests on, measured rather than assumed:** a frame answers
+`prefers-color-scheme` from the browser's preference, not from anything set on the `<iframe>`.
+`color-scheme: light` on the element was tried and changed nothing — the frame still reported dark.
+So a dark-mode block in an email would switch its text white over the white card, and the filter
+removes colour-scheme queries instead. `tests/e2e/messageStylesheet.spec.ts` pins the fact, so the
+reason for the rule is re-examined if Chromium ever changes it.
+
+**Not closed here:** an absolutely positioned element with a percentage height and no positioned
+ancestor is sized against the frame's initial containing block, which is the frame. Inline styles
+could always do that and still can; the filter has no way to see it without laying the message
+out. It needs a measuring change in `MessageFrame`, not a filtering one.
+
 ---
 
 ## 2. The network trace — PASS, with a control

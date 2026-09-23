@@ -79,9 +79,9 @@ pub enum OAuthError {
 
 /// The client registration this app uses for a provider.
 ///
-/// Both fields come from the user or from configuration; nothing is compiled in. docs/05 §2
-/// recommends a bring-your-own-client option for exactly this, and having no other path
-/// means the app is usable before Google's verification completes.
+/// From one of two places, resolved by `accounts::resolve_client`: an application the user
+/// registered and entered in Settings, which always wins, or one compiled into this build from
+/// the gitignored `src-tauri/oauth/clients.env`. A build from public source has only the first.
 #[derive(Clone)]
 pub struct ClientConfig {
     pub client_id: String,
@@ -294,8 +294,16 @@ async fn exchange(
 
     let mut form = form;
     form.push(("client_id", client.client_id.clone()));
-    if let Some(secret) = &client.client_secret {
-        form.push(("client_secret", secret.expose().to_string()));
+
+    // Only for a provider that wants one. Microsoft registers a desktop app as a *public*
+    // client, and a public client that presents a secret is refused with AADSTS700025 — so a
+    // secret stored for Microsoft, however it got there, would break every sign-in and every
+    // refresh. It used to be sent whenever one existed, and Settings offered a box for it
+    // labelled "(optional)".
+    if provider.requires_client_secret() {
+        if let Some(secret) = &client.client_secret {
+            form.push(("client_secret", secret.expose().to_string()));
+        }
     }
 
     // A token request with no ceiling can hang the sync engine forever behind an account
@@ -466,11 +474,38 @@ pub fn needs_refresh(expires_at: i64) -> bool {
 ///
 /// docs/03 §7: on `invalid_grant`, surface a re-authenticate banner rather than failing
 /// silently. Everything else is transient and worth retrying.
+///
+/// `invalid_grant` **only**, and the narrowing is the point. This used to match
+/// `invalid_client` and `unauthorized_client` as well, which put the three under one message
+/// reading "Signing in again will fix it" — advice that is true of exactly one of them.
+/// `invalid_grant` is the user's stored grant having expired or been revoked, and signing in
+/// again is precisely the cure. The other two are the provider rejecting the *application*:
+/// a wrong client id, or a missing client secret. Signing in again reruns the same rejected
+/// request with the same broken registration, so the app was sending a user who had left out
+/// their Google client secret around a browser consent loop that could never succeed, and
+/// telling them to do it again each time. See `indicates_client_misconfiguration`.
 pub fn requires_reauthentication(error: &OAuthError) -> bool {
     matches!(
         error,
+        OAuthError::Refused { error, .. } if error == "invalid_grant"
+    )
+}
+
+/// Whether the provider rejected the *sign-in application* rather than the user's grant.
+///
+/// `invalid_client` is what Google answers when the client secret is absent or wrong —
+/// which, since `provider::requires_client_secret` is advisory and nothing pre-flights it,
+/// is the single likeliest first-time failure there is. `unauthorized_client` is the same
+/// class: the registration is not allowed to make this request.
+///
+/// Split out from `requires_reauthentication` rather than folded into the message, because
+/// the two need different *sentences*: one says press this button again, the other says stop
+/// pressing it and go and fix your registration.
+pub fn indicates_client_misconfiguration(error: &OAuthError) -> bool {
+    matches!(
+        error,
         OAuthError::Refused { error, .. }
-            if error == "invalid_grant" || error == "invalid_client" || error == "unauthorized_client"
+            if error == "invalid_client" || error == "unauthorized_client"
     )
 }
 
@@ -529,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_grant_means_sign_in_again_and_a_network_blip_does_not() {
+    fn invalid_grant_means_sign_in_again_and_a_rejected_client_does_not() {
         let refused = |code: &str| OAuthError::Refused {
             provider: "google".into(),
             error: code.into(),
@@ -537,11 +572,35 @@ mod tests {
         };
 
         assert!(requires_reauthentication(&refused("invalid_grant")));
-        assert!(requires_reauthentication(&refused("invalid_client")));
         assert!(!requires_reauthentication(&refused(
             "temporarily_unavailable"
         )));
         assert!(!requires_reauthentication(&OAuthError::TimedOut));
+
+        // The split this test exists for. `invalid_client` used to answer true here, so a
+        // Google account whose client secret was never pasted in was told "Signing in again
+        // will fix it" — and signing in again reran the identical rejected request. The two
+        // predicates must never both claim the same error.
+        assert!(!requires_reauthentication(&refused("invalid_client")));
+        assert!(indicates_client_misconfiguration(&refused(
+            "invalid_client"
+        )));
+        assert!(indicates_client_misconfiguration(&refused(
+            "unauthorized_client"
+        )));
+
+        assert!(!indicates_client_misconfiguration(&refused(
+            "invalid_grant"
+        )));
+        assert!(!indicates_client_misconfiguration(&OAuthError::TimedOut));
+
+        for code in ["invalid_grant", "invalid_client", "unauthorized_client"] {
+            assert!(
+                !(requires_reauthentication(&refused(code))
+                    && indicates_client_misconfiguration(&refused(code))),
+                "{code} must not match both predicates"
+            );
+        }
     }
 
     #[test]

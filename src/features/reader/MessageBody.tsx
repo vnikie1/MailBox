@@ -150,14 +150,41 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
           is nothing for the user to decide.
 
           It deliberately claims nothing about what the sender learned. The request left this
-          machine and went unanswered; whether it reached them first is not knowable from here,
-          and "nothing was shared" would be a comforting sentence the app cannot stand behind. */}
+          machine and did not come back with a picture; whether it reached them first is not
+          knowable from here, and "nothing was shared" would be a comforting sentence the app
+          cannot stand behind.
+
+          "did not answer" was wrong, though, and is now "did not return them": a server that
+          redirects an image to its home page has answered, and that is the commonest way this
+          banner appears. */}
       {rendered.failedRemote > 0 && (
         <div className={styles.banner} role="status">
           <ImageOff className={styles.bannerIcon} aria-hidden />
           <span className={styles.bannerText}>
             {rendered.failedRemote === 1 ? '1 image' : `${String(rendered.failedRemote)} images`}{' '}
-            could not be loaded. The sender&rsquo;s server did not answer.
+            could not be loaded. The sender&rsquo;s server did not return them.
+          </span>
+
+          {/* A way out, which this banner did not have. Found on an ICICI Bank alert whose
+              images all failed at once: the bank has moved from icicibank.com to icici.bank.in,
+              the old addresses redirect, and for a while the redirect landed on their home page —
+              so an <img> was answered with an HTML document, which is correctly refused. Twenty
+              minutes later the same ten images fetched perfectly.
+
+              Nothing is retried on its own: a request is what tells a sender the message was
+              opened, and an app that retried by itself would keep telling them. This asks.
+
+              Cheap, too. Only the images that failed cost a request; the ones that arrived are
+              in the core's cache and are not fetched again. */}
+          <span className={styles.bannerActions}>
+            <Button
+              variant="bordered"
+              onClick={() => {
+                void refetch()
+              }}
+            >
+              Try Again
+            </Button>
           </span>
         </div>
       )}
@@ -206,6 +233,7 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
 
       <MessageFrame
         html={rendered.html}
+        css={rendered.css}
         fromPlainText={rendered.fromPlainText}
         resetKey={messageId}
       />

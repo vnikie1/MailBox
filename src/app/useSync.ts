@@ -113,6 +113,7 @@ export function useSync(): SyncState {
       onMailboxesChanged(() => {
         void client.invalidateQueries({ queryKey: ['mailboxes'] })
         void client.invalidateQueries({ queryKey: ['accounts'] })
+        void client.invalidateQueries({ queryKey: ['favourites'] })
       }),
     )
 

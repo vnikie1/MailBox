@@ -67,6 +67,12 @@ interface MailState {
   focusedInThread: number | null
 
   selectMailbox: (selection: MailboxSelection) => void
+  /**
+   * The same mailboxes, under another row or another name: the open folder was renamed, or the
+   * favourite it was opened from was removed. Unlike `selectMailbox` this keeps the list's
+   * selection and the open message — nothing the user was looking at has changed.
+   */
+  retargetSelection: (nodeId: string, label: string) => void
   /** Called by the list when the selection or its rows change. */
   setSelectedAccountIds: (ids: number[]) => void
   /** A plain click: replaces the selection and moves the anchor. */
@@ -123,6 +129,12 @@ export const useMailStore = create<MailState>()((set, get) => ({
       anchorMessageId: null,
       focusedInThread: null,
     })
+  },
+
+  retargetSelection: (nodeId, label) => {
+    const { selection } = get()
+    if (selection.nodeId === nodeId && selection.label === label) return
+    set({ selection: { ...selection, nodeId, label } })
   },
 
   setSelectedAccountIds: (ids) => {

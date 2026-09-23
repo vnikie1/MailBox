@@ -130,7 +130,10 @@ test.describe('dragging messages onto a mailbox', () => {
       .first()
       .dragTo(mailboxRow(page, NORTHGATE, 'Travel'))
 
-    await expect(page.locator('[class*="deck"]')).toHaveCount(0)
+    // `body >` matters: the reader draws a deck of its own for a multi-selection, and it
+    // is a child of the pane. This one is appended straight to the body, which is the only
+    // thing that distinguishes a leaked drag image from the one that is meant to be there.
+    await expect(page.locator('body > [class*="deck"]')).toHaveCount(0)
   })
 
   test('refuses a folder belonging to a different account', async ({ page }) => {

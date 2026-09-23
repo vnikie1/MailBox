@@ -5,4 +5,41 @@
  * invent folder roles — and standing rule 13's "parse leniently, degrade visibly" applies
  * to a role we do not recognise just as much as to broken MIME.
  */
-export type MailboxRow = { id: number, accountId: number, displayName: string, parentId: number | null, role: string | null, unreadCount: number, totalCount: number, };
+export type MailboxRow = { id: number, accountId: number, displayName: string, 
+/**
+ * The mailbox this one is inside, as the sidebar nests it. Null at the top of the account.
+ *
+ * Worked out from the paths (`db::query::mailboxes_tree`) rather than stored: a folder
+ * renamed or made on another device moves in the tree with nothing to keep in step. Never
+ * the Inbox — servers that keep every folder inside it would otherwise show the whole
+ * account as the Inbox's children.
+ */
+parentId: number | null, role: string | null, unreadCount: number, totalCount: number, 
+/**
+ * Where it sits in Favourites, or null when it is not a favourite. A position among every
+ * favourite, built-in rows included; `favourites_list` has the whole order.
+ */
+favouriteOrder: number | null, 
+/**
+ * Whether the user chose this mailbox's role with Use This Mailbox As, rather than the
+ * server naming it.
+ */
+roleChosen: boolean, 
+/**
+ * The server's hierarchy separator, for checking a name before it is sent. Null until the
+ * mailbox has been listed by a sync that stored it.
+ */
+delimiter: string | null, 
+/**
+ * Whether Rename and Delete are offered. See `sync::folders::editable`.
+ */
+editable: boolean, 
+/**
+ * How many mailboxes are inside this one, at any depth — the ones Delete Mailbox takes
+ * with it, which its confirmation has to name.
+ */
+descendants: number, 
+/**
+ * Whether New Mailbox may put a mailbox inside this one. See `sync::folders::can_contain`.
+ */
+canContain: boolean, };

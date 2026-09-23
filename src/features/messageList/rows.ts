@@ -39,18 +39,33 @@ function firstNonEmpty(...values: (string | null)[]): string | null {
 }
 
 /**
- * What a row calls its sender — and what the drag deck calls the same message.
+ * The fields a label is read off. `MessageRow` has them and so does `MessageFull`, which
+ * is what the reader and its selection deck hold — the two generated types overlap here but
+ * neither is assignable to the other, so the labels take the overlap rather than a row.
+ */
+export interface Addressed {
+  fromName: string | null
+  fromAddr: string | null
+}
+
+export interface Titled {
+  subject: string | null
+}
+
+/**
+ * What a row calls its sender — and what the drag deck and the selection deck call the same
+ * message.
  *
- * Shared rather than written twice because the deck is a picture of the row: if the two
+ * Shared rather than written three times because both decks are pictures of the row: if they
  * ever disagreed, the thing under the cursor would name a different message from the one
  * being carried, and there would be no way to tell which was right.
  */
-export function senderLabel(row: MessageRow): string {
+export function senderLabel(row: Addressed): string {
   return firstNonEmpty(row.fromName, row.fromAddr) ?? 'Unknown sender'
 }
 
 /** The same, for the subject. */
-export function subjectLabel(row: MessageRow): string {
+export function subjectLabel(row: Titled): string {
   return firstNonEmpty(row.subject) ?? '(no subject)'
 }
 

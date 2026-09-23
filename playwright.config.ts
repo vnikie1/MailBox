@@ -17,11 +17,11 @@ export default defineConfig({
   /**
    * Serialised on CI so the perf-sensitive assertions are not fighting for cores.
    *
-   *  serialises too, via , for the same reason: the scrolling
+   * `npm run verify` serialises too, via `test:e2e:gate`, for the same reason: the scrolling
    * budget in shell.spec.ts measures frame gaps, and nine workers on one machine measure the
    * machine. It passed at a p95 of 18.5ms alone and failed in the same minute under the full
    * parallel suite. A gate that fails on machine load is a gate people learn to ignore.
-   * Interactive  stays parallel and fast.
+   * Interactive `npm run test:e2e` stays parallel and fast.
    */
   ...(process.env.CI ? { workers: 1 } : {}),
   reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : 'list',

@@ -25,6 +25,26 @@ use super::mail::AppError;
 /// waiting on this body and returning without it would leave the pane empty for good.
 static BODY_FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+/// Sends whatever the user just changed, shortly. See `SyncEngine::push_soon`.
+///
+/// Called by the commands that queue work for a server, after their transaction has
+/// committed. Not a command itself: the window has no business deciding when the queue goes.
+pub(crate) fn push_soon(app: &AppHandle) {
+    use tauri::Manager;
+
+    let (Some(engine), Some(db)) = (app.try_state::<SyncEngine>(), app.try_state::<Db>()) else {
+        return;
+    };
+
+    let engine = engine.inner().clone();
+    let db = db.inner().clone();
+    let events: std::sync::Arc<dyn crate::sync::events::Events> = std::sync::Arc::new(app.clone());
+
+    tauri::async_runtime::spawn(async move {
+        engine.push_soon(events, db).await;
+    });
+}
+
 /// Syncs one account now.
 ///
 /// Returns as soon as the work is *scheduled*, not when it finishes. A first sync of a large

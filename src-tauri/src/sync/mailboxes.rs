@@ -61,6 +61,21 @@ impl Role {
         }
     }
 
+    /// The role a stored string names. The inverse of `as_str`.
+    pub fn parse(value: &str) -> Option<Role> {
+        [
+            Role::Inbox,
+            Role::Drafts,
+            Role::Sent,
+            Role::Junk,
+            Role::Trash,
+            Role::Archive,
+            Role::All,
+        ]
+        .into_iter()
+        .find(|role| role.as_str() == value)
+    }
+
     /// The order roles appear in the sidebar. docs/01 §3.
     pub fn sort_order(self) -> i64 {
         match self {
@@ -112,7 +127,9 @@ fn role_from_name(path: &str, delimiter: Option<&str>) -> Option<Role> {
 
     let separator = delimiter.unwrap_or("/");
     let leaf = path.rsplit(separator).next().unwrap_or(path);
-    let lowered = leaf.trim().to_ascii_lowercase();
+    // Decoded first. The list below has words like "envoyés" in it, and the wire form of that is
+    // `envoy&AOk-s` — which no amount of lowercasing will ever make equal.
+    let lowered = super::utf7::display(leaf).trim().to_lowercase();
 
     // English, plus the handful of spellings that appear on servers configured in other
     // languages and are unambiguous. Anything more speculative belongs in SPECIAL-USE.
@@ -144,22 +161,21 @@ pub fn infer_role(path: &str, attributes: &[String], delimiter: Option<&str>) ->
     role_from_attributes(attributes).or_else(|| role_from_name(path, delimiter))
 }
 
-/// The display name for a mailbox: the leaf, with a provider container stripped.
+/// The display name for a mailbox: the leaf, with a provider container stripped, decoded from
+/// the modified UTF-7 the server sends.
 ///
 /// `[Gmail]/Sent Mail` shows as "Sent Mail", not as the whole path — the sidebar nests it
-/// under its parent, so repeating the parent in the label is noise.
+/// under its parent, so repeating the parent in the label is noise. And `Re&AOc-us` shows as
+/// "Reçus", which it did not until the codec existed.
 pub fn display_name(path: &str, delimiter: Option<&str>) -> String {
-    let separator = delimiter.unwrap_or("/");
+    let separator = delimiter.filter(|d| !d.is_empty()).unwrap_or("/");
 
     if path.eq_ignore_ascii_case("INBOX") {
         return "Inbox".to_string();
     }
 
-    path.rsplit(separator)
-        .next()
-        .unwrap_or(path)
-        .trim()
-        .to_string()
+    let leaf = path.rsplit(separator).next().unwrap_or(path);
+    super::utf7::display(leaf).trim().to_string()
 }
 
 /// Lists every mailbox on the server.
@@ -243,32 +259,51 @@ fn resolve_duplicate_roles(mut listed: Vec<Discovered>) -> Vec<Discovered> {
 /// `mailbox.id`, so recreating rows would orphan every message in the account. A mailbox that
 /// has genuinely gone from the server is left in place here and removed by the caller only
 /// once it is sure — a `LIST` that fails halfway must not delete half the mailbox tree.
+///
+/// A listed mailbox the user has renamed or deleted since the `LIST` was taken is skipped: the
+/// server still has the old name only because the change has not reached it yet
+/// (`ops::PendingTree`). Returns the id and path of each mailbox it did write, so the caller
+/// syncs exactly those.
+///
+/// Roles are the server's, except where the user chose one with Use This Mailbox As
+/// (`chosen_roles`, `effective_roles`).
 pub fn persist(
     tx: &rusqlite::Transaction<'_>,
     account_id: i64,
     discovered: &[Discovered],
 ) -> Result<Vec<(i64, String)>, DbError> {
+    let pending = super::ops::pending_tree(tx, account_id)?;
+    let chosen = chosen_roles(tx, account_id)?;
+    let roles = effective_roles(discovered, &chosen, &pending);
     let mut ids = Vec::with_capacity(discovered.len());
 
-    for (index, mailbox) in discovered.iter().enumerate() {
-        let sort_order = mailbox
-            .role
-            .map(Role::sort_order)
-            .unwrap_or(100 + index as i64);
+    for ((index, mailbox), role) in discovered.iter().enumerate().zip(roles) {
+        if pending.hides(&mailbox.remote_path) {
+            tracing::debug!(
+                path = %mailbox.remote_path,
+                "listed mailbox has a rename or delete on its way; not recreating it"
+            );
+            continue;
+        }
+
+        let sort_order = role.map(Role::sort_order).unwrap_or(100 + index as i64);
 
         tx.execute(
-            "INSERT INTO mailbox (account_id, remote_path, display_name, role, sort_order, subscribed)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1)
+            "INSERT INTO mailbox
+                 (account_id, remote_path, display_name, role, sort_order, subscribed, delimiter)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
              ON CONFLICT(account_id, remote_path) DO UPDATE SET
                  display_name = excluded.display_name,
                  role         = excluded.role,
-                 sort_order   = excluded.sort_order",
+                 sort_order   = excluded.sort_order,
+                 delimiter    = excluded.delimiter",
             rusqlite::params![
                 account_id,
                 mailbox.remote_path,
                 mailbox.display_name,
-                mailbox.role.map(Role::as_str),
+                role.map(Role::as_str),
                 sort_order,
+                mailbox.delimiter,
             ],
         )?;
 
@@ -282,6 +317,65 @@ pub fn persist(
     }
 
     Ok(ids)
+}
+
+/// The roles the user chose for this account's mailboxes, with the path each mailbox has now.
+pub fn chosen_roles(
+    tx: &rusqlite::Transaction<'_>,
+    account_id: i64,
+) -> Result<Vec<(Role, String)>, DbError> {
+    let mut statement = tx.prepare(
+        "SELECT chosen.role, mailbox.remote_path
+           FROM mailbox_role AS chosen
+           JOIN mailbox ON mailbox.id = chosen.mailbox_id
+          WHERE chosen.account_id = ?1",
+    )?;
+
+    let rows = statement
+        .query_map(rusqlite::params![account_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // A role this build does not know is a row from a newer one; it is left alone, not applied.
+    Ok(rows
+        .into_iter()
+        .filter_map(|(role, path)| Role::parse(&role).map(|role| (role, path)))
+        .collect())
+}
+
+/// The role each listed mailbox ends up with: the server's, except where the user chose.
+///
+/// A choice takes the role from whichever listed mailbox the server gave it to, and gives it to
+/// the chosen one. It holds only while the chosen mailbox is still there — listed, or made here
+/// and on its way — so a folder deleted in webmail does not leave the account with no Bin until
+/// the sync after (the mailbox's row, and the choice with it, go when `prune` runs).
+pub fn effective_roles(
+    discovered: &[Discovered],
+    chosen: &[(Role, String)],
+    pending: &super::ops::PendingTree,
+) -> Vec<Option<Role>> {
+    let mut roles: Vec<Option<Role>> = discovered.iter().map(|mailbox| mailbox.role).collect();
+
+    for (role, path) in chosen {
+        let present = discovered
+            .iter()
+            .any(|mailbox| &mailbox.remote_path == path)
+            || pending.keeps(path);
+        if !present {
+            continue;
+        }
+
+        for (mailbox, current) in discovered.iter().zip(roles.iter_mut()) {
+            if &mailbox.remote_path == path {
+                *current = Some(*role);
+            } else if *current == Some(*role) {
+                *current = None;
+            }
+        }
+    }
+
+    roles
 }
 
 /// Removes mailboxes this account no longer has on the server.
@@ -302,6 +396,10 @@ pub fn persist(
 ///
 /// Returns the paths removed, for the log. A folder full of mail disappearing is worth a line
 /// even when it is correct.
+///
+/// A mailbox the user has just made or renamed is not on the server *yet*, and is kept: its
+/// absence from the list is the change on its way, not evidence that it has gone
+/// (`ops::PendingTree`).
 pub fn prune(
     tx: &rusqlite::Transaction<'_>,
     account_id: i64,
@@ -310,6 +408,8 @@ pub fn prune(
     if keep.is_empty() {
         return Ok(Vec::new());
     }
+
+    let pending = super::ops::pending_tree(tx, account_id)?;
 
     let existing: Vec<(i64, String)> = tx
         .prepare("SELECT id, remote_path FROM mailbox WHERE account_id = ?1")?
@@ -321,11 +421,13 @@ pub fn prune(
     let mut removed = Vec::new();
 
     for (id, path) in existing {
-        if keep.iter().any(|kept| kept == &path) {
+        if keep.iter().any(|kept| kept == &path) || pending.keeps(&path) {
             continue;
         }
 
-        tx.execute("DELETE FROM mailbox WHERE id = ?1", rusqlite::params![id])?;
+        // Through the same path a deleted folder takes, which also clears the origin other
+        // messages remember for an unfinished move out of this one.
+        super::folders::remove_mailboxes(tx, &[id])?;
         removed.push(path);
     }
 
@@ -433,6 +535,34 @@ mod tests {
     }
 
     #[test]
+    fn display_names_are_decoded_from_the_wire() {
+        // What LIST actually sends. The sidebar showed these raw until the codec existed.
+        assert_eq!(
+            display_name("[Gmail]/Messages envoy&AOk-s", Some("/")),
+            "Messages envoyés"
+        );
+        assert_eq!(display_name("Re&AOc-us", Some("/")), "Reçus");
+        assert_eq!(display_name("Tom &- Jerry", Some("/")), "Tom & Jerry");
+        // Not valid modified UTF-7, and still a folder with mail in it.
+        assert_eq!(display_name("Q&A", Some("/")), "Q&A");
+    }
+
+    #[test]
+    fn the_name_fallback_reads_encoded_names_too() {
+        // "Entwürfe" as a server without SPECIAL-USE sends it. Compared raw, it never matched
+        // the word in the list — so German Drafts folders were ordinary folders.
+        assert_eq!(
+            infer_role("Entw&APw-rfe", &[], Some("/")),
+            Some(Role::Drafts)
+        );
+        assert_eq!(
+            infer_role("INBOX.Gel&APY-scht", &[], Some(".")),
+            None,
+            "an unlisted word stays an ordinary folder"
+        );
+    }
+
+    #[test]
     fn two_mailboxes_claiming_one_role_do_not_both_keep_it() {
         // A migrated account really does end up with both "Sent" and "[Gmail]/Sent Mail".
         // If both stayed Sent, "where does a reply get filed?" has two answers and the code
@@ -493,6 +623,68 @@ mod tests {
 
         assert_eq!(winner(&forwards), winner(&backwards));
         assert_eq!(winner(&forwards).as_deref(), Some("A/Trash"));
+    }
+
+    #[test]
+    fn a_role_the_user_chose_wins_over_the_servers_while_the_mailbox_is_there() {
+        let listing = vec![
+            Discovered {
+                remote_path: "INBOX".into(),
+                display_name: "Inbox".into(),
+                delimiter: Some("/".into()),
+                role: Some(Role::Inbox),
+                selectable: true,
+            },
+            Discovered {
+                remote_path: "Trash".into(),
+                display_name: "Trash".into(),
+                delimiter: Some("/".into()),
+                role: Some(Role::Trash),
+                selectable: true,
+            },
+            Discovered {
+                remote_path: "Old Sent".into(),
+                display_name: "Old Sent".into(),
+                delimiter: Some("/".into()),
+                role: Some(Role::Sent),
+                selectable: true,
+            },
+        ];
+        let pending = super::super::ops::PendingTree::default();
+
+        // Nothing chosen: the server's word.
+        assert_eq!(
+            effective_roles(&listing, &[], &pending),
+            vec![Some(Role::Inbox), Some(Role::Trash), Some(Role::Sent)]
+        );
+
+        // Old Sent chosen as the Bin: it gives up Sent, and Trash gives up the Bin.
+        assert_eq!(
+            effective_roles(&listing, &[(Role::Trash, "Old Sent".into())], &pending),
+            vec![Some(Role::Inbox), None, Some(Role::Trash)]
+        );
+
+        // A chosen mailbox the server no longer lists changes nothing.
+        assert_eq!(
+            effective_roles(&listing, &[(Role::Trash, "Gone".into())], &pending),
+            vec![Some(Role::Inbox), Some(Role::Trash), Some(Role::Sent)]
+        );
+    }
+
+    #[test]
+    fn role_names_read_back_as_the_roles_that_wrote_them() {
+        for role in [
+            Role::Inbox,
+            Role::Drafts,
+            Role::Sent,
+            Role::Junk,
+            Role::Trash,
+            Role::Archive,
+            Role::All,
+        ] {
+            assert_eq!(Role::parse(role.as_str()), Some(role));
+        }
+        assert_eq!(Role::parse("flagged"), None);
     }
 
     #[test]

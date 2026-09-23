@@ -6771,3 +6771,1605 @@ were already fixed**, one was not this app's problem at all, and two were real.
 
   Left open deliberately: the render log line still does not say how many remote images were
   fetched or what they cost, which is the field that would have made this obvious in one look.
+
+---
+
+## 2026-09-11 — Phase 4: An account colour the mail window could finally see
+
+### Fixed
+
+- **The per-account colour was never drawn anywhere in the app.** Not dimmed, not mis-tinted
+  — absent. Picking a colour in Settings → Accounts stored it, ticked the swatch, and changed
+  nothing a user could see, because `AccountRow` — the struct the mailbox window is served by
+  `accounts_list` — had no `color` field at all, and the query behind it read
+  `SELECT id, display_name, email, provider` and nothing else. The sidebar could not have
+  drawn the colour if it had wanted to.
+
+  This is the _second_ bug in the same feature, and it outlived the first. On 2026-09-10 the
+  write path was repaired: `src/lib/ipc.ts` had been sending the colour as `[patch.color]`
+  where the core expected `{"value": …}`, so every colour change had been rejected at the
+  seam since 2026-08-26. That fix was real, and it is what made this one visible — the colour
+  now landed in the database correctly, and still nothing happened. Two different failures,
+  one symptom, and fixing the first proved nothing about the second.
+
+  What hid it for as long as it did is worth stating on its own: **the pane that set the
+  colour was the only pane that read it back.** `AccountDetail` — the settings-only struct —
+  has carried `color` since Phase 4 and has always returned it. So the swatch ticked, the
+  radiogroup behaved, and the round trip through the store looked complete from inside
+  Settings. Every check that stayed in the accounts pane confirmed a feature that did not
+  exist outside it.
+
+  Fixed in four places, which is how far the value had to travel:
+
+  - `src-tauri/src/db/model.rs` — `AccountRow` gains `color: Option<String>`.
+  - `src-tauri/src/db/query.rs` — `accounts_list` selects the column.
+  - `src/features/sidebar/model.ts` — `SidebarNode` gains `accountColor`, set on every
+    mailbox in an account's own section and on the per-account children of the unified rows.
+  - `src/features/sidebar/Sidebar.tsx` and `Sidebar.module.css` — the icon carries
+    `data-account`, sharing the seven `--flag-*` tokens with the existing `data-flag` rules.
+
+- **The browser mock disagreed with the core about three fields, not one.**
+  `browserStore.accountsList()` returned the seed rows untouched while `accountsDetail()`
+  applied the overlay, so renaming, recolouring or reordering an account in the browser
+  changed Settings and left the sidebar on the original seed. The Rust `accounts_list` reads
+  `display_name`, `color` and `ORDER BY sort_order` from the same table the settings pane
+  writes to. The mock now does the same. Left as it was, a real bug in any of those three
+  would have looked like a mock artefact, and a mock artefact like a real bug.
+
+### Changed
+
+- **Where an account colour appears, now that it appears at all.** The spec (docs/04 Phase 4,
+  `docs/PHASE-4-VERIFICATION.md` §3) asks for "per-account colour" and never says where it
+  shows, so this is a choice rather than a requirement met. The mailbox icons in an account's
+  own section take the colour, and so do the per-account children of All Inboxes / All
+  Drafts / All Sent — which are labelled by account name and were otherwise three identical
+  grey inboxes, the one place in the sidebar where telling accounts apart is the entire job
+  of the row.
+
+  Consistent with docs/01 §3 ("Sidebar icon size 16, accent or system colour — never
+  grey-on-grey") and with §9.3's restraint rule: the colour replaces the accent on an icon
+  that was already saturated, rather than adding a new coloured element. It loses to a
+  focused selection for the same reason a flag colour does — a purple inbox on an accent fill
+  is worse than no colour.
+
+- **`data-account` is a separate attribute from `data-flag`, sharing one block of CSS rules.**
+  The palette is literally the same seven tokens, but the attributes answer different
+  questions: a flag colour says what a row _is_, an account colour says who it _belongs to_.
+  A row never carries both — a flag row belongs to no account. Collapsing them into one field
+  would have made the two indistinguishable to the stylesheet, for a saving of seven lines.
+
+### Added
+
+- **`tests/e2e/accountColours.spec.ts`** — three tests, deliberately split. One drives the
+  swatches (set, switch, and click-again-to-clear, which is the case `ColorChange` exists
+  for); one asserts the sidebar draws three accounts in three _different_ colours; one pins
+  the default, where no row carries `data-account` and the icon keeps the accent.
+
+  Split because either half alone passes while the feature is broken. The picker test passes
+  on today's tree with the render removed; the render test would have passed for a fortnight
+  while every write was being rejected. Verified by removing the `data-account` spread and
+  confirming only the render test fails.
+
+  Asserting each colour against its own token is also not sufficient on its own, and the
+  existing flag test says why: `--flag-blue` and the default accent are both
+  `rgb(0, 122, 255)` here, so a broken build where every icon stayed the accent would pass
+  the blue case for the wrong reason. Hence the "three different colours" set-size check.
+
+- **`a_colour_reaches_the_sidebar_and_not_only_the_settings_pane`** in
+  `src-tauri/src/accounts/store.rs` — inserts, recolours and clears, reading back through
+  `query::accounts_list` rather than through `get`. The existing
+  `clearing_a_colour_is_distinct_from_leaving_it_alone` covers the same three writes through
+  the settings path and passed throughout, which is exactly the blind spot.
+
+- **`?account-colours=1`** in `src/mock/browserStore.ts`, the same device as `?first-run=1`
+  and for the same reason: a browser page holds the overlay in module memory, so Settings at
+  `/?settings=1` and the mailbox at `/` are two page loads that share nothing, and a colour
+  set in one is gone before the other renders. The seeds stay `null` by default — a freshly
+  added account has no colour in the real database, and the committed visual baselines are of
+  that state.
+
+### Notes
+
+- **Cross-window propagation was already correct and needed no change.** Worth recording
+  because it was the first suspect: `account_update` calls `app.emit`, which broadcasts to
+  every window rather than to the caller; `core:event:default` is granted to `main` and
+  `settings` alike in `src-tauri/capabilities/default.json`; and `useAccountEvents` — mounted
+  in the mailbox window via `useAccountsGate`, and in Settings directly — invalidates
+  `['accounts']` on the event. The colour reached the mailbox window's query the moment the
+  query had a colour to return.
+
+- **There is no per-account _theme_, and this does not add one.** Theme, density,
+  transparency and accent are global, resolved once in `applyAppearance` onto `<html>`. Only
+  the colour is per account.
+
+### Changed — after a 232-agent audit of the same two questions
+
+The fix above was written first and audited afterwards. The audit confirmed the diagnosis and
+found four things wrong with the work itself, three of which are now fixed. Recorded because
+the interesting half is what the audit caught, not what it confirmed.
+
+- **The two new e2e tests cannot see the Rust half, and the file said otherwise.**
+  `playwright.config.ts:59-65` serves the app with `npm run dev`, so there is no Tauri in a
+  Playwright run and `src/lib/ipc.ts:393` short-circuits every call into the browser mock.
+  The picker test therefore never reaches `invoke('account_update')` and never exercises the
+  `{ value: … }` encoding that was the _first_ bug; the paint test starts from a mock-only
+  seed and never touches `AccountRow` or `query::accounts_list`, which were the _second_.
+  **Both would still pass with the Rust half of this fix reverted.**
+
+  The file's header now says so, and names the Rust test that does cover the seam. Nothing
+  about the tests changed — they are correct for what they test. What was wrong was the claim
+  written above them, which implied a span no harness in this repo actually has. Believing a
+  green run meant more than it did is how the first bug survived a fortnight.
+
+- **The new unit test could leak mock state into every test after it.** It set the first
+  account purple and restored it on the last line — after four `if (!x) return` guards. Any
+  failure or tripped guard left the account purple in the module-level overlay `Map` that the
+  rest of the file shares, turning one failure into an unrelated second. Now a `try/finally`.
+
+- **`src-tauri/src/bin/seed.rs:160` gave every seeded account a NULL colour**, so a seeded
+  database exercised precisely the state the feature was broken in. Between that, the mock
+  needing `?account-colours=1`, and a real account starting with no colour, there was no
+  default state in which anyone would see the Rust render path work — the only evidence was a
+  unit test. The three seeded accounts are now purple / green / orange.
+
+### Notes — found by the audit, not fixed here
+
+Each is real, verified against the source, and out of scope for a commit about making the
+colour appear. Listed so the next person does not have to find them again.
+
+- **A focused selection outranks the tint, on the one row the user is most likely to check.**
+  `Sidebar.module.css:212-220` — `.sidebar:focus-within .selected .icon` is (0,4,0) and beats
+  `.row .icon[data-account=…]` at (0,3,0). Deliberate, and the CSS comment says why: a purple
+  inbox on an accent fill is worse than no colour. But the consequence is that someone
+  verifying "did my colour apply?" by looking at their current mailbox sees nothing, and for
+  a single-account user that is most of the sidebar. The quiet selected state is fine — that
+  rule is (0,2,0) and loses to the tint.
+
+- **`--flag-gray` and `--accent-inactive` are the same value.** `semantic.css:72` and `:81`
+  both resolve to `var(--gray-l)` (and `:155`/`:161` in dark). One of the seven offered
+  colours is indistinguishable from no colour at all in an inactive window.
+
+- **The tint does not desaturate when the window goes inactive, and the spec says it must.**
+  `semantic.css:194-195` remaps only `--accent` and `--label-1` under `[data-window-inactive]`;
+  the `--flag-*` set is untouched. docs/01 §9.11 ("colours desaturate, selection greys out")
+  and docs/02 §5 both ask for it. Pre-existing for the flag rows — but this change takes the
+  affected surface from "a few rows under Flagged" to "every mailbox of every coloured
+  account", so a background window now gets _louder_ where it should go quiet.
+
+- **Nothing validates the colour name on either side.** Rust writes any string
+  (`ipc/accounts.rs:592`); the sidebar spreads whatever arrives and the CSS matches seven
+  literals. `"grey"` for `"gray"` would persist happily and render as no colour — visually
+  identical to a failed save, which is the exact ambiguity that hid the original bug for a
+  fortnight. `rules/engine.rs:85` already holds the allowlist; accounts never consult it.
+
+- **CI cannot see a stale ts-rs binding.** `.github/workflows/ci.yml` runs `typecheck` against
+  the committed `src/lib/generated/*.ts`, while the Rust job's `cargo test` rewrites them —
+  and nothing runs `git diff --exit-code src/lib/generated`. A Rust struct that gains a field
+  without a regenerated binding is invisible to CI unless some TS line happens to read it.
+  That is the precise shape of the bug fixed here: the core had the column, the seam did not
+  carry it.
+
+- **`tools/settings-audit.cjs:279-355` is the only harness that drives the packaged app, and
+  it deliberately does not look.** It clicks all seven swatches for every account and re-reads
+  them after a pane switch, while holding a handle to the mailbox window that it uses for
+  theme (`await attr(main, 'data-theme')`) and never once for colour. One
+  `main.locator("[data-account='green']")` after a set would have caught this in the session
+  that reported "73 passed, 0 failed". Highest-value missing check in the repo.
+
+- **`AccountInfoSheet.tsx:38-52` still omits the colour** from its eight rows, despite already
+  receiving the `AccountDetail` that carries it.
+
+- **Half the new paint is behind a disclosure triangle.** `src/store/layout.ts:73` collapses
+  `all-drafts` and `all-sent` on a fresh install, so of the three unified rows whose
+  per-account children now take the colour, only All Inboxes' are visible by default.
+
+### Incidents
+
+- **`npm run verify` does not pass on `main`, and did not before this work.**
+  `cargo fmt --check` reports drift in three files this change does not touch —
+  `src-tauri/src/ipc/accounts.rs` (two hunks), `src-tauri/src/platform/fatal.rs`, and
+  `src-tauri/tests/startup_is_survivable.rs` (two hunks). Confirmed pre-existing by stashing
+  and re-running. Left alone rather than folded in: `cargo fmt` would reformat three
+  unrelated files inside a commit about account colours, and the definition-of-done item is
+  better served by a commit that says it is a reformat. Everything else in the gate is green
+  — format:check, lint, lint:css, typecheck, 795 Rust tests, 99 e2e.
+
+- **`composeClose.test.tsx > asks first, and holds the window open` fails on a clean tree.**
+  Times out at 5,030ms waiting for the Subject placeholder; the four tests after it in the
+  same file pass in about 1.2s each. Verified pre-existing by `git stash` and re-running. It
+  is the first test in the file, so this looks like a cold-start timeout rather than a
+  behavioural failure — but that is a hypothesis, not a diagnosis, and it is recorded here as
+  unexplained rather than dismissed. Unrelated to this change, which touches no compose code.
+
+---
+
+## 2026-09-11 — Phase 4: Three dead ends in the sign-in path
+
+All three came out of the same audit as the account colour, and all three are the same shape:
+the app knew what had gone wrong and told the user something else.
+
+### Fixed
+
+- **A first run that picked Google or Microsoft had no way out.** Choosing a provider with no
+  OAuth client configured disables Continue — and on a first run there was then nothing left
+  to press. Four separate guards, each defensible on its own, closed every exit at once:
+  `AccountAssistant.tsx:203` suppresses Cancel when `firstRun`; `FirstRun.tsx:70-77` makes
+  `onOpenChange` a deliberate no-op so Escape and outside-press do nothing; the sheet is a
+  modal `FloatingOverlay` covering the sidebar's Settings button; and `useShortcuts.ts:89`
+  suppresses Ctrl+, while any `role="dialog"` is mounted. The tile read "Needs setting up in
+  Settings first" — naming a place the user could not reach from where they were standing.
+
+  The only escape was to pick a different provider tile, and nothing on screen said so.
+
+  **Fixed with a door, not by removing a wall.** `ProviderStep` now renders an explanation and
+  an **Open Settings** button whenever the selected provider reports `needsOauthClient`. Each
+  of the four guards is there for a reason — dismissing the first-run sheet would drop someone
+  into an empty app with nothing to click, which is precisely what `FirstRun.tsx` says it is
+  avoiding — and the actual complaint was never that the sheet was modal. It was that an
+  instruction had no door beside it.
+
+  Settings is a separate window, so it opens over the sheet and the assistant stays put. And
+  the loop closes on its own: `oauth_client_set` emits `accounts:changed`
+  (`ipc/accounts.rs:800`), `useAccountEvents` invalidates the provider list, so the warning
+  clears and Continue enables the moment the client is saved — with no need to come back and
+  press anything.
+
+- **"Signing in again will fix it", said to people for whom it could not.** Google answers
+  `invalid_client` when the client secret is missing or wrong. Nothing pre-flights that, so it
+  is the single likeliest first-time failure there is — and `requires_reauthentication`
+  matched `invalid_client` and `unauthorized_client` alongside `invalid_grant`, putting all
+  three under one message telling the user to sign in again. Signing in again reran the
+  identical request against the identical broken registration. The app sent people round a
+  browser consent loop that could not succeed, and told them to go round it again each time.
+
+  `requires_reauthentication` is now `invalid_grant` **only**, which is what its own docstring
+  always said it was for ("docs/03 §7: on `invalid_grant`, surface a re-authenticate banner").
+  The other two go to a new `indicates_client_misconfiguration`, and the IPC layer maps them
+  to `oauthClientRejected`: _"The provider rejected Halcyon's sign-in application, not your
+  account…"_. The arm is placed **above** the re-auth arm, and the ordering is the fix.
+
+- **The same wrong sentence again, by a second route — the sync engine.** Fixing the IPC path
+  alone would have left it: `credential_for` turned a missing client config into
+  `SyncError::Rejected { detail: "no oauth client configured" }`, and `oauth_failure` turned
+  every `Refused` into `Rejected` including `invalid_client`. Both render as _"The saved
+  sign-in for this account was refused. Signing in again will fix it."_ So clearing a client ID
+  in Settings broke **every** OAuth account at once and offered each one a button that could
+  not work.
+
+  New `SyncError::OauthClientUnusable { provider, configured }` — a sibling of
+  `MissingClientSecret`, not of `Rejected`, because what is wrong is Halcyon's registration
+  rather than the user's account. `configured` distinguishes the two sentences ("none is
+  configured" vs "the provider rejected it"); both point at the same panel. Non-retryable,
+  like every other configuration fault: waiting fixes none of it.
+
+- **`noOauthClient` named a pane that does not hold the fields.** It said "Settings → Accounts
+  → **Advanced**". Advanced is a real pane, which is what made it worse than vagueness: a path
+  that exists is followed before it is doubted. The fields are under a heading called
+  **Sign-in applications** inside Accounts. Now says so.
+
+- **A `\n` where a line continuation was meant.** `SyncError::MissingClientSecret`'s message
+  carried an escaped newline plus thirteen spaces of source indentation
+  (`engine.rs:262`). It rendered correctly only because the banner leaves `white-space` at its
+  default and HTML collapses the run — so the defect was invisible, and would have surfaced
+  the day anyone touched that CSS.
+
+### Added
+
+- **`ipc::accounts::oauth_message_tests`** — three tests on the sentences themselves: that a
+  rejected sign-in application is not reported as a dead credential (and that `invalid_grant`
+  still is), that `noOauthClient` names the panel holding the fields and not Advanced, and
+  that every message this file _writes_ is a sentence — no newline, no run-on spacing, no
+  `invalid_*` code leaking into a banner.
+
+  That last test found something while being written. It originally asserted a full stop on
+  _every_ OAuth message and failed on the generic `Refused` arm, which forwards the provider's
+  own `error_description` verbatim — so its punctuation is Google's business, not ours. The
+  exclusion is now explicit, and the relay arm is asserted to be a relay instead.
+
+- **`sync::engine` tests** for both routes to the old sentence, plus one asserting no banner
+  sentence carries stray whitespace from a broken continuation.
+
+- **`oauth::requires_reauthentication` / `indicates_client_misconfiguration`** are pinned
+  against each other: the test asserts no error code can ever match both, which is the
+  property that was quietly false before.
+
+- **Two first-run e2e tests.** One walks the trap: it asserts all four walls are still standing
+  (Continue disabled, no Cancel, Escape does nothing) and then that the door exists and leads
+  to the Accounts pane — and that the assistant is _still there_ behind it, because opening
+  Settings must not dismiss the sheet. The other asserts a provider needing nothing shows no
+  such note. Verified by deleting the new block and confirming only the first fails.
+
+### Notes
+
+- **Left alone deliberately: `account_add_password` still has no `auth_kind` guard**
+  (`ipc/accounts.rs:367-446`), so the core would happily add a Gmail account with an app
+  password today — servers resolve, `verify::run` does a real `LOGIN`, and sync takes the
+  password branch. docs/05 §2 asks for exactly that fallback and the wizard is the only thing
+  refusing it. Not touched here because it is a feature decision, not a wrong message: either
+  ship the app-password route or drop the bullet from docs/05, and both are larger than this.
+
+### Incidents
+
+- **This reverses the decision recorded in the entry above, to leave the pre-existing
+  `cargo fmt` drift alone.** Running `cargo fmt --all` to format this change's own additions
+  reformatted `src-tauri/src/platform/fatal.rs` and
+  `src-tauri/tests/startup_is_survivable.rs` as a side effect — files this work does not
+  otherwise touch. Inspected: pure line-wrapping, no semantic change. Kept rather than
+  reverted, because `npm run verify` is now clean for the first time in this session and
+  putting whitespace back to make a commit tidier would trade the definition-of-done item for
+  an aesthetic one. Recorded because the earlier entry says the opposite, and a changelog that
+  quietly contradicts itself is worse than one that admits the reversal. `ipc/accounts.rs`,
+  the third file on that list, is substantively edited here anyway.
+
+- **`composeClose.test.tsx > asks first, and holds the window open` — diagnosed and fixed.**
+  Recorded twice in this session as unexplained, so here is the explanation.
+
+  `openComposeWithContent` imports `ComposeWindow` dynamically, which pulls in Lexical and its
+  plugins, and the first import of a run pays for Vite transforming all of that on demand.
+  Measured: 2,961ms for the first test against ~700ms for each of the four after it, which
+  re-import through a warm transform cache even though `vi.resetModules()` clears the registry
+  between them. That ~2.3s premium sat inside the first test, against vitest's 5s default —
+  it fit on an idle machine and did not on a busy one, failing at 5,030ms.
+
+  Confirmed rather than assumed: `--testTimeout=20000` turned all five green and exposed the
+  2,961ms-vs-700ms split. The cost is now paid in a `beforeAll`, so the 5s budget still means
+  "this behaviour is fast" rather than silently covering the toolchain — the same warm-then-
+  measure pattern already used in `firstRun.spec.ts` and `shell.spec.ts`. The first test now
+  runs in 551ms.
+
+  Worth noting what made it expensive to diagnose: the symptom was "Unable to find an element
+  by: [placeholder='Subject']", which reads as the compose window being broken. It is a build
+  cost wearing a correctness failure's clothes.
+
+- **`npm run verify` now passes end to end — exit 0.** 263 unit, 101 e2e, 800 Rust, plus
+  format, lint, stylelint, typecheck, rustfmt and clippy. First time in this session.
+
+---
+
+## 2026-09-16 — Phase 4: A build that can sign in to Google on its own
+
+Reported from the freshly installed app: choosing Google said _"Google requires every app to
+register its own sign-in application, and Halcyon ships without one"_, and choosing Microsoft
+said the same. Nothing was broken — no client had been entered — but the sentence was true of
+every build that had ever existed, and it is the one thing a mail client cannot say about Gmail.
+
+### Changed
+
+- **A build can now carry its own sign-in application for Google and Microsoft.** This reverses
+  the Phase 4 deviation that made bring-your-own the _only_ path. docs/05 §2 never asked for
+  that: it offers BYO "for advanced users" and expects an app-owned client to be the main one.
+  The reversal is recorded against the original entry in `docs/PHASE-4-VERIFICATION.md` §4.
+
+  **The values are build inputs, never source.** The repository is public and docs/05 §9 is
+  right that a secret in public source is not a secret. `build.rs` reads
+  `HALCYON_GOOGLE_CLIENT_ID`, `HALCYON_GOOGLE_CLIENT_SECRET` and `HALCYON_MICROSOFT_CLIENT_ID`
+  from the environment, else from `src-tauri/oauth/clients.env` (gitignored), and hands them to
+  the crate as `rustc-env`; `accounts::builtin_client` reads them with `option_env!`. The
+  environment wins so CI can supply them without a file. A clean checkout carries none and
+  behaves exactly as before — which is also what docs/05 §9 asks of an open-source build. It is
+  the arrangement the updater's signing key already uses.
+
+  **Resolution order: the user's own client, then the built-in, then nothing**
+  (`accounts::resolve_client`). The user's own always wins, so nobody is held to someone else's
+  registration. Clearing it now falls back to the built-in rather than disabling the provider —
+  in a build that has one, "clear" used to stop every OAuth account on the machine at once.
+
+- **Google is built in with both halves or not at all.** An id without its secret would light
+  the Google tile, send the user through a whole browser consent, and fail at the token exchange.
+  `build.rs` refuses to emit half a pair and prints a `cargo:warning` saying which half is
+  missing — never the secret. `builtin_from` repeats the check in case a stale `rustc-env`
+  survives from an earlier run.
+
+- **Why a compiled-in Google secret is compatible with standing rule 12.** The rule keeps
+  _secrets_ out of SQLite, config, logs and error messages. A Desktop OAuth client's "secret" is
+  not one — Google issues it to installed apps knowing it ships inside them — and PKCE, already
+  unconditional, is what protects an intercepted code. It is carried as `credentials::Secret`
+  from the moment it is read, so the type still keeps it out of logs and off the IPC boundary.
+  The user's password and tokens are untouched and still live only in the Credential Manager.
+
+- **Settings describes the client in use, not the box.** In a build that carries a client an
+  empty Client ID field is the normal, working state, and every word in the panel assumed the
+  opposite. Each field now says which application is in use and what clearing it does. The
+  secret field's error state comes from the core (`OAuthClientStatus.missingSecret`, asked of the
+  _resolved_ client), because one real case would otherwise be misreported: a user's own client
+  whose id is the built-in one borrows the built-in secret, and the UI cannot see that id.
+
+- **The assistant's note says "this copy of Halcyon was built without one"**, not "Halcyon ships
+  without one". It only appears in a build that carries no client for that provider, and is now
+  a fact about the build rather than a claim about the product.
+
+- **A user's own client whose id is the built-in one uses the built-in secret.** The old setup
+  instructions told people to paste their client id into Settings; someone doing that in a build
+  that already carries the same client, with the secret box left empty, has not chosen another
+  application. A _different_ id never borrows it: a secret is only valid for the client it was
+  issued to, and lending it would turn a clear "missing secret" into an opaque `invalid_client`.
+
+### Fixed
+
+- **Microsoft sign-in could never have worked, for anyone.** The scope list asked for
+  `https://outlook.office.com/IMAP.AccessAsUser.All`, `…/SMTP.Send`, `offline_access` **and
+  `User.Read`** in one authorise request. `User.Read` is a Microsoft Graph scope; the other two
+  belong to Exchange Online; and the identity platform will not issue one token for two
+  resources. The request fails with AADSTS28000 before a sign-in page is shown, whatever app is
+  registered. It never surfaced because no Microsoft client had ever been configured.
+
+  The cause was docs/05 §3, which lists four permissions for the _app registration_ — where
+  `User.Read` is harmless, and Entra adds it by default — and the code read them as the scopes
+  of the _request_. Nothing in Halcyon calls Graph. The list is now exactly what Microsoft's
+  IMAP/SMTP OAuth guide gives, and `every_scope_a_provider_requests_belongs_to_one_resource`
+  fails if two resources are ever mixed again — including the trap that made this one easy to
+  miss, a bare scope name that does not look like it names a resource at all. Verified by
+  reinstating `User.Read`: the test fails, naming both resources. Recorded as a deviation from
+  docs/05 §3.
+
+- **A Microsoft client secret was sent whenever one was stored, and Settings asked for one.** A
+  desktop app registered with Microsoft is a public client, and a public client that presents a
+  secret is refused (AADSTS700025). Settings offered a box for it labelled "(optional)", so the
+  UI invited exactly the input that would break sign-in. `oauth::exchange` now sends a secret
+  only for a provider that uses one, `builtin_from` never keeps one for Microsoft, and the box is
+  gone for providers that do not need it.
+
+- **A browser sign-in was started even when it could not finish.** With a Google client id and
+  no secret, `account_add_oauth` and `account_reauth` opened the browser, let the user pick an
+  account and read a consent screen, and failed at the token exchange. Both now go through
+  `client_for_sign_in`, which refuses up front with a sentence naming the missing field. The sync
+  engine has refused the same case for a while (`SyncError::MissingClientSecret`).
+
+- **`phase8_gate` failed on a freshly installed machine.** The smart-mailbox gate uses the live
+  mail store "when there is one" and assumed such a store has mail. A fresh install creates its
+  store on first launch, before any account, so the gate compared two queries over zero rows and
+  its own vacuity check failed it. It first ran on such a machine today, after the reset for
+  first-run testing. An empty store now falls back to the fixture, as a missing one always did.
+
+### Added
+
+- **`src-tauri/oauth/`** — `README.md` with the Google and Microsoft registration steps, and
+  `clients.env.example`, both committed; `clients.env`, gitignored, is the real file.
+
+  Two details in the Microsoft steps were checked against Microsoft's current documentation
+  rather than written from memory, and both mattered. Entra's portal refuses an
+  `http://127.0.0.1` redirect in its text box, so it has to go in the manifest; and the manifest
+  now comes in **two formats** — `publicClient.redirectUris` for a tenant, the older
+  `replyUrlsWithType` for an app registered with a personal Microsoft account — so the README
+  gives both. The redirect registered is `http://127.0.0.1/callback`: Entra ignores the port on
+  loopback addresses, which is what lets Halcyon pick a fresh one each time, but it matches the
+  path, and it does not treat `localhost` as the same host.
+
+- **`build.rs` watches the `oauth/` directory, not the file.** Cargo treats a `rerun-if-changed`
+  path that does not exist as stale on every build. Watching `clients.env` would have rerun the
+  build script, and recompiled the crate, on every build on every machine without one — every
+  clean checkout and every CI run. The directory always exists and is watched recursively, so
+  creating or editing the file still triggers exactly one rebuild. It also strips a UTF-8
+  byte-order mark, which Notepad has at times written and which would otherwise have become part
+  of the first variable's name.
+
+- **Tests.** In `accounts::tests`: the built-in client is used when nothing else is set; the
+  user's own always wins and never uses the built-in secret; clearing it returns to the built-in;
+  retyping the built-in id borrows the built-in secret while a different id never does; half a
+  Google pair is no client; a Microsoft built-in never carries a secret; password providers never
+  have one; and **the file holding the client is never committed** — checked three ways: the
+  ignore rule present, the committed template empty, and `git ls-files --error-unmatch` failing
+  for the real file.
+
+  The existing "a fresh install has no client" tests were rewritten to go through
+  `resolve_client` with an explicit `None`. Through `client_config` they would have passed on a
+  clean checkout and failed on the developer's own machine, where `clients.env` exists — a suite
+  whose result depends on a gitignored file.
+
+  `tests/e2e/builtinClients.spec.ts` — seven tests against the browser store with a new
+  `?builtin-clients=google,microsoft` switch, the same device as `?first-run=1`. Without it no
+  browser test could render the state a user of a real build is in, because the store otherwise
+  stands for a build from public source. Verified by making the store ignore the switch: the
+  four built-in tests fail and the three that should not care still pass.
+
+### Notes
+
+- **Google's own limits still apply to a built-in client, and cannot be engineered away here.**
+  `https://mail.google.com/` is a restricted scope. While the client's consent screen is in
+  **Testing**, only accounts listed as test users can sign in (up to 100), and Google expires
+  their refresh tokens after seven days — which from inside the app looks like being signed out
+  weekly. **In production** removes both, and requires Google's verification and a CASA
+  assessment (docs/05 §2). That is a decision about distribution, not code.
+
+- **There is still no way round registering an application.** Google and Microsoft require one,
+  and borrowing another app's client id — Thunderbird's is public — would put that app's name on
+  the consent screen and breach both providers' terms. Not done, and not to be done.
+
+- **Google app passwords are still not offered** (docs/05 §2's third mitigation). The core would
+  accept one — `account_add_password` has no auth-kind guard — but the wizard switches any Gmail
+  address to OAuth. A product decision, left for when it is wanted.
+
+### Incidents
+
+- **The local `clients.env` holds the Google client id but not the secret.** The secret was
+  deleted from Credential Manager in the 2026-09-12 reset and was never printed into a session,
+  deliberately. Until it is pasted in, `build.rs` warns and builds Google in as absent, so the
+  installed app will keep showing the note for Google. This is the designed behaviour, not a
+  failure — but the build now prints that warning on every compile until the file is completed.
+
+- **A heredoc was mangled by the shell, twice.** Writing test code through `bash -c` with a
+  quoted heredoc failed outright on one attempt, and a `node -e` script inside double quotes had
+  its backticks executed as command substitutions on another — the code landed intact, but a
+  comment lost the three identifiers it was about. Caught by reading the result back, and fixed.
+  Long snippets now go through a file written directly.
+
+- `npm run verify`: format, lint, stylelint, typecheck, 263 unit, 108 e2e, 812 + integration
+  Rust — all green.
+
+### Changed — after the first build that carried a client
+
+- **`build.rs` watches `clients.env` itself once it exists, and the directory only while it does
+  not.** Watching the directory throughout meant an edit to the README beside the file
+  recompiled the whole crate — a five-minute release build for a documentation change. Measured
+  rather than assumed, in eight steps with `cargo check`: with the file present, an unchanged
+  tree and a touched README both compile nothing, and a touched `clients.env` compiles once;
+  with the file moved out of the repository, the first build compiles, the next two compile
+  nothing — so no perpetual rebuild — and putting it back compiles once. The file was moved
+  _outside_ the repository for that test, because a renamed copy inside it would not have
+  matched the ignore rule.
+
+### Added
+
+- **"Publishing the Google application" in `src-tauri/oauth/README.md`.** Two routes: publishing
+  unverified for personal use (minutes), and full verification for public distribution (weeks).
+
+  It corrects a sentence written earlier today that said publishing "requires Google's
+  verification and a CASA security assessment". Neither is strictly true:
+
+  - Google's _"When is verification not needed"_ page lists **personal use** as an exception. An
+    unverified app can be published to production; users click through a warning, new users are
+    capped at 100 over the project's lifetime, and — the part that matters here — the seven-day
+    refresh-token expiry is tied to the **Testing** status, not to verification.
+  - Google's security-assessment policy says **local client applications**, whose data is run,
+    stored and processed only on the user's device, do not need one. An app loses that status by
+    sending restricted-scope data to a developer's or third party's server without explicit user
+    action. Halcyon has no server (standing rules 9 and 16).
+
+  The second point undercuts docs/05 §2's "budget 6–12 weeks and a four-figure cost" for this
+  app. docs/05 is a specification and was not edited; this is the record. Google makes the
+  final call during review, and one community thread — _"What happened to Local App Gmail API
+  access?"_ — suggests the treatment of local apps has been questioned. It could not be opened
+  from this environment, so the README says Google decides rather than promising the exemption.
+
+  The scope justification is written to pre-empt the likeliest pushback — reviewers steering Gmail
+  apps to `gmail.modify` — by leading with the fact that Google's IMAP and SMTP servers accept
+  OAuth only with `https://mail.google.com/`.
+
+### Notes
+
+- **The installed app carries the Google client, verified rather than assumed.** A script read
+  the values from `clients.env` and searched the installed `halcyon.exe` for them, printing only
+  true or false, so the secret never appeared in a command or its output. Both halves are present.
+  The installed exe differs from `target/release/halcyon.exe` by exactly three bytes, at one
+  offset: the bundle-type marker Tauri stamps into the copy it packages ("Patching halcyon.exe
+  with bundle type information: nsis"). Its hash therefore differs, and that is why.
+
+- **Halcyon was closed with a close request, not killed**, before the reinstall — it had no
+  accounts, and closed within the fifteen seconds allowed.
+
+### Incidents
+
+- **`npm run app:build` exits 1 on this machine, and did on 2026-09-12 as well — that entry's
+  "exit 0" was wrong.** After writing the installer, the bundler tries to sign the updater
+  artefact and fails: _"A public key has been found, but no private key. Make sure to set
+  `TAURI_SIGNING_PRIVATE_KEY`"_. On the 12th the command was piped through `tail`, and the exit
+  status read was `tail`'s. Today the status was captured directly. The installer is written
+  before the failing step and is sound, but anything that trusts the exit code — CI, a release
+  script — sees a failed build, and the `.sig` beside the installer is stale (dated 2026-09-01).
+
+- **The Google client secret was shown in the session**, by the notification that reports a
+  changed file, when `clients.env` was saved. It was not typed into the conversation and has not
+  been repeated anywhere. A Desktop client's secret is not confidential in Google's model — it is
+  now inside every copy of the exe anyway — so rotating it is optional.
+
+- **Google's help pages could not be fetched from this environment** ("unable to verify if domain
+  is safe"), nor could two third-party guides. Everything about publishing comes from search
+  results that quote those pages, and was presented to the user as such. Microsoft's pages loaded
+  normally.
+
+---
+
+## 2026-09-17 — Phase 7: An unreadable From list, a send Gmail would never accept, and files dropped on compose
+
+Three reports from using the installed app, each with a screenshot: the compose window's From
+list opened white with every account invisible but the hovered one; a message with a `.docx`
+and a `.zip` attached was refused with an error; and files could not be dragged onto a compose
+window.
+
+### Fixed
+
+- **Every dropdown list in the app was unreadable in the dark theme, and eight were built by
+  hand.** Windows draws an open `<select>` itself: the list's surface comes from the control's
+  own background, and each row from its `<option>`, which defaults to transparent. The compose
+  window's From picker was a bare `<select>` styled `background: none` with the light label
+  colour, so the list opened with no ground and its text landed on white — every account
+  unreadable except the one under the pointer, which Windows paints with its own highlight.
+  That is exactly the screenshot.
+
+  `ui/Select` had been fixed for this weeks earlier (see its CSS: an opaque `--bg-raised`
+  surface and coloured options), and its comment says why. The From picker never used it. Nor
+  did seven others: the account assistant's two Encryption pickers and the rule and smart-mailbox
+  editors' Match, Field, Condition, Action, Mailbox and Colour pickers — all bare selects on
+  `--fill-hover`, a 4% black that is right on a pane and no surface at all for a list. All eight
+  now go through `Select`.
+
+  Two guards so it stays fixed. **ESLint refuses a raw `<select>`** anywhere outside
+  `ui/Select.tsx` (`no-restricted-syntax`), with a message saying why — verified by adding one and
+  watching the lint fail. And **`global.css` sets a floor** on every `option`: an opaque
+  `--bg-menu-opaque` ground and `--label-1` text, under `:where()` so its specificity is zero and
+  any component still decides.
+
+  `tests/e2e/dropdowns.spec.ts` asserts what Windows paints the list _from_, since a screenshot
+  cannot see the open list: in the dark theme, every select has an opaque surface, and every
+  option an opaque ground with at least 4.5:1 contrast. Run against the original rule-editor
+  code it fails with exactly the fault reported — `predicate-match: the list needs an opaque
+surface`, alpha `0.05`. The compose picker cannot open in a browser, so
+  `tests/unit/composeFrom.test.tsx` checks it is `Select` (it fails when put back to a bare
+  select).
+
+- **A rule's condition value could not be typed — its field was 0px wide.** Found while
+  screenshotting the converted rule editor, not reported. The condition row is a grid,
+  `minmax(0, 10rem) minmax(0, 10rem) minmax(0, 1fr) auto auto`, and grid sizing grows the two
+  fixed-limit popup columns to their 10rem limit _before_ a flexible column is given anything.
+  In the 380px content box of a 420px sheet the columns measured `150px 150px 0px 28px 28px`.
+
+  First written up as a regression from moving onto `Select`, because the screenshot after the
+  change showed a sliver where the field should be. Measured again with the original code
+  restored: identical, `150px 150px 0px 28px 28px`. It predates this work; the comment and this
+  entry say so.
+
+  Fixed with two component tokens: `--rule-sheet-width` (600px, capped at the window) for the
+  rule and smart-mailbox draft sheets — five controls abreast do not fit a generic 420px sheet —
+  and `--rule-value-min-width` (120px) as the value column's floor, so it can never collapse to
+  zero again. The popups in these rows may also shrink below `Select`'s 132px settings-form
+  minimum (`--select-min-width: 0` in their scope), truncating their label rather than starving
+  the value. Measured after: `160px 160px 160px 28px 28px`, and an e2e test types into the field.
+
+- **An action with no second popup put its buttons in the wrong columns.** "Mark as read" has no
+  Mailbox or Colour control, so its row rendered four cells in the five-column grid it shares
+  with the conditions, and the × landed in the value column and the + in ×'s. Invisible while
+  that column was 0px wide; obvious the moment it was not. The row now fills the second column
+  with a spacer when there is no popup for it, and an e2e test checks the two × buttons line up.
+
+- **A failed message could never be dismissed.** The failure banner's only button was Try
+  Again, and a refusal about content fails identically on every attempt, so the message and its
+  banner stayed for good. It now also offers **Delete**, behind a confirmation that says this is
+  the only copy of a message that was never sent. `outbox::discard_failed` removes the row and
+  its `.eml`, and only for `failed` — `holding` belongs to Undo Send, and anything queued or
+  sending may already be on the wire. A `false` from the core, meaning the message stopped being
+  a failure meanwhile, is reported rather than shown as a deletion.
+
+### Changed
+
+- **Gmail's attachment block is explained before it is quoted.** Its wording — _"blocked because
+  its content presents a potential security issue"_ — does not say an attachment is the cause,
+  that it can be one inside a `.zip`, or that retrying is pointless. `sync::sender::describe` now
+  leads with that and keeps Gmail's words after it, recognising the refusal by `5.7.0` plus the
+  `p=BlockedMessage` help link, which is the part Google keeps stable. Other refusals are
+  untouched, per the banner's rule of showing the server's own words.
+
+### Added
+
+- **Files can be dragged onto a compose window to attach them.** It never worked, and the reason
+  is in Tauri, not the page: a window created with the native drag-and-drop handler on (the
+  default, which compose windows kept) swallows every drag and emits `tauri://drag-*` events, and
+  nothing listened for them. The main window turns the handler off because it needs HTML5 drag
+  and drop to move messages; compose needs the opposite, because only the native handler reports
+  **real file paths**, and the attachment pipeline is built on paths end to end — a WebView2
+  `File` from an HTML5 drop carries none. `compose_open` now says so where a future edit would
+  otherwise "fix" it to match the main window.
+
+  `ipc.onFileDrop` wraps the webview's drag-drop event (enter and over folded into one `hover`,
+  since `over` repeats at pointer rate); `compose_describe_files` stats the dropped paths — only
+  their metadata, the bytes are read at send time as for picked files — and reports anything that
+  is not a file, such as a folder or a path deleted mid-drag, by name. The compose window shows a
+  full-window drop target while files are held over it, adds the files through the same
+  `addAttachments` the picker now uses, and de-duplicates by path so a file dropped twice is not
+  attached twice. The drop target finally puts `--tint-drop` to use, mixed opaquely into the
+  content ground; the sidebar never could use it, because 25% over a translucent pane was not
+  visible.
+
+  Covered by `ipc::compose::describe_tests` (a file, a folder and a vanished path, in one drop)
+  and `tests/unit/composeFrom.test.tsx`, which captures the drop handler and fires it the way the
+  webview would — a browser cannot produce a native drop at all.
+
+- **Gmail's blocked attachments are refused before the message is queued.**
+  `mail::attachment_policy` holds Google's published list of blocked extensions and, for a
+  `.zip`, reads the archive's central directory — names only, nothing decompressed — for a
+  blocked entry. `compose_send` applies it to any account that sends through Gmail, recognised
+  by its provider **or** its SMTP host, so a Google address added through "Other" with an app
+  password is covered too. The compose window stays open with the message intact and a sentence
+  naming the file and the entry, and the user can remove the attachment and send.
+
+  Verified against the real rejected message, kept in the outbox: its zip is refused naming
+  `bin/dinput8.dll`, and its `.docx` passes. It is a courtesy check, not a guarantee — Gmail also
+  inspects things this does not, such as macros and other archive formats — which is why the
+  failure banner's explanation stays.
+
+### Notes
+
+- **The send failure was not a Halcyon bug.** The rejected message was taken apart from the
+  outbox copy: CRLF line endings throughout, no line over 85 characters, every base64 part
+  round-tripping exactly, every MIME boundary closed. The `.docx` was a clean twelve-entry Word
+  file with no macros. The `.zip` was ScriptHookV, a GTA V modding package, holding
+  `dinput8.dll`, `ScriptHookV.dll` and `xinput1_4.dll` — three types Gmail blocks even inside an
+  archive. No mail client can send that through Gmail; Google's advice is a Drive link.
+
+- **The Word attachment's name was sent as `filename*0="…"`.** lettre folds any Content-
+  Disposition parameter that would overrun the header line into RFC 2231 continuation form, and
+  "New Rent agreement format Commercial.docx" was long enough. A single `*0` segment is valid,
+  and Gmail, Outlook, Apple Mail and Thunderbird all read it, so it was left alone rather than
+  widening this change. The Content-Type carries no `name=` either, which a few older clients
+  prefer.
+
+- **"Edit Message" for a failed send was not built.** The outbox keeps only the raw `.eml`, and
+  nothing turns one back into a compose window with its attachments — Undo Send deletes rather
+  than reopens. With the pre-flight check stopping the reported case before it is queued, Delete
+  is the essential exit; reopening a failed message for editing is a separate feature.
+
+- **Image drag-and-drop into Claude Code was not working, and the cause is the terminal.** The
+  session runs in Warp (`warp.exe` → `claude.exe`, not elevated), and Warp routes a drop onto a
+  running program as typed text or drops it, per warpdotdev/warp#7028 and #9545 and
+  anthropics/claude-code#48153. A file path pasted into the prompt works, and was used for the
+  three screenshots behind this entry.
+
+### Incidents
+
+- **An edit wrote a dummy function into the account assistant.** Replacing the Encryption select
+  closed the component early and invented `_unusedFieldsetCloser` to absorb the original closing
+  tags. Caught on the next read, before any build, and replaced with a module-level options
+  constant.
+
+- **A layout bug was called a regression before it was measured.** See the value-field entry
+  above: a comment written from a screenshot said the move onto `Select` caused it; restoring
+  the original code showed the same 0px column. The comment was corrected before commit.
+
+- **A cancelled-confirmation test failed on timing, not behaviour.** While a sheet animates
+  closed it still hides the page behind it from the accessibility tree, so a synchronous
+  `getByRole('alert')` found nothing although the banner never left. The test now awaits it.
+
+- `npm run verify`: format, lint, stylelint, typecheck, 275 unit, 113 e2e, 887 Rust — all green.
+
+---
+
+## 2026-09-17 — Phase 11: The designer's icon, everywhere Windows draws one
+
+The icon set arrived from the designer — a white envelope on `#EC3013`, small sizes drawn by
+hand, a Store package set, lockups and marks — with the request to use it for the app and put it
+everywhere it belongs. The detailed record is `docs/PHASE-11-VERIFICATION.md` §10.
+
+### Added
+
+- **`assets/brand/`**, the tracked source for every icon the app ships, with a README saying what
+  each file is, the designer's rules, and what is deliberately not used.
+
+- **`tools/build-icons.ps1`**, which `npm run icon` now runs. It renders the SVG master into the
+  bundle PNGs through `tauri icon` (in a scratch folder — that command also writes Android, iOS
+  and macOS sets this app does not ship), packs `icon.ico` from the hand-drawn sizes, copies the
+  MSIX set as named, redraws the two NSIS images, and copies the favicon.
+
+- **`public/favicon.svg`**, linked from `index.html`: the browser build had no tab icon.
+
+### Changed
+
+- **Every icon output is the new icon.** `icon.ico` is packed from the hand-drawn files — 32, 16,
+  20, 24, 40, 48, 64 and 256 px, PNG entries, 32 first because Tauri makes entry 0 the window
+  icon. The brand draws the stroke at 8% of the width at 256 px and 12% at 16 px, which a
+  downscale of the 256 would thin to a hairline; `32x32.png` and `64x64.png` come from the drawn
+  sizes for the same reason. The MSIX set is the designer's 45 files. The NSIS header and welcome
+  images keep their layout — the icon on the neutral plate, a rule of the accent along the foot —
+  with the new icon and accent.
+
+- **The Store package's `BackgroundColor` is `#EC3013`**, not `transparent`. The brief says so,
+  and the tiles are drawn full bleed on that red; `transparent` put the user's own accent colour
+  behind any plate edge instead.
+
+### Removed
+
+- **`tools/make-icon.cjs`, `make-installer-art.cjs`, `make-store-assets.cjs` and `png.cjs`.** They
+  _drew_ the Phase 0 art — a blue rounded square — and any of them, run once, would have painted
+  over the brand. docs/07 §2.4 asks for the package set to be generated from a single source; the
+  designer's export is that source now.
+- **`src-tauri/icons/icon-source.png`**, the old generator's intermediate, read by nothing.
+
+### Fixed
+
+- **The notification area icon had no image at all.** Tauri's `TrayIconBuilder` supplies none
+  unless given one, and `tray-icon` then registers the entry without `NIF_ICON` — which is how the
+  tray had been built since Phase 10. It now carries the brand's drawn icon for the primary
+  display's scale — 16, 20, 24, 32, 40 or 48 px for 100% to 300% — rather than the window's 32 px
+  icon shrunk by the shell. `src-tauri/icons/tray/` holds the six; two unit tests check the size
+  chosen for each scale and that each file decodes at the size it is filed under.
+
+- **A new `icon.ico` was not reaching the exe.** The resource compiler embeds it from inside
+  `tauri_build`, which does not tell Cargo it read the file — and `build.rs`'s own
+  `rerun-if-changed` lines switch off Cargo's default of rerunning the script on any change in the
+  package. So the build script, last run at 13:53 for the sign-in clients, never ran again, and
+  the first three release builds after the icon set linked the old `resource.lib`: the installed
+  exe showed the blue Phase 0 envelope in Explorer and the Start menu, while the tray, which is
+  compiled in with `include_bytes!`, was already new. `build.rs` now watches `icons/icon.ico`,
+  and a rerun of the script also recompiles the crate, which refreshes `generate_context!`'s
+  copy of the icon — the window's. The rebuilt `resource.lib` went from 23,692 to 59,884 bytes, and the
+  icon extracted from the installed exe is `#EC3013` at 16 and 32 px.
+
+### Notes
+
+- **The designer's manifest snippet declares a splash screen, and ours still does not.** Windows
+  never shows one for a full-trust desktop app, and declaring one failed the App Certification
+  Kit's resource test once already; `AppxManifest.xml` says so. The snippet's `Description`,
+  "Mail for Windows", is not used either — the manifest keeps the product's own.
+- **Every PNG carries a C2PA provenance chunk** (`caBX`, 5,758 bytes). Left in place: decoders
+  skip it, and stripping it would alter files that are the designer's to sign.
+- **.NET cannot read some entries of the new `icon.ico`, and that is .NET's limit.**
+  `System.Drawing.Icon.ToBitmap` threw on the 64 and 256 px entries — and on Tauri's own
+  generated icon at 32 px and above — while Win32 `LoadImage` loaded every size from 16 to 256,
+  with the brand red in the corner.
+- **The designer's full export is not tracked.** `Halcyon Mail App Logo/` holds the design tool's
+  HTML, scripts and `_ds/` bundle, which failed `format:check` and 76 lint rules; everything the
+  app uses was copied into `assets/brand/`. It is in `.gitignore`, and in ESLint's own ignore list,
+  because ESLint does not read `.gitignore`.
+
+### Incidents
+
+- **The builder's first run measured the 256 px icon as 0×0.** PowerShell shifts a `[byte]` as a
+  byte, so `1 -shl 8` is 0 and the IHDR width read as nothing. Each byte is widened to `[int]`
+  first; the comment says why.
+- **`tauri icon` narrates the Android and iOS files it writes on stderr**, and PowerShell 5.1
+  under `ErrorActionPreference = 'Stop'` turns redirected native stderr into a terminating error.
+  The builder relaxes the preference for that one call and decides on the exit code.
+- **The new build was installed once with the old exe icon** (see Fixed). Caught by extracting
+  the icon from the installed exe rather than by looking at the window, which was already right;
+  rebuilt and reinstalled, and the shell's icon cache refreshed with `ie4uinit -show`.
+
+---
+
+## 2026-09-17 — Mail's mailbox menu, every row of it, and changes that reach the server in seconds
+
+Asked for: the right-click menu on a mailbox as macOS Mail draws it — from a capture of Mail's
+menu on an account's inbox, kept in `Sample images/` and not tracked — with every row working
+and tested end to end. The menu had five of Mail's rows, and the comment above it said why the
+other four had nothing behind them. They have now. The detailed record, including the
+deviations from docs/01 §3, is `docs/PHASE-11-VERIFICATION.md` §11.
+
+### Added
+
+- **New Mailbox…** — a sheet with Mail's Location and Name. The name is checked as it is typed
+  (`src/lib/mailboxName.ts`, the same rules in the same words as the core); a name the core
+  refuses — one the account already has, ignoring case and accents — is said in the sheet, which
+  stays open. The folder appears at once and goes to the server encoded in modified UTF-7.
+
+- **Rename Mailbox…** and **Delete Mailbox…** on folders the user made, and never on the Inbox,
+  the folders the account files into, or Gmail's own. They exist because New Mailbox does: a menu
+  that makes folders and cannot remove them leaves the user with every typo. A rename keeps the
+  folder's row, so its mail, its count and its place in Favourites stay with it; children go with
+  their parent. Delete asks first and says what will go — for Gmail, that a _label_ goes and the
+  mail stays in All Mail — and takes any folders inside with it.
+
+- **Add to Favourites / Remove from Favourites.** Stored on the mailbox row
+  (`mailbox.favourite_order`, migration 0013), so a renamed folder stays a favourite and a
+  deleted one stops being one. Appended after the rows every sidebar starts with, so Ctrl+1–9
+  never renumber. An account's Inbox is labelled "Inbox – Google", and two favourites of one name
+  are told apart the same way.
+
+- **Erase Deleted Items…** and **Erase Junk Mail…**, each behind a confirmation that names the
+  mailbox and the account. They erase everything in the mailbox _on the server_ (`\Deleted` on
+  `1:*`, then expunge), not just what the store downloaded — the store keeps only the newest
+  messages of any folder but the Inbox, so a UID list would have left the rest behind for ever.
+
+- **`sync::folders`, four queued operations and `ipc::folders`.** `CreateMailbox`,
+  `RenameMailbox`, `DeleteMailbox` and `EraseMailbox` join the queue, each written to be sent
+  twice without harm ("already exists" is success for a create). Folder changes are optimistic,
+  standing rule 10: the sidebar changes when the transaction commits and the account syncs
+  straight after.
+
+- **A sync no longer undoes a folder change it has not sent yet.** A `LIST` taken before a
+  queued rename reaches the server still shows the old name; `persist` used to write it back as a
+  new empty folder, and `prune` to delete the renamed one — with its mail — for not being on the
+  server. `ops::PendingTree` makes both hold off until the change has gone.
+
+- **When the server says no.** A refused mailbox change is given up at once rather than retried
+  five syncs running. The local tree goes back to the server's (`abandon_created` also sends mail
+  that was moved into the refused folder back where the server still has it; `abandon_rename`
+  rewrites everything queued since to the old name), and the window shows the server's own words:
+  _"The server would not rename “Keep” to “Wanted”, so it keeps its old name. The server said:
+  [ALREADYEXISTS] Target mailbox already exists."_ Dovecot's timing trailer is taken out.
+
+- **Queued changes are pushed within about two seconds** (`SyncEngine::push_soon`): connect,
+  drain, disconnect, once per burst, under the account's lock. Every command that queues work
+  calls it.
+
+- **`sync::utf7`**, IMAP's modified UTF-7, both ways, with the RFC's own example among its tests.
+
+- **`src-tauri/tests/folders_gate.rs`**, seven `#[ignore]`d tests against the Dovecot rig.
+
+### Changed
+
+- **The menu is Mail's, row for row, and keeps its shape.** Rows with nothing to act on — an
+  empty Bin, no Junk, nothing unread, an account that does not sync — are greyed rather than
+  removed; Mark All Messages as Read used to vanish instead, so the menu was a different shape on
+  every other mailbox. The glyphs follow Mail's (an open envelope for Mark All as Read, `@` for
+  Edit).
+
+- **Edit “Account”… opens Settings on that account**, its name field focused, rather than on the
+  Accounts pane with the user left to find it (`settings_open` takes an account, and an open
+  window hears `settings:account`).
+
+- **The mailbox actions moved out of `AppShell`** into `useMailboxMenu`, with the four sheets and
+  the refusal toast.
+
+- **Long UID lists go as ranges, in commands of at most 7,000 octets.** Every UID used to be
+  listed in one command; Mark All as Read on fifty thousand scattered UIDs wrote about 290 KB.
+  RFC 7162 asks for about 8,000. Consecutive UIDs only ever become a range, so no command reaches
+  a message that was not chosen.
+
+- **`MailboxRow` carries `favouriteOrder`, `delimiter`, `editable` and `descendants`**, and the
+  mailbox table the separator `LIST` reports (migration 0013).
+
+- **The browser store answers the new commands, and Mark All as Read.** Its `mailbox_mark_read`
+  returned 0 and changed nothing, which the menu reported as "Nothing was unread" over a badge
+  that said otherwise. `mailboxesTree` also returns copies now: the store edits its rows in
+  place, and TanStack Query, handed the same array back, has no reason to render again.
+
+### Fixed
+
+- **Right-clicking an account under All Inboxes opened no menu** — the exact row Mail's capture
+  was taken on. The sidebar looked the clicked row up among each section's top-level rows only.
+  `allNodes` walks the children too.
+
+- **A flag changed during a sync was overwritten by that sync.** The drain at the start of a pass
+  protects a change made before it; one made _during_ it — Mark All as Read while the account was
+  syncing — was undone by the flags the pass fetched a moment later, which the server still held.
+  Three messages of six went back to unread and stayed so until the next sync. `persist` now
+  leaves a flag alone while a change to it is queued (`ops::unsent_flags`).
+
+- **Queued changes waited for something else to start a sync.** With IDLE, that is the Inbox
+  changing or the five-minute safety net, so a flag, a move or a Mark All as Read in any other
+  folder could sit locally for minutes. Found by the live run: the server still had every message
+  unread after the app showed them read. This was true of every queued change, not only the new
+  menu's; `push_soon` fixes it for all of them. Drafts are unaffected — they still ride the next
+  push or sync, as their own comment asks.
+
+- **Folder names with accents were shown as the server encodes them** — "Re&AOc-us" for "Reçus" —
+  and the name heuristics compared "envoyés" and "Entwürfe" against those encodings and never
+  matched. Names are decoded for display and for the heuristics.
+
+- **`locate` could name a message by a UID from a different folder.** A moved message remembers
+  its origin folder and UID; when the origin row was gone, the origin UID was paired with the
+  message's _current_ folder. The two now come together or not at all, and deleting a folder
+  clears the origins that pointed at it.
+
+- **A rule moving mail into a deleted folder failed the whole run, and undoing a move out of a
+  deleted folder failed the whole undo** — both on the foreign key. Each now skips the part that
+  has nowhere to go.
+
+- **The open folder, renamed, kept its old name in the list's heading; deleted, it left an empty
+  pane under a name that no longer existed; removed from Favourites, it lost its highlight.** The
+  selection now follows the sidebar: the heading is relabelled and the open message kept
+  (`retargetSelection`), a lost favourite moves to the folder's own row, and a deleted folder
+  gives way to the Inbox.
+
+### Notes
+
+- **What was not built from docs/01 §3's list, and why** — Rebuild, Use This Mailbox As, folders
+  made inside other folders, favourites reordered by drag — is in `PHASE-11-VERIFICATION.md`
+  §11.1.
+- **No server was seen refusing a long command.** The Dovecot rig took a 114 KB `UID STORE`
+  without complaint when it was tried. The split follows RFC 7162 rather than a failure.
+- **The Delete confirmation gives no count**, because the store's count of a folder can be
+  smaller than what the server deletes, and an understated warning before a permanent deletion is
+  worse than none.
+- **Verified, in the built app, against a real server.** The release build was run with its
+  store, logs and WebView2 profile redirected to a scratch folder (`LOCALAPPDATA`,
+  `WEBVIEW2_USER_DATA_FOLDER`), the rig's account staged in that store, and driven over WebView2's
+  debugging port by a Playwright script. Every server-side claim was checked with a separate IMAP
+  client. 19 of 19 passed, including a favourite surviving a quit and relaunch and a refused
+  rename reported in the server's words. The two sync faults above were found by this run.
+- **The user's own store was not touched by that run**: its last write is the moment the
+  installed app was closed for it. The window-position file the test instance wrote to was
+  restored from a copy, and the staging helper and its credential were removed afterwards.
+
+### Incidents
+
+- **A code comment claimed Dovecot refuses long command lines.** Written from its documented
+  default; sending one showed the rig accepts 114 KB. Corrected before commit.
+- **That probe cleared `\Flagged` on the even UIDs up to 40,000 in the rig's Inbox.** The seed
+  sets no flags, so only flags left by earlier test runs could have been lost.
+- **The first gate run searched the Inbox without selecting it**, and the test, not the code,
+  failed.
+- **The live run misread an unread count.** It took the count from the row's text, and a folder
+  named "App E2E Renamed 185822" with three unread read as 1,858,223. The helpers read the
+  badge's label now — and read it in one step: counting the badge and then asking for its label
+  raced the badge disappearing, and hung until the test timed out, which is how the verify run
+  after the first fix failed. Two runs of the spec straight after that fix also failed once each,
+  on a test that was not captured; 6 runs, 108 stressed repeats and two full e2e gates since have
+  not reproduced it.
+- **The live run lost its credential half-way.** Running `folders_gate` meanwhile purged the
+  rig's Credential Manager entry, which every rig test shares, and the app then reported the
+  sign-in as refused. Restaged; the gates and the live run must not overlap.
+- **A test-name filter matched too much.** `cargo test … stage` also ran `unstage`, which deleted
+  the credential it had just stored. `--exact` since.
+- **A relaunch attached to a WebView2 process that was still shutting down**, and the window lost
+  its page. A pause before relaunching fixed it.
+- **An e2e assertion looked for a sidebar row while a sheet was open.** A modal sheet hides the
+  page from the accessibility tree; the test now closes it first.
+- **Two scripted edits did nothing.** Python is not installed here, and a `node -e` edit inside
+  double quotes was mangled by bash's backtick substitution. Neither wrote anything; the edits
+  were redone with the editor.
+- `npm run verify`: format, lint, stylelint, typecheck, 296 unit, 140 e2e, 954 Rust — all green.
+  `folders_gate`: 7 of 7 against the Dovecot rig. The built app against the rig: 19 of 19.
+
+---
+
+## 2026-09-19 — The four rows that were not built, and a test certificate that stops expiring
+
+Asked for: the four things the last session listed as missing — Rebuild, Use This Mailbox As,
+folders made inside other folders, and Favourites reordered by drag — plus the intermittent
+test failure, the rig certificate that expires on 2026-09-25, and the flags a probe was said to
+have cleared. The detailed record is `docs/PHASE-11-VERIFICATION.md` §12.
+
+### Added
+
+- **Rebuild.** Reads the whole mailbox from the server again: every envelope and flag written
+  over the rows already here, whatever the server no longer lists removed, and every cached body
+  downloaded again. It is a pass over that mailbox alone (`SyncEngine::sync_mailboxes`) rather
+  than a full sync — on an account with a 50,000-message Inbox that is minutes for a question
+  about one folder — and it runs after the queue, because a message deleted here and not yet on
+  the server would otherwise be read straight back and reappear. It says when it starts and, since
+  the work outlives the menu, again when it has finished (`mailbox:rebuilt`).
+
+  **It does not drop the mailbox and fetch it again**, which is what Mail does and what
+  `UIDVALIDITY` recovery already does here. A row carries things no server has — a flag colour, a
+  snooze, a follow-up, the junk verdict, the row id undo holds — and discarding those to fix a
+  wrong subject is a repair that costs more than the fault.
+
+- **Use This Mailbox As ▸** — Drafts, Sent, Junk, Bin, Archive, with a tick on the mailbox that
+  has the role. Kept in `mailbox_role` rather than on the mailbox row, because every sync rewrites
+  `mailbox.role` from what the server says and would undo it; `mailboxes::persist` reads the
+  choice back over the server's answer, and only while the chosen mailbox is still listed, so a
+  folder deleted in webmail does not leave the account without a Bin. Not offered on the Inbox, on
+  an imported archive, or on Gmail — which decides its own, and where a message "deleted" into a
+  label is not deleted at all.
+
+- **Folders inside folders.** New Mailbox's Location lists each account and every mailbox that can
+  hold another, indented as the sidebar nests them; the sheet opens on the folder the menu was
+  opened on. The sidebar nests by path (`MailboxRow.parent_id`, worked out in
+  `db::query::mailboxes_tree`, never stored — a stored parent has to be kept in step with renames
+  made elsewhere, and the path is already the answer) and the rows open and close. **Never under
+  the Inbox**: servers that keep every folder inside it would otherwise show the whole account as
+  the Inbox's children. A name is taken only inside the same parent, and the refusal says which.
+
+- **Favourites are reordered by drag** — the whole section, the rows every sidebar starts with
+  included (docs/01 §3) — and by Alt+↑ / Alt+↓ on the focused row, which is said aloud for a
+  screen reader and listed in Help. A mailbox dragged in from its account becomes a favourite
+  where it is dropped. Where it will land is a line drawn over the edge of a row rather than a gap
+  opened between rows, so nothing moves until the drop (standing rule 6), and the new order is
+  shown before the core answers (standing rule 10).
+
+- **Migration 0014**: `favourite` (one ordered list for the built-in rows and the user's
+  mailboxes, replacing `mailbox.favourite_order`, which could never order the two against each
+  other), `mailbox_role`, and `mailbox.rebuild_requested`.
+
+- **Four more rig tests** (`folders_gate.rs`, 11 in total): a folder made inside another and
+  renamed and deleted with it; a chosen Bin that outlasts a real listing and is what Erase
+  empties; a rebuild that puts a damaged copy right and keeps what is only here; and a folder
+  emptied on the server being emptied here.
+
+### Changed
+
+- **`test/dovecot/certs.sh` makes a CA that can vouch for one server and nothing else.** It signs
+  one certificate, deletes the CA's key, and gives the CA critical name constraints naming only
+  the rig's own names and addresses; both last 397 days instead of 30. The old arrangement was a
+  key on disk that this machine would accept for _any_ site, and a rig that stopped working every
+  month. Checked against Windows' own chain engine with that CA as its only root before anything
+  was trusted: the rig's names validate, another fails, and a certificate for a name outside the
+  constraints fails with `CERT_TRUST_HAS_NOT_PERMITTED_NAME_CONSTRAINT`.
+- **The new certificate is staged on the rig, not in service.** Trusting a root is the one step of
+  a renewal that should need a person, and this session's attempt to do it was refused by the
+  permission prompt — correctly. `test/dovecot/trust-ca.ps1` is the half that needs the user;
+  README.md, "The certificate", has the whole procedure.
+- **`Db::folder()`** — a store knows the directory it lives in, so what belongs to it is written
+  beside it.
+- **The rig gates say what a failed TLS handshake probably means**, since the likeliest cause
+  after a quiet spell is the certificate expiring.
+
+### Fixed
+
+- **A sync read back a message the user had just removed.** A move or a delete is optimistic; the
+  server still lists the message until the drain sends it, and the next pass wrote it back as a
+  new row — a deleted message returned, a moved one showed in both folders — until the change
+  landed and a later sync tidied up. `ops::unsent_removals` is the removals' counterpart of
+  `unsent_flags`, which fixed the same shape of bug for flags on 2026-09-17.
+- **A mailbox emptied on another device stayed full here.** `remove_missing` refuses to act on an
+  empty `UID SEARCH`, rightly; but `EXISTS 0` from the `SELECT` is an answer rather than a fault,
+  and nothing acted on it. A Bin emptied in webmail kept every message here for good.
+- **A store opened anywhere but the app's own path cached message bodies into the app's.**
+  `fetch_body` built the path from `db::default_path`, so a rig test that downloaded a body would
+  have written into the user's own cache under ids that name the user's own messages. Found while
+  writing the rebuild's gate test, which is the first thing to fetch a body against a temporary
+  store.
+- **A comment in `playwright.config.ts` had lost its inline code** to the same Git Bash quoting
+  fault recorded below, in an earlier session: "` ` serialises too, via ` `". Restored.
+
+### Notes
+
+- **The intermittent failure of 2026-09-17 is still unexplained, and did not recur.** 820 parallel
+  runs of the menu spec, and 123 more with the window's source edited underneath them — Vite
+  reloads the page when a file changes, which is the likeliest thing to have failed a single test
+  while that day's work was being written. Nothing reproduced it.
+- **The probe cleared no flags.** 2026-09-17's incident said a scratch probe "may have cleared
+  `\Flagged` on the even UIDs up to 40,000". It did not: every one of those messages still carried
+  the modification sequence it was given when the mailbox was seeded, and a flag change that
+  changes anything raises it.
+
+### Incidents
+
+- **A new gate test emptied the rig's Inbox.** Its tidy-up named `"INBOX"` where it meant the
+  account's Bin, and `\Deleted` on `1:*` plus an expunge took all 50,253 seeded messages. The rig
+  is disposable and its seeder deterministic, so it was re-seeded to exactly the corpus it started
+  with (50,000, 45,000 of them read), with the index and UID list removed first so UIDs begin at 1
+  again — which the other gate's fixtures depend on. `empty_on_server` now refuses an Inbox
+  outright; the refusal, not the care taken, is what stops it happening twice. No real account was
+  touched.
+- **Git Bash rewrote four block markers**, because an argument beginning with `//` is a
+  Windows-style switch to it: `/// Takes back …` became `//// Takes back …`, and the marker that
+  ended the block ate a slash from the comment after it. The compiler found them; edit scripts
+  now take their markers from a file.
+- **A `node -e` script inside double quotes lost a doc comment to bash's backtick substitution**
+  again — the same fault as 2026-09-17, in the same shape. The comment was written back with the
+  editor, and scripts go in files now.
+- **The stress run's 19 failures were the machine suspending**, not a race: they all land in the
+  two repeats around the moment it slept, the first of them `net::ERR_NETWORK_IO_SUSPENDED`, with
+  eleven of twelve workers failing together.
+
+### Verified
+
+- `npm run verify`: format, lint, stylelint, types, **308 unit, 154 e2e, 998 Rust** — all green.
+- `folders_gate`: **11 of 11** against the Dovecot rig, including the four new tests.
+- `dovecot_gate`: **5 of 5** against the re-seeded mailbox, which is what says the re-seed put the
+  rig back the way its other gates need it — the cold sync of fifty thousand, the killed
+  connection, the flag changed elsewhere, and the `UIDVALIDITY` reset.
+- **The built app, against the rig: 26 of 26.** Rebuilt, installed over the running copy, and run
+  with its store, logs and WebView2 profile redirected to a scratch folder, driven over WebView2's
+  debugging port; every server claim checked with a separate IMAP client. In order: the rig's
+  50,000 messages synced in; New Mailbox opened on the account from a mailbox that can hold none
+  and inside the folder it was opened on; the folder inside appeared nested at once and reached
+  the server as `Rig E2E …/Re&AOc-us …`; Use This Mailbox As moved the role, the menu stopped
+  offering Rename and Delete, **and the choice outlasted a Synchronise**; a flag colour was set —
+  something no server has — and **Rebuild kept it**, with all three messages here and three still
+  on the server; the folder was added to Favourites, dragged above All Inboxes with the insertion
+  line showing on exactly one row, and moved back down with Alt+↓. After quitting and relaunching:
+  the favourite was where it had been dragged, the chosen role had survived the restart and
+  another sync, the folder inside was still inside; then the role was handed back, and Delete took
+  the folder and the one inside it, here and on the server.
+- The user's own store was migrated to schema 14 by the installed build on its first launch
+  (`favourite` and `mailbox_role` are in it), and the window-position file the test instance wrote
+  to was restored from a copy.
+- Two things about that run are worth keeping. **Playwright's `dragTo` never returns against
+  WebView2**: it asks Chromium to intercept drags and this WebView2 does not answer, so the drag
+  was dispatched as DOM events instead — with a pause between them, because fired in one task
+  React has not committed the state `dragstart` sets before `drop` reads it, and the sidebar
+  refuses a drop it does not think is happening. And **the run's own helper read a folder's name
+  as part of its unread count** — it stripped trailing digits, and every folder it makes is named
+  with a timestamp. That is the same trap as 2026-09-17, in the same file's descendant; it now
+  takes the badge's own text off the end instead.
+
+---
+
+## 2026-09-20 — The reader's selection deck
+
+### Added
+
+- **Selecting several messages now draws them, fanned, instead of counting them.**
+  `src/features/reader/SelectionDeck.tsx` and its stylesheet. Up to three cards in one grid
+  cell, each tilted about its bottom edge and lifted clear of the one in front, with
+  "N Messages Selected" beneath. Asked for as "stacked together, one over the other and
+  slightly tilted outwards, like macOS does".
+
+  The pane used to show that same sentence over a 22px envelope glyph. It is accurate and it
+  says nothing: the commonest way to get a multi-selection wrong is a shift-click that
+  quietly caught a row you did not mean, and a pane showing only a number cannot help you
+  notice. The deck names the messages it caught.
+
+- **`useSelectedMessages`** (`src/app/queries.ts`) — one query per drawn card, keyed on
+  `keys.message(id)`. That key existed and was invalidated by every mutation in the file,
+  but nothing had ever read it; a flag or read-state change on a card now repaints it with
+  no new event and no new code path. **The caller passes only the ids it will draw**, which
+  is the bound that keeps Ctrl+A over a hundred thousand rows at three `message_get` calls.
+
+- **`EmptyState` gained a `media` slot**, replacing the glyph rather than joining it. The
+  deck goes there so the whole block stays inside the one `role="status"` live region that
+  already announces the pane — the alternative was a second live region nested in the first.
+
+- **Tests.** `tests/unit/selectionDeck.test.tsx` (6) for the decisions — the three-card cap,
+  depth order, what a rear card may say, the count when it disagrees with the cards, and a
+  message deleted out from under the selection. `tests/e2e/selectionDeck.spec.ts` (6) for the
+  geometry, which has no return value: it reads real rectangles and asserts every card's name
+  line finishes above the top edge of the card covering it.
+
+### Changed
+
+- **Nine `--deck-*` tokens** in `src/styles/tokens/component.css`. `--deck-fan-step` is a
+  `calc()` rather than a round number, and deliberately so: the stagger has to clear the card
+  padding, one body line, and the distance a tilted card's low corner falls, which is
+  `(width / 2) × sin(tilt)` and lands at 7.9px for 3° and 13.1px for 5°. The deepest card
+  loses both swings — its own and the one in front of it — so `--deck-corner-drop` is their
+  sum. Deriving it is what keeps the deck correct at all three densities, where
+  `--font-size-base` moves the line height underneath it.
+
+- **`senderLabel` / `subjectLabel`** (`src/features/messageList/rows.ts`) now take the
+  fields they read rather than a whole `MessageRow`. `MessageFull` carries the same fields
+  and is what the reader holds, but neither generated type is assignable to the other.
+
+- **The drag-deck leak test** (`tests/e2e/dragMessages.spec.ts`) now looks for
+  `body > [class*="deck"]`. It asserted no element anywhere had a class containing "deck",
+  which the new deck would have tripped the moment that test multi-selected. It passes today
+  only because it drags a single row.
+
+### Notes
+
+- **The first draft gave all three cards the full three lines, and the screenshot killed it.**
+  A card behind is visible down to the top edge of the card in front, that edge is tilted, so
+  the third line came out cut lengthways — a grey half-line that reads as clipped text rather
+  than as a card behind a card. Rear cards now name themselves and stop, and the only thing
+  the tilt can slice is blank card, which is what a stack of paper looks like anyway. Tilts
+  went from 2.5°/−3.5° to 3°/−5° in the same pass; at the smaller angles the fan was barely
+  visible at all.
+
+- **A fixed two steps of reserved padding put a two-card deck a whole step low in the pane.**
+  Transforms take no part in layout, so the deck reserves the room its lifted cards need with
+  `padding-top` — and reserving room for a third card that is not there let the empty space
+  do the pushing. The deck now carries `data-cards` and reserves one step per card behind.
+
+- **The deck is `aria-hidden`.** Three senders and three dates read aloud on every change
+  would make shift-arrowing through a mailbox unusable; the caption is the fact and the deck
+  is the picture of it.
+
+- **Two departures from `docs/01` §4's "fanned deck with a count badge"**, recorded in
+  `docs/PHASE-2-VERIFICATION.md` §4: no badge, because the caption already carries the
+  number, and content on the front card only. That sentence is about dragging in any case —
+  no spec says what the reader shows for a multi-selection.
+
+- **Still unverifiable against `assets/reference/`**, which is empty. Checked by measurement
+  in the e2e spec and by eye in light and dark, at default and comfortable density, and at a
+  1000px window where the reader pane is at its narrowest.
+
+### Verified
+
+- `npm run verify`: format, lint, stylelint, types, **314 unit, 160 e2e, Rust fmt / clippy /
+  tests** — all green.
+- **The dev build, driven in the real window (2026-09-21).** `npm run app:dev` with
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`, driven over CDP
+  against the user's own store — 115 messages, 9 unread. The computed styles are what the
+  tokens say they should be: the front card is untransformed; the middle one is rotated 3°
+  and lifted 47.55px at opacity 0.8; the deepest is rotated -5° and lifted 95.1px at 0.6.
+  **The fan step measured 47.55px**, which is
+  `--deck-card-pad-y` 8 + `--deck-line-height` 17.55 + `--deck-corner-drop` 22 exactly — the
+  `calc()` resolving to what it was derived to be rather than to a number that merely looks
+  right.
+- Clearance measured the strict way, each card's name-line box bottom against the _highest_
+  corner of the card covering it: 387.6 ≤ 388.8 and 430.3 ≤ 444.1. Both hold, and both are
+  conservative — the two extremes are at opposite ends of a tilted edge, so the visible gap
+  is wider than the number.
+- Three cards for three selected and three for eight, with the caption reading
+  "8 Messages Selected" — the count following the selection and not the deck.
+- A sender with no display name (`credit_cards@icici.bank.in`) falls back to the address,
+  which is `senderLabel`'s job and the case the browser fixtures never produce.
+- The single-message reader is untouched: "1 Message", header, remote-image banners, body.
+- **Nothing in the store changed.** 9 unread before and after. `useMarkRead` reads the
+  _thread_ query, which is disabled for a multi-selection, so the unread message caught in
+  the middle of the run stayed unread — the one thing about this change that could have
+  touched real mail, and it does not.
+
+---
+
+## 2026-09-21 — Every card in the selection deck, not just the front one
+
+### Changed
+
+- **All three cards now carry their message's whole preview** — name line, subject and
+  preview text — where yesterday only the front card did and the two behind stopped after a
+  sender and a date. Reported on seeing it in the app: "its just showing stacked with the
+  subject, i want the whole preview of the mails to be stacked together."
+
+  The version being reversed had a real reason behind it, recorded yesterday: a card behind
+  is visible only down to the _tilted_ top edge of the card in front of it, and the draft
+  before it had its third line sliced lengthways by exactly that edge. What was wrong was the
+  conclusion, not the observation. The answer is not to remove the line; it is to move the
+  card in front down until the whole line is clear — which is a larger stagger, and a taller
+  deck, and both are worth it. **The deck exists to show which messages were caught. A card
+  that shows a name and a date is only marginally better than the number it replaced.**
+
+- **`--deck-fan-step` is now derived from the whole of a card's content**, not from one line:
+  `--deck-card-pad-y + --deck-content-height + --deck-corner-drop`, where
+  `--deck-content-height` is the three lines and their two gaps. Still a `calc()`, still
+  correct at all three densities.
+
+- **`--deck-corner-drop` is measured at the text rather than at the card edge**, which is
+  where the constraint actually bites: `(width / 2 − pad-x) × sin(tilt)`, 4.8px at 2° and
+  8.4px at 3.5°. The comment now also records _why_ the two swings add rather than cancel —
+  the `+2°` card's left corner rises while the `−3.5°` card's left corner falls, so they
+  converge on the same side, and that side is where the budget has to hold.
+
+- Tilts eased from 3° / −5° to **2° / −3.5°**. A bigger card shows its tilt more for the same
+  angle, and the drop the stagger has to pay for scales with the angle.
+
+### Added
+
+- **`--deck-card-overlap`, and a card's bottom padding derived backwards from it.** A card in
+  front may cover only empty gutter, never text, so the overlap is the number that is chosen
+  and the gutter — `--deck-corner-drop + --deck-card-overlap` — is the number that follows.
+  This is what makes the deck read as a stack rather than as a list of three cards.
+
+- **Two card heights, `--deck-card-height` and `--deck-card-covered-height`.** Only a card
+  with another one sitting on it gets the gutter. Giving it to the front card as well left a
+  blank strip under its preview with nothing on screen to explain it — visible in the first
+  capture of this change and fixed in the second. Nobody ever sees a rear card's gutter,
+  because a card is sitting on it.
+
+- **`--deck-height`,** so the deck's box in the flow is the _front_ card's height rather than
+  the tallest card's. Without it the box sized to a rear card and left that same gutter as
+  dead air between the deck and its caption — the identical bug, one level up. The rear cards
+  overflow the box downward, which costs nothing: they are behind an opaque card there.
+
+### Incidents
+
+- **Relaunching the dev build failed with "Port 1420 is already in use."** The earlier run
+  had been stopped by killing the `npm run app:dev` wrapper, and that ended the npm and Tauri
+  layers but not the `cmd /c vite` subtree beneath them — Vite went on holding 1420 for
+  eleven hours, serving a page nothing was loading. It was identified by its command line and
+  parent process before being stopped, rather than by killing whatever held the port. **Closing
+  the window is not the problem**: the relaunched build was closed normally about 80 minutes
+  later and took Vite down with it, leaving 1420 free. Only killing the wrapper from outside
+  orphans the `vite` beneath it.
+
+### Notes
+
+- The deck is now 238px tall at default density against 166px, and 250px at comfortable. It
+  is centred in a pane that has nothing else in it. Measured at the smallest window that still
+  shows a reader — 1000x700, where the pane is 406x648 — the deck and its caption occupy
+  y 214 to 512, with 161px of headroom above.
+- `tests/unit/selectionDeck.test.tsx` asserts the subject and preview on **every** card now,
+  which is the exact inverse of what it asserted yesterday. `tests/e2e/selectionDeck.spec.ts`
+  measures the **last** line of each card against the card in front rather than the first,
+  and additionally pins that every card has three lines — the thing a future tidy-up would
+  quietly take away.
+
+### Verified
+
+- `npm run verify`: format, lint, stylelint, types, **314 unit, 160 e2e, Rust fmt / clippy /
+  tests** — all green.
+- Measured in the running app over CDP, against the user's own store: three cards, three
+  lines each, clearance 3.4px and 12.3px on the strict comparison (each card's lowest text
+  pixel against the highest corner of the card covering it). The front card is 76px tall and
+  the two behind are 106 and 114 — the gutter present only where something covers it.
+- Measured in the browser at both themes and all three densities, at two cards and at three:
+  every card has three lines in every combination, and the deck's own box is one step per
+  card behind plus the front card (156px for two, 238px for three, 232 / 250 at compact and
+  comfortable).
+
+---
+
+## 2026-09-22 — Mail styled by a stylesheet, and a selection stack the size of the pane
+
+### Fixed
+
+- **Mail whose look lives in a `<style>` block rendered as bare text.** Reported from using the
+  app: "the mails from Pi-hole daily report … are not showing properly, like the bar graph and all
+  are not showing." The report's bar chart is a column of empty `<span class='bar'
+style='width:120px'>` elements, and every property that makes a bar visible — `display:
+inline-block`, its 8px height, its blue — is a `.bar` rule in a `<style>` block in the head.
+  Ammonia deletes style content by default, so the chart was not merely plain: an empty inline span
+  has no size at all, and it was not there. The card, the table headers and the section headings
+  went the same way. This was never specific to Pi-hole: it is every message styled with a
+  stylesheet rather than with `style` attributes, which is a large share of generated mail.
+
+### Added
+
+- **`Rendered.css`** — the message's own stylesheet, beside the body HTML rather than inside it,
+  and put by the frame in its `<head>`. The body HTML still never carries a `<style>`, which is what
+  the XSS corpus has always forbidden and still does.
+- **`src-tauri/src/mail/css.rs`**, the one CSS filter for both places mail puts CSS. It removes
+  whole declarations, never parts: any `url()` that is not an inline image; the functions that take
+  a URL as a plain string (`image-set`, `cross-fade`, `image`, `src`) and so walk straight past a
+  filter looking for `url(`; `@import` in every spelling; what once executed; viewport-height units;
+  colour-scheme queries; and anything naming `halcyon`. Every check runs on the text with CSS escapes
+  decoded, because `u\72 l(` _is_ `url(` to the renderer; whatever survives is checked once more as
+  a whole; the output never contains a `<`, so it cannot close its own element.
+- **The stylesheet is taken out by a second ammonia parse**, allowlisting exactly `style` and no
+  attributes. In that output a literal `<style>` can only be a real element, so a plain scan finds
+  them — where a scan over the main output would read `alt="<style>"` as a stylesheet, because
+  attribute values keep a raw `<`. Skipped outright for mail with no `<style` in it.
+- **Three cascade layers in the frame.** `halcyon-guard`, declared first, holds the rules the frame's
+  measuring depends on, all `!important` — and among important declarations the first layer wins,
+  so nothing a message writes can undo them. `halcyon-base` holds the frame's defaults, which a
+  message is meant to beat: the Pi-hole report puts its grey page and its padding on `<body>`.
+- **`src/features/reader/frameDocument.ts`**, the frame's document builder, moved out of
+  `MessageFrame` so a real browser can run it: `tests/e2e/messageStylesheet.spec.ts` loads it and
+  the real `.frame` stylesheet through Vite and measures what Chromium does, because the browser
+  build has no bodies and jsdom has no layout.
+- **Tests.** `css.rs` (21), five render-level tests, `tests/stylesheet_mail.rs` on a report-shaped
+  fixture with invented devices — the real one names every machine on the user's network — and 22
+  new corpus payloads. The corpus harness now checks the stylesheet with its own escape decoder, so
+  it is not the filter grading its own homework.
+
+### Changed
+
+- **The selection deck is now a stack of sheets the size of the pane.** Reported on seeing
+  yesterday's small cards: "I still cant see the preview of multiple selected mails, the preview
+  should be big and fill the whole mail window and be tilted to show the different mails." The
+  first selected message is on top, rendered for real in the reader's own sandboxed frame; the next
+  two are behind it, lifted and tilted outwards so each one's header — avatar, sender, subject,
+  date — shows above the sheet in front. The count is underneath and is the live region.
+- **The front sheet's body is fetched with remote images off, whatever the setting.** Loading them
+  tells the sender a message was opened, and this one has only been selected — very often on its
+  way to the Bin. It also asks for the body to be downloaded, since the list's prefetch follows the
+  single selected row and a multi-selection has none.
+- **The inline `style` filter is the new shared one.** It had the same holes the stylesheet path
+  was built to close — `image-set("https://…")` and an escape-spelled `url(` both went through it,
+  and only the CSP stopped the load — and a raw `>` in a style value is now escaped, because the
+  core's later passes find tags by their `<` and `>`.
+- `EmptyState` is back to its committed form: the `media` slot added for the small cards has
+  nothing left to hold.
+
+### Removed
+
+- The small cards, and the tokens that sized them. Their geometry arguments survive in the sheet
+  tokens, which are derived the same way.
+
+### Incidents
+
+- **`color-scheme: light` on the `<iframe>` element does nothing to `prefers-color-scheme` inside
+  it**, and I had assumed it did. The frame answers the query from the browser's own preference; the
+  e2e spec measured it at once, with the rule in place and the frame still reporting dark. The rule
+  was removed rather than left as a comment claiming something untrue, and colour-scheme queries
+  are dropped by the filter instead — so an email's dark block can no longer turn its text white
+  over the white card the frame always paints. The spec keeps a test pinning the Chromium
+  behaviour, so the reason for that rule is re-examined if the behaviour ever changes.
+- **The first sheet draft repeated the small cards' fault exactly.** Rear sheets carried preview
+  text "in case a sliver showed", and a sliver is what showed: one line cut lengthways by the tilted
+  edge above it. Rear sheets now carry their header and nothing else.
+- **The fan step was two-thirds of a pixel short**, caught by the e2e spec measuring real
+  rectangles. The budget measured the edge in front at the text rather than at its corner, 20px
+  further out, and left the sheet's own border out of the step. Both are now in the derivation.
+- **The deepest sheet's corner ran into the window edge**, because a 600px sheet tilted about its
+  bottom swings its top 26px sideways and the margin is 24. Tilting about the middle halves that.
+- **Git Bash collapsed `\\` in heredoc'd scripts twice more** — once into a literal newline inside
+  a Rust `char`, which the compiler caught, and once into an octal escape Node refused to parse. It
+  is the trap already recorded on 2026-09-17; scripts that carry backslashes now go through the file
+  tool, never through a heredoc.
+- **A unit run tested the old file against the new component.** The rewrite of
+  `selectionDeck.test.tsx` was refused because a formatter had touched the file, and the six
+  failures that followed were the previous test's, not the new one's. Seen from the test names,
+  re-read and re-written; all ten pass.
+
+### Notes
+
+- **Not closed:** an absolutely positioned element with a percentage height and no positioned
+  ancestor is sized against the frame, and grows with it. Inline styles could always do this and
+  still can; a filter cannot see it without laying the message out. Recorded in
+  `docs/PHASE-6-VERIFICATION.md` §1 as a measuring change for `MessageFrame`.
+- Render budget unchanged: a 52 KB newsletter renders in 3 ms, 4 ms with images.
+
+### Verified
+
+- `npm run verify`'s parts, run separately: format, lint, stylelint, types, **318 unit, 166 e2e**,
+  Rust fmt and clippy clean, **942 Rust library tests** and every integration suite, the XSS corpus
+  at **91 payloads with 0 survivors** with images on and off.
+
+---
+
+## 2026-09-23 — Both fixes against real mail, and an ICICI alert with no images
+
+### Verified in the running app
+
+- **The Pi-hole report renders.** Driven over the debugging port against the user's own store:
+  the core returns 964 bytes of filtered CSS carrying `.bar{display:inline-block;height:8px;
+background:#0071e3;border-radius:4px}` verbatim, and in the frame the chart is **46 bars**,
+  each `inline-block`, 8px tall, `rgb(0, 113, 227)`, at its own width — 120px, 87px, 86px, 71px
+  and so on down. The card is white with 12px corners on the report's own `#f5f5f7` page with its
+  24px padding, and the table headers have their grey. Two `<style>` elements in the document: the
+  frame's and the message's. Frame height 3013px, the whole report.
+- **The selection stack, on real mail.** Three sheets in a pane 806x848: front 592px tall with the
+  message rendered in it, the two behind at 612 and 625 (they are taller because a rotated box's
+  bounding box is), every corner inside the pane, and the headers naming three different messages.
+  Only the front sheet holds a frame.
+
+### Changed
+
+- **A withheld image is drawn as empty space in the stack, not as a broken-image glyph.** The first
+  capture of the stack against real mail was a page of broken-image icons, because the preview
+  refuses remote images on purpose — which looks exactly like the fault being reported two messages
+  earlier. `MessageFrame` takes `hideBlockedImages`, the stack passes it, and the reader does not:
+  there a banner says what is missing and offers to load it, and the glyph is honest.
+  `visibility`, not `display`, so the space the sender laid out keeps its size.
+- **The failed-images banner offers Try Again, and no longer says the server was silent.** It said
+  "The sender's server did not answer", which is wrong in the commonest case — a server that
+  redirects an image to its home page has answered — and it offered nothing, so a transient failure
+  was a dead end until the message was opened in another session. Now: "did not return them", and a
+  button. Never automatic: a request is what tells a sender the message was opened, so an app that
+  retried by itself would keep telling them. Cheap, too — only the images that failed cost a
+  request, since the ones that arrived are in the core's cache.
+
+### Notes — why the ICICI Bank alert had no images
+
+Reported: "please check why arent mail for credit card transaction for icici bank loading the
+images." Ten remote images, all from `https://www.icicibank.com/campaigns/mailers/june-2020/...`.
+
+- The user's remote-image setting is **on**, and the core was not withholding them:
+  `blockedRemote: 0, failedRemote: 10`. Every one was attempted and every one failed.
+- **ICICI has moved domain**, `icicibank.com` → `icici.bank.in`, and the old addresses answer
+  `301 Moved Permanently`. The core follows up to three redirects, so that alone is fine.
+- The failure is what the redirect _lands on_. Followed by hand at the time of the failure, the
+  chain ended at `https://www.icici.bank.in/` — the bank's **home page**, 1.1 MB of `text/html`.
+  `fetch_one` refuses anything whose content type is not `image/`, which is right: turning a
+  sender's HTML into a `data:` URI would put markup back into the document the sanitiser just
+  cleaned.
+- **It is the bank's end, and it is intermittent.** Twenty minutes later the same ten URLs each
+  redirected once and served a real `image/jpeg` or `image/gif`, with the app's own generic
+  `User-Agent` and with a browser's alike — and the app then fetched all ten, wrote all ten to its
+  cache (timestamps confirm they were written by that render, not present before), and rendered
+  them. They will keep rendering: a fetched image is cached for 30 days.
+
+Nothing in the app was wrong here, so nothing in the fetcher changed. What did change is that
+there is now a way to ask again without waiting for the cache to turn over, which is what the
+banner above is for.
+
+### Incidents
+
+- **Playwright's `connectOverCDP` began hanging** against this WebView2 — no timeout, no error,
+  including on a bare connect with no page work. It had worked three times earlier in the same
+  session. Replaced with a raw CDP client over Node's own `WebSocket` (`Runtime.evaluate` and
+  `Page.captureScreenshot`), which is less code than the workaround would have been and does not
+  depend on Playwright's target attachment at all.
+- **`browser.close()` on a CDP connection closed the app**, ending a dev-build run mid-verification.
+  It had not done so earlier in the session, which is why it was not suspected. The driver now
+  disconnects by exiting.
+- **Hot reload did not reach the frame.** After adding the withheld-image rule, the stack still drew
+  broken glyphs and the rule was genuinely absent from the frame's document — a module update that
+  did not rebuild an `iframe`'s `srcdoc`. A full page reload proved the change: 15 withheld images,
+  0 still visible. Worth remembering before concluding a frame change does not work.
+- **A `<style>` substring check matched its own comment.** The probe for "is the rule there" looked
+  for `blocked:remote` anywhere in the frame's stylesheets, and found it in the explanatory comment
+  beside the rule. It reported the rule present while it was absent. Fixed by reading the parsed
+  rule rather than the text.
+- **Git Bash collapsed `\\` in a heredoc'd driver script**, again, turning `split('\\n')` into a
+  string with a real newline in it and a `SyntaxError` inside the app. Third time this session,
+  after the note saying to stop doing it; every script with a backslash now goes through the file
+  tool.
+- **Prettier and Vitest raced twice.** Running `prettier --write` and `vitest run` in one chain had
+  the runner read a file mid-rewrite: six failures the first time, two the second, none of them
+  real. They are separate commands now.
+
+### Rebuilt and reinstalled
+
+- `npm run app:build` → `Halcyon_1.0.0_x64-setup.exe`, 8.1 MB, release profile in 6m 31s. Installed
+  over the 19 September build with `/S`; NSIS `installMode: currentUser`, so no elevation and the
+  store in `%LOCALAPPDATA%\com.uniki.halcyon` is untouched. `halcyon.exe` 22,728,704 bytes, written
+  2026-09-23 21:23.
+- **Verified in the installed build, not just the dev one.** Its own core returns the report's 964
+  bytes of filtered CSS with `.bar{display:inline-block;height:8px;background:#0071e3;
+border-radius:4px;vertical-align:middle}`; a three-message selection draws three sheets, front
+  sheet with a frame and the two behind without, headers naming three different messages, and the
+  front sheet showing that day's report with its chart drawn.
+- The installed binary's hash does not match `target/release/halcyon.exe`, which is expected and
+  worth writing down so it is not read as a failed install: Tauri patches the exe with bundle-type
+  information, and does it again for the updater artifact _after_ the installer is packaged. The
+  file that shipped says `nsis`; the one left in `target/release` says otherwise.
+
+### Incidents — building and installing
+
+- **`npm run app:build` exits 1 after producing a perfectly good installer.** The last step signs
+  the updater artifact, `tauri.conf.json` carries a `pubkey`, and there is no private key on this
+  machine — `~/.tauri/halcyon.key`, per `docs/07-distribution.md`, does not exist. So every release
+  build here fails at the end while the bundle itself is complete. Pre-existing and unrelated to
+  this session's work, but it means **no build from this machine can be published as an auto-update**
+  until the key is generated or restored; the endpoint in `tauri.conf.json` points at GitHub
+  releases that such a build could not sign.
+- The installed app was first launched with a remote debugging port, to check the two fixes in it
+  the same way the dev build was checked. Closed and relaunched without it rather than left open.
+
+### Verified
+
+- Format, lint, stylelint, types, **321 unit, 167 e2e**. Rust unchanged since its own clean run
+  earlier: fmt, clippy, **942 library tests**, every integration suite, and the XSS corpus at 91
+  payloads with 0 survivors.

@@ -52,6 +52,11 @@ fn port() -> u16 {
         .unwrap_or(9993)
 }
 
+/// What a failed connection says. The likeliest cause after a quiet spell is the rig's
+/// certificate expiring, which otherwise reads as an unexplained TLS failure.
+const CONNECT: &str = "connect to the rig — if the TLS handshake failed, its certificate may have \
+     expired: test/dovecot/README.md, \"The certificate\", says how to renew it";
+
 const TEST_EMAIL: &str = "tester@halcyon.test";
 const TEST_PASSWORD: &str = "halcyon-test-only";
 
@@ -144,7 +149,7 @@ impl Rig {
 
         session::connect(&imap, &account.email, &Credential::Password(secret))
             .await
-            .expect("connect")
+            .expect(CONNECT)
     }
 
     /// Removes the Credential Manager entry this rig created.

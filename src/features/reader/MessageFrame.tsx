@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { openExternal } from '@/lib/ipc'
 
+import { frameDocument } from './frameDocument'
 import { repairShortRows } from './repairTables'
 
 import styles from './MessageBody.module.css'
@@ -27,95 +28,34 @@ import styles from './MessageBody.module.css'
  * sanitiser still cannot become a network request.
  */
 
-/** docs/03 §6.5, verbatim. */
-const CSP = "default-src 'none'; img-src cid: app: data:; style-src 'unsafe-inline';"
-
-/**
- * Styling for the frame's document, not the app's.
- *
- * It cannot use the token layer: the frame is a separate document and CSS custom properties
- * do not cross that boundary. The colours are passed in from the resolved theme instead, so
- * a message still reads correctly in dark mode — mail is overwhelmingly written for a white
- * background, so the default is a light card even in dark mode, which is what Mail does.
- */
-function frameDocument(html: string, plainText: boolean): string {
-  return `<!doctype html>
-<html><head>
-<meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="${CSP}">
-<base target="_blank">
-<style>
-  html, body { margin: 0; padding: 0; background: #fff; color: #1c1c1e; }
-
-  /* The frame must never scroll itself, and saying so *inside* the document is the only place
-     it counts: \`overflow\` on the <iframe> element does not reach the document it contains.
-
-     Without this the reader took two goes to start scrolling. The frame is sized from the
-     outside by measuring, so until that lands it is only \`min-height\` tall and its content
-     overflows — which makes the inner document a scroll container. Chromium latches a wheel
-     gesture to the first scroller it finds under the pointer and keeps it there for the rest of
-     the gesture, so the first scroll went nowhere and only a second, separate gesture reached
-     the pane behind it.
-
-     \`scrollHeight\` still reports the full content height when overflow is hidden, so the
-     measurement above is unaffected. Horizontal scrolling for wide tables is unaffected too:
-     that lives on \`.halcyon-scroll\`, an element inside the body. */
-  html { overflow: hidden; }
-  body {
-    font: 14px/1.55 -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-    padding: 4px 2px 16px;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-  }
-  img { max-width: 100%; height: auto; }
-  /* docs/03 §6.7 — a wide table scrolls inside its own box rather than forcing the page
-     sideways. Marketing mail is full of 800px fixed-width tables. */
-  table { max-width: 100%; }
-  .halcyon-scroll { overflow-x: auto; }
-  a { color: #0a58ca; }
-  blockquote {
-    margin: 0 0 0 8px; padding-left: 12px;
-    border-left: 2px solid #d0d0d5; color: #3c3c43;
-  }
-  pre.halcyon-plain {
-    margin: 0; font: inherit; white-space: pre-wrap; word-break: break-word;
-  }
-  /* The quoted reply, folded. The core wraps it in a <details> because that is the one
-     interactive control HTML has that needs no script — and this frame runs none. */
-  details.halcyon-quote { margin: 8px 0 0; }
-  summary.halcyon-quote-toggle {
-    cursor: pointer; display: inline-block; list-style: none;
-    padding: 2px 8px; margin: 4px 0;
-    border: 1px solid #d0d0d5; border-radius: 10px;
-    background: #f5f5f7; color: #3c3c43;
-    font-size: 12px; line-height: 1.5; user-select: none;
-  }
-  summary.halcyon-quote-toggle::-webkit-details-marker { display: none; }
-  summary.halcyon-quote-toggle:hover { background: #ebebef; }
-  details.halcyon-quote[open] summary.halcyon-quote-toggle { margin-bottom: 8px; }
-  .halcyon-quote-body { color: #3c3c43; }
-  /* A data detector. Marked with a dotted underline rather than a link colour, because the
-     sender did not put a link here and it must not look as though they did. */
-  a.halcyon-detected {
-    color: inherit; text-decoration: none;
-    border-bottom: 1px dashed #9a9aa0; cursor: pointer;
-  }
-  a.halcyon-detected:hover { border-bottom-color: #0a58ca; color: #0a58ca; }
-  ${plainText ? '' : 'body > :first-child { margin-top: 0; }'}
-</style>
-</head><body>${html}</body></html>`
-}
-
 export interface MessageFrameProps {
   /** Sanitised by the Rust core. There is no path to this component that skips that. */
   html: string
+  /**
+   * The message's own stylesheet, filtered by the core. Empty for most mail, and for every
+   * message rendered from plain text. See `frameDocument` for where it goes and why.
+   */
+  css: string
   /** Set when the core built the HTML from a plain-text part, which changes the first margin. */
   fromPlainText: boolean
   /** Resets the measured height when the frame is given a different message. */
   resetKey?: string | number | undefined
+  /**
+   * Draws a withheld remote image as empty space rather than as a broken-image glyph.
+   *
+   * For a frame with no banner over it to explain the gap and offer to fill it — the selection
+   * stack, which refuses remote images whatever the setting. The reader keeps the glyph.
+   */
+  hideBlockedImages?: boolean | undefined
 }
 
-export function MessageFrame({ html, fromPlainText, resetKey }: MessageFrameProps) {
+export function MessageFrame({
+  html,
+  css,
+  fromPlainText,
+  resetKey,
+  hideBlockedImages = false,
+}: MessageFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null)
 
   // Rows missing their trailing cells, repaired before the document is built. Memoised because
@@ -252,7 +192,7 @@ export function MessageFrame({ html, fromPlainText, resetKey }: MessageFrameProp
       className={styles.frame}
       // No allow-scripts, no allow-popups, no allow-top-navigation. docs/03 §6.1.
       sandbox="allow-same-origin"
-      srcDoc={frameDocument(repaired, fromPlainText)}
+      srcDoc={frameDocument(repaired, fromPlainText, css, hideBlockedImages)}
       style={height > 0 ? { height: `${String(height)}px` } : undefined}
       onLoad={onFrameLoad}
     />

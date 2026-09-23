@@ -113,6 +113,167 @@ fn fixture() -> Connection {
     conn
 }
 
+#[test]
+fn the_tree_says_which_mailboxes_are_favourites_and_which_can_be_edited() {
+    let conn = fixture();
+    conn.execute(
+        "INSERT INTO mailbox (id, account_id, remote_path, display_name, role, delimiter)
+         VALUES (4, 1, 'Clients', 'Clients', NULL, '/')",
+        [],
+    )
+    .expect("folder");
+    // After the five built-in rows the migration puts there.
+    conn.execute(
+        "INSERT INTO favourite (position, mailbox_id) VALUES (6, 4)",
+        [],
+    )
+    .expect("favourite");
+
+    let tree = query::mailboxes_tree(&conn, Some(1)).expect("tree");
+    let by_id = |id: i64| tree.iter().find(|row| row.id == id).expect("row");
+
+    let clients = by_id(4);
+    assert_eq!(clients.favourite_order, Some(6));
+    assert_eq!(clients.delimiter.as_deref(), Some("/"));
+    assert!(clients.editable, "a folder the user made can be renamed");
+    assert!(clients.can_contain, "and can hold others");
+    assert!(!clients.role_chosen);
+
+    let inbox = by_id(1);
+    assert_eq!(inbox.favourite_order, None);
+    assert!(!inbox.editable, "the Inbox cannot");
+    assert!(!inbox.can_contain, "nor hold other mailboxes");
+    assert!(!by_id(3).editable, "nor the Bin");
+    assert!(
+        !by_id(3).can_contain,
+        "a mailbox whose separator is not known yet cannot hold others"
+    );
+}
+
+#[test]
+fn the_tree_nests_mailboxes_by_path_but_never_under_the_inbox() {
+    let conn = fixture();
+    for (id, path) in [
+        (4, "Clients"),
+        (5, "Clients/Acme"),
+        // A level the server did not list (a `\Noselect` folder is never stored): the nearest
+        // one that is there holds it.
+        (6, "Clients/Acme/Invoices/2026"),
+        (7, "Clientside"),
+        // Courier keeps everything inside the Inbox; those folders belong at the top.
+        (8, "Inbox/Receipts"),
+    ] {
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, delimiter)
+             VALUES (?1, 1, ?2, ?2, '/')",
+            (id, path),
+        )
+        .expect("folder");
+    }
+
+    let tree = query::mailboxes_tree(&conn, None).expect("tree");
+    let parent = |id: i64| {
+        tree.iter()
+            .find(|row| row.id == id)
+            .map(|row| row.parent_id)
+            .expect("row")
+    };
+
+    assert_eq!(parent(4), None);
+    assert_eq!(parent(5), Some(4));
+    assert_eq!(parent(6), Some(5));
+    assert_eq!(parent(7), None, "a name that merely starts the same");
+    assert_eq!(parent(8), None, "never inside the Inbox");
+    assert_eq!(parent(1), None);
+}
+
+#[test]
+fn the_tree_says_which_roles_the_user_chose() {
+    let conn = fixture();
+    conn.execute(
+        "INSERT INTO mailbox_role (account_id, role, mailbox_id) VALUES (1, 'archive', 2)",
+        [],
+    )
+    .expect("choice");
+
+    let tree = query::mailboxes_tree(&conn, Some(1)).expect("tree");
+    let chosen: Vec<i64> = tree
+        .iter()
+        .filter(|row| row.role_chosen)
+        .map(|row| row.id)
+        .collect();
+
+    assert_eq!(chosen, vec![2]);
+}
+
+#[test]
+fn favourites_are_listed_in_order_with_the_built_in_rows() {
+    use super::model::BuiltinFavourite;
+
+    let conn = fixture();
+    conn.execute_batch(
+        "INSERT INTO mailbox (id, account_id, remote_path, display_name) VALUES (4, 1, 'A', 'A');
+         INSERT INTO favourite (position, mailbox_id) VALUES (0, 4);
+         UPDATE favourite SET position = 10 WHERE builtin = 'vips';
+         -- A key from a newer build, which this one skips rather than shows as nothing.
+         INSERT INTO favourite (position, builtin) VALUES (7, 'recentlyDeleted');",
+    )
+    .expect("favourites");
+
+    let listed = query::favourites_list(&conn).expect("list");
+    let order: Vec<(Option<BuiltinFavourite>, Option<i64>)> = listed
+        .iter()
+        .map(|row| (row.builtin, row.mailbox_id))
+        .collect();
+
+    assert_eq!(
+        order,
+        vec![
+            (None, Some(4)),
+            (Some(BuiltinFavourite::AllInboxes), None),
+            (Some(BuiltinFavourite::Flagged), None),
+            (Some(BuiltinFavourite::AllDrafts), None),
+            (Some(BuiltinFavourite::AllSent), None),
+            (Some(BuiltinFavourite::Vips), None),
+        ]
+    );
+}
+
+#[test]
+fn the_tree_counts_what_is_inside_each_mailbox() {
+    let conn = fixture();
+    for (id, path) in [
+        (4, "Clients"),
+        (5, "Clients/Acme"),
+        (6, "Clients/Acme/2026"),
+        (7, "Clientside"),
+    ] {
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, delimiter)
+             VALUES (?1, 1, ?2, ?2, '/')",
+            (id, path),
+        )
+        .expect("folder");
+    }
+
+    let tree = query::mailboxes_tree(&conn, None).expect("tree");
+    let inside = |id: i64| {
+        tree.iter()
+            .find(|row| row.id == id)
+            .map(|row| row.descendants)
+            .expect("row")
+    };
+
+    assert_eq!(inside(4), 2, "a child and a grandchild");
+    assert_eq!(inside(5), 1);
+    assert_eq!(inside(6), 0);
+    assert_eq!(
+        inside(7),
+        0,
+        "a name that merely starts the same is not inside"
+    );
+}
+
 fn page(conn: &Connection, cursor: Option<Cursor>, limit: u32) -> Vec<i64> {
     let query = ListQuery {
         mailbox_ids: vec![1],

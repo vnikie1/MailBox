@@ -128,7 +128,11 @@ export function EmlWindow() {
             this window cannot honour: the fetch happens in the core against a stored message,
             and a file on disk is not one. Saying what was withheld without offering to undo it
             is the honest version. */}
-        <MessageFrame html={message.body.html} fromPlainText={message.body.fromPlainText} />
+        <MessageFrame
+          html={message.body.html}
+          css={message.body.css}
+          fromPlainText={message.body.fromPlainText}
+        />
 
         {message.body.blockedRemote > 0 && (
           <p className={styles.blocked}>

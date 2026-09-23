@@ -114,6 +114,7 @@ export function RulesEditor({ open, onClose, mailboxes }: RulesEditorProps) {
         onOpenChange={(next) => {
           if (!next) setDraft(null)
         }}
+        className={styles.sheet}
         title={draft.id === null ? 'New Rule' : 'Edit Rule'}
         footer={
           <>

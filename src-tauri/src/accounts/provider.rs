@@ -125,12 +125,21 @@ impl Provider {
         match self {
             // docs/05 §2: the restricted scope. Anything narrower cannot read mail over IMAP.
             Provider::Google => &["https://mail.google.com/"],
-            // docs/05 §3 lists these four exactly.
+            // docs/05 §3 lists four permissions for the *app registration*, and `User.Read` is
+            // one of them. It is not requested here, and requesting it was a bug that made
+            // Microsoft sign-in impossible: `User.Read` belongs to Microsoft Graph and the other
+            // two to Exchange Online, and the identity platform will not issue one token for
+            // two resources. The authorise request fails with AADSTS28000, "contains more than
+            // one resource", before the user sees a sign-in page — whatever app is registered.
+            //
+            // It never surfaced because no Microsoft client had ever been configured. Nothing in
+            // Halcyon calls Graph, so the scope bought nothing even where it would have worked.
+            // This is the set Microsoft's own IMAP/SMTP OAuth guide lists; `offline_access` is
+            // an OpenID scope, not a resource, and may accompany either.
             Provider::Microsoft => &[
                 "https://outlook.office.com/IMAP.AccessAsUser.All",
                 "https://outlook.office.com/SMTP.Send",
                 "offline_access",
-                "User.Read",
             ],
             _ => &[],
         }
@@ -308,6 +317,52 @@ mod tests {
         // Without offline_access the token expires in an hour and the user is asked to sign
         // in again every time — which reads as the app being broken.
         assert!(Provider::Microsoft.scopes().contains(&"offline_access"));
+    }
+
+    #[test]
+    fn every_scope_a_provider_requests_belongs_to_one_resource() {
+        // Microsoft's identity platform issues a token for one resource at a time, and refuses
+        // an authorise request that spans two with AADSTS28000 — before any sign-in page. The
+        // Microsoft list shipped with `User.Read` (Microsoft Graph) beside two Exchange Online
+        // scopes, so Microsoft sign-in could never have worked for anyone.
+        //
+        // A scope is either a full URL — its resource is the origin — or a bare name. Bare
+        // OpenID Connect scopes belong to no resource and may sit beside anything. Any *other*
+        // bare name is shorthand for Microsoft Graph, which is exactly how `User.Read` slipped
+        // in: it does not look like it names a resource at all.
+        const OPENID: &[&str] = &["openid", "profile", "email", "offline_access"];
+
+        for provider in ALL {
+            let resources: std::collections::BTreeSet<String> = provider
+                .scopes()
+                .iter()
+                .filter(|scope| !OPENID.contains(scope))
+                .map(|scope| match url::Url::parse(scope) {
+                    Ok(url) => url.origin().ascii_serialization(),
+                    Err(_) => "https://graph.microsoft.com (implicit)".to_string(),
+                })
+                .collect();
+
+            assert!(
+                resources.len() <= 1,
+                "{provider:?} asks for scopes on {} resources in one request: {resources:?}",
+                resources.len()
+            );
+        }
+    }
+
+    #[test]
+    fn microsoft_asks_for_exactly_what_its_imap_and_smtp_guide_lists() {
+        // learn.microsoft.com, "Authenticate an IMAP, POP or SMTP connection using OAuth". Pinned
+        // whole, so a scope cannot be added back without this test being read.
+        assert_eq!(
+            Provider::Microsoft.scopes(),
+            &[
+                "https://outlook.office.com/IMAP.AccessAsUser.All",
+                "https://outlook.office.com/SMTP.Send",
+                "offline_access",
+            ]
+        );
     }
 
     #[test]

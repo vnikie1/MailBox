@@ -420,6 +420,14 @@ pub async fn compose_send(
         email: account.email.clone(),
     };
 
+    // Gmail refuses some attachments outright, and says so only after the message has been
+    // queued — leaving a failure that Try Again cannot fix. Known refusals are caught here,
+    // while the compose window is still open and the attachment can simply be removed.
+    let through_gmail = crate::mail::attachment_policy::sends_through_gmail(
+        &account.provider,
+        account.smtp.as_ref().map(|smtp| smtp.host.as_str()),
+    );
+
     // Read here rather than carried through the IPC boundary as bytes. A 20MB attachment
     // base64-encoded into a JSON payload is 27MB of string on both sides of the seam, for a
     // file the core can open itself in one call.
@@ -434,6 +442,16 @@ pub async fn compose_send(
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "attachment".to_string());
+
+        if through_gmail {
+            if let Some(refusal) = crate::mail::attachment_policy::gmail_refusal(&filename, &bytes)
+            {
+                return Err(AppError {
+                    code: "attachmentBlocked".into(),
+                    message: refusal.sentence(),
+                });
+            }
+        }
 
         attachments.push(crate::mail::outgoing::Attachment {
             mime: mime_for(&filename),
@@ -644,6 +662,16 @@ pub async fn compose_open(
         }
     }
 
+    // Tauri's native drag-and-drop handler stays ON for compose windows, and that is deliberate
+    // — the opposite of the main window, which turns it off in tauri.conf.json.
+    //
+    // The main window needs HTML5 drag and drop for moving messages between mailboxes, and the
+    // native handler swallows every drag before the page sees it. A compose window needs the
+    // reverse: files dragged in from Explorer, and only the native handler reports those with
+    // real filesystem paths, which is what the attachment pipeline is built on. A WebView2
+    // `File` from an HTML5 drop has no path at all. So: do not call
+    // `.disable_drag_drop_handler()` here. `ComposeWindow` listens for the drop through
+    // `ipc.onFileDrop`.
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title("New Message")
         // docs/01 §6 — 700x560 default, and the size is remembered by the window-state plugin.
@@ -660,6 +688,25 @@ pub async fn compose_open(
         })?;
 
     Ok(label)
+}
+
+/// Deletes a failed message. The Delete button on the failure banner, behind a confirmation.
+///
+/// Returns false when the message is no longer failed — retried, or deleted from another
+/// window — so the banner can refresh rather than claim something it did not do.
+#[tauri::command]
+pub async fn outbox_discard(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    id: i64,
+) -> Result<bool, AppError> {
+    let discarded = outbox::discard_failed(db.inner(), id).await?;
+
+    if discarded {
+        let _ = tauri::Emitter::emit(&app, "outbox:changed", ());
+    }
+
+    Ok(discarded)
 }
 
 /// Puts a failed message back in the queue. The Retry button on the failure banner.
@@ -759,24 +806,77 @@ pub async fn compose_pick_files() -> Result<Vec<PickedFile>, AppError> {
             message: "Choosing files was interrupted.".into(),
         })?;
 
+    // The dialog only returns files that exist, so there is nothing to skip here — but it goes
+    // through the same description as a drop, so a chip reads the same whichever way it came.
     Ok(chosen
-        .into_iter()
-        .map(|path| {
-            let size = std::fs::metadata(&path)
-                .map(|meta| meta.len() as i64)
-                .unwrap_or(0);
-            let filename = path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| "attachment".to_string());
-
-            PickedFile {
-                path: path.to_string_lossy().to_string(),
-                filename,
-                size,
-            }
-        })
+        .iter()
+        .filter_map(|path| describe_file(path).ok())
         .collect())
+}
+
+/// Files dropped on a compose window, described the way the picker describes its choices.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct DescribedFiles {
+    pub files: Vec<PickedFile>,
+    /// The names of dropped items that cannot be attached — a folder, or a path that has gone
+    /// by the time it arrives. Reported rather than dropped silently: an attachment that simply
+    /// fails to appear reads as the drop not having worked at all.
+    pub skipped: Vec<String>,
+}
+
+/// Name and size for one path, or the name to report if it cannot be attached.
+///
+/// Only the metadata is read. The bytes are read at send time, as they are for a picked file —
+/// a drop of a 20 MB file should draw its chip at once, not after the file has crossed the IPC
+/// boundary to be counted.
+fn describe_file(path: &std::path::Path) -> Result<PickedFile, String> {
+    let filename = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    match std::fs::metadata(path) {
+        // A folder would be read at send time as though it were a file, and fail then — far
+        // from the moment the user could have done something about it.
+        Ok(meta) if meta.is_file() => Ok(PickedFile {
+            path: path.to_string_lossy().to_string(),
+            filename,
+            size: meta.len() as i64,
+        }),
+        _ => Err(filename),
+    }
+}
+
+/// Describes files dropped onto a compose window — attaching by dragging, as Mail allows. docs/01
+/// §6 specifies only that attachments show as chips; the drop was asked for on 2026-09-17.
+///
+/// The paths come from the drop itself: Tauri's native drag-and-drop handler, which the compose
+/// window keeps (see `compose_open`), hands over real filesystem paths. That is what makes a
+/// drop fit the existing attachment pipeline, which is path-based end to end.
+#[tauri::command]
+pub async fn compose_describe_files(paths: Vec<String>) -> Result<DescribedFiles, AppError> {
+    let described = tokio::task::spawn_blocking(move || {
+        let mut files = Vec::new();
+        let mut skipped = Vec::new();
+
+        for path in &paths {
+            match describe_file(std::path::Path::new(path)) {
+                Ok(file) => files.push(file),
+                Err(name) => skipped.push(name),
+            }
+        }
+
+        DescribedFiles { files, skipped }
+    })
+    .await
+    .map_err(|_| AppError {
+        code: "cancelled".into(),
+        message: "Reading the dropped files was interrupted.".into(),
+    })?;
+
+    Ok(described)
 }
 
 /// The size at which the compose window warns. `mail::outgoing::ATTACHMENT_WARN_BYTES`.
@@ -1298,4 +1398,49 @@ pub async fn contacts_suggest(
         .await?;
 
     Ok(rows)
+}
+
+#[cfg(test)]
+mod describe_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_drop_attaches_files_and_names_what_it_could_not() {
+        // A drop can carry anything Explorer can drag: files, a folder, and — by the time the
+        // event arrives — a path that has just been deleted. Only the first can be attached, and
+        // the rest have to be reported rather than quietly left out, or the drop looks like it
+        // did nothing.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let file = dir.path().join("Rent agreement.docx");
+        std::fs::write(&file, b"twelve bytes").expect("write");
+
+        let folder = dir.path().join("Photos");
+        std::fs::create_dir(&folder).expect("mkdir");
+
+        let gone = dir.path().join("deleted.txt");
+
+        let described = compose_describe_files(vec![
+            file.to_string_lossy().to_string(),
+            folder.to_string_lossy().to_string(),
+            gone.to_string_lossy().to_string(),
+        ])
+        .await
+        .expect("describe");
+
+        assert_eq!(described.files.len(), 1);
+        let attached = &described.files[0];
+        assert_eq!(attached.filename, "Rent agreement.docx");
+        assert_eq!(attached.size, 12);
+        assert_eq!(attached.path, file.to_string_lossy());
+
+        assert_eq!(described.skipped, vec!["Photos", "deleted.txt"]);
+    }
+
+    #[tokio::test]
+    async fn an_empty_drop_is_not_an_error() {
+        let described = compose_describe_files(Vec::new()).await.expect("describe");
+        assert!(described.files.is_empty());
+        assert!(described.skipped.is_empty());
+    }
 }

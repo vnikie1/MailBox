@@ -14,6 +14,7 @@
 
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { emit, listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import {
@@ -118,6 +119,7 @@ export async function onWindowFocusChanged(
 
 import type { AccountRow } from './generated/AccountRow'
 import type { ComposeAddress } from './generated/ComposeAddress'
+import type { DescribedFiles } from './generated/DescribedFiles'
 import type { CrashReport } from './generated/CrashReport'
 import type { ImportRequest } from './generated/ImportRequest'
 import type { ImportSource } from './generated/ImportSource'
@@ -517,8 +519,179 @@ export interface SyncActivity {
  * the one action whose whole promise is that the count goes to nought.
  */
 export async function mailboxMarkRead(mailboxId: number): Promise<number> {
-  if (!runningInTauri) return 0
+  if (!runningInTauri) {
+    const changed = browser.mailboxMarkRead(mailboxId)
+    notifyBrowserMailboxChange([mailboxId])
+    return changed
+  }
   return invoke<number>('mailbox_mark_read', { mailboxId })
+}
+
+/* ------------------------------------------------------------ mailbox structure */
+
+export type { EraseTarget } from './generated/EraseTarget'
+import type { EraseTarget } from './generated/EraseTarget'
+export type { MailboxUse } from './generated/MailboxUse'
+import type { MailboxUse } from './generated/MailboxUse'
+export type { FavouriteRow } from './generated/FavouriteRow'
+import type { FavouriteRow } from './generated/FavouriteRow'
+export type { BuiltinFavourite } from './generated/BuiltinFavourite'
+
+/**
+ * The mailbox context menu's commands. `ipc/folders.rs`.
+ *
+ * Each changes the local tree at once and queues the server half, like every other action
+ * (standing rule 10). A server that later refuses a change says so through `mailbox:refused`,
+ * after the core has put the tree back.
+ *
+ * The browser path is the in-memory store, which is real in the same sense its moves and
+ * deletes are: the sidebar the Playwright suite drives is built from it.
+ */
+export async function mailboxCreate(
+  accountId: number,
+  parentId: number | null,
+  name: string,
+): Promise<number> {
+  if (!runningInTauri) {
+    const id = browser.mailboxCreate(accountId, parentId, name)
+    notifyBrowserMailboxesChanged(accountId)
+    return id
+  }
+  return invoke<number>('mailbox_create', { accountId, parentId, name })
+}
+
+export async function mailboxRename(mailboxId: number, name: string): Promise<void> {
+  if (!runningInTauri) {
+    notifyBrowserMailboxesChanged(browser.mailboxRename(mailboxId, name))
+    return
+  }
+  await invoke('mailbox_rename', { mailboxId, name })
+}
+
+/** Deletes a mailbox, everything inside it, and all their mail. Returns how many messages. */
+export async function mailboxDelete(mailboxId: number): Promise<number> {
+  if (!runningInTauri) {
+    const deleted = browser.mailboxDelete(mailboxId)
+    // Zero counts, as the core sends them: `mailboxCounts` cannot read back rows that are gone,
+    // and a list still showing the deleted folder has to be told to let go of it.
+    for (const id of deleted.mailboxIds) {
+      browserBus.dispatchEvent(
+        new CustomEvent('mailbox:changed', { detail: { mailboxId: id, unread: 0, total: 0 } }),
+      )
+    }
+    notifyBrowserMailboxesChanged(deleted.accountId)
+    return deleted.messages
+  }
+  return invoke<number>('mailbox_delete', { mailboxId })
+}
+
+/** Erase Deleted Items and Erase Junk Mail. Returns how many messages were erased here. */
+export async function mailboxErase(accountId: number, target: EraseTarget): Promise<number> {
+  if (!runningInTauri) {
+    const erased = browser.mailboxErase(accountId, target)
+    notifyBrowserMailboxChange([erased.mailboxId])
+    return erased.messages
+  }
+  return invoke<number>('mailbox_erase', { accountId, target })
+}
+
+/**
+ * Add to Favourites and Remove from Favourites. `before` is where a mailbox dragged into
+ * Favourites was dropped — the favourite it goes in front of; without it, the end.
+ */
+export async function mailboxSetFavourite(
+  mailboxId: number,
+  favourite: boolean,
+  before: number | null = null,
+): Promise<void> {
+  if (!runningInTauri) {
+    notifyBrowserMailboxesChanged(browser.mailboxSetFavourite(mailboxId, favourite, before))
+    return
+  }
+  await invoke('mailbox_set_favourite', { mailboxId, favourite, before })
+}
+
+/** Favourites in order: the rows every sidebar starts with, and the mailboxes added to them. */
+export async function favouritesList(): Promise<FavouriteRow[]> {
+  if (!runningInTauri) return browser.favouritesList()
+  return invoke<FavouriteRow[]>('favourites_list')
+}
+
+/** Moves a favourite in front of `before`, or to the end. */
+export async function favouriteMove(favouriteId: number, before: number | null): Promise<void> {
+  if (!runningInTauri) {
+    browser.favouriteMove(favouriteId, before)
+    notifyBrowserMailboxesChanged(0)
+    return
+  }
+  await invoke('favourite_move', { favouriteId, before })
+}
+
+/** Use This Mailbox As. The mailbox takes the role, and whichever had it gives it up. */
+export async function mailboxUseAs(mailboxId: number, usage: MailboxUse): Promise<void> {
+  if (!runningInTauri) {
+    notifyBrowserMailboxesChanged(browser.mailboxUseAs(mailboxId, usage))
+    return
+  }
+  await invoke('mailbox_use_as', { mailboxId, usage })
+}
+
+/**
+ * Rebuild: the mailbox is read from the server again by the sync this starts, and
+ * `mailbox:rebuilt` says when it has been.
+ */
+export async function mailboxRebuild(mailboxId: number): Promise<void> {
+  if (!runningInTauri) {
+    // The browser's mail is generated rather than synced, so there is nothing to read again —
+    // but the menu's promise is a finish, and it gets one, after a pause a real one would take.
+    const rebuilt = browser.mailboxRebuild(mailboxId)
+    window.setTimeout(() => {
+      browserBus.dispatchEvent(new CustomEvent('mailbox:rebuilt', { detail: rebuilt }))
+    }, 300)
+    return
+  }
+  await invoke('mailbox_rebuild', { mailboxId })
+}
+
+export interface MailboxRebuilt {
+  accountId: number
+  mailboxId: number
+  /** How many messages the mailbox holds here now. */
+  messages: number
+}
+
+/** A rebuild the sync has finished. */
+export async function onMailboxRebuilt(
+  handler: (rebuilt: MailboxRebuilt) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) {
+    const relay = (event: Event) => {
+      handler((event as CustomEvent<MailboxRebuilt>).detail)
+    }
+    browserBus.addEventListener('mailbox:rebuilt', relay)
+    return () => {
+      browserBus.removeEventListener('mailbox:rebuilt', relay)
+    }
+  }
+  return listen<MailboxRebuilt>('mailbox:rebuilt', (event) => {
+    handler(event.payload)
+  })
+}
+
+export interface MailboxRefused {
+  accountId: number
+  /** What was refused, what happened as a result, and the server's own words. */
+  message: string
+}
+
+/** A mailbox change the server turned down, after the core has put the tree back. */
+export async function onMailboxRefused(
+  handler: (refused: MailboxRefused) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<MailboxRefused>('mailbox:refused', (event) => {
+    handler(event.payload)
+  })
 }
 
 export async function syncNow(accountId: number): Promise<void> {
@@ -576,10 +749,24 @@ export async function onMessagesAdded(handler: (mailboxId: number) => void): Pro
 export async function onMailboxesChanged(
   handler: (accountId: number) => void,
 ): Promise<UnlistenFn> {
-  if (!runningInTauri) return () => undefined
+  if (!runningInTauri) {
+    // The browser store's folder commands announce themselves here, the way the core's do.
+    const relay = (event: Event) => {
+      handler((event as CustomEvent<number>).detail)
+    }
+    browserBus.addEventListener('mailboxes:changed', relay)
+    return () => {
+      browserBus.removeEventListener('mailboxes:changed', relay)
+    }
+  }
   return listen<number>('mailboxes:changed', (event) => {
     handler(event.payload)
   })
+}
+
+export function notifyBrowserMailboxesChanged(accountId: number): void {
+  if (runningInTauri) return
+  browserBus.dispatchEvent(new CustomEvent('mailboxes:changed', { detail: accountId }))
 }
 
 export async function onAccountError(
@@ -640,6 +827,7 @@ export async function messageBody(messageId: number, loadRemote: boolean): Promi
       failedRemote: 0,
       inlined: 0,
       fromPlainText: true,
+      css: '',
     }
   }
   return invoke<Rendered>('message_body', { messageId, loadRemote })
@@ -787,6 +975,16 @@ export async function outboxRetry(id: number): Promise<boolean> {
 }
 
 /**
+ * Deletes a message that failed to send. The Delete button on the failure banner.
+ *
+ * False when the message is no longer failed — already retried, or deleted elsewhere.
+ */
+export async function outboxDiscard(id: number): Promise<boolean> {
+  if (!runningInTauri) return false
+  return invoke<boolean>('outbox_discard', { id })
+}
+
+/**
  * Holds a message until a chosen time. Send Later.
  *
  * `sendAt` is absolute epoch seconds and is computed here rather than in the core: "Tonight
@@ -808,6 +1006,52 @@ export async function outboxSchedule(id: number, sendAt: number): Promise<boolea
 export async function composePickFiles(): Promise<PickedFile[]> {
   if (!runningInTauri) return []
   return invoke<PickedFile[]>('compose_pick_files')
+}
+
+/**
+ * Names and sizes for files dropped on a compose window, plus what could not be attached.
+ *
+ * Same contract as the picker: paths go in, chips come out, and the core reads the bytes only
+ * when the message is sent.
+ */
+export async function composeDescribeFiles(paths: string[]): Promise<DescribedFiles> {
+  if (!runningInTauri) return { files: [], skipped: [] }
+  return invoke<DescribedFiles>('compose_describe_files', { paths })
+}
+
+/** A file drag over this window, as the compose window needs to know it. */
+export type FileDrop = { type: 'hover' } | { type: 'leave' } | { type: 'drop'; paths: string[] }
+
+/**
+ * Files dragged onto this window from outside the app — Explorer, the desktop.
+ *
+ * Through Tauri's native drag-and-drop handler rather than HTML5's `drop`, because only the
+ * native handler says *which files*: a WebView2 `File` from an HTML5 drop carries no path, and
+ * the attachment pipeline is built on paths. The handler has to be enabled on the window for
+ * this to fire — it is for compose windows and deliberately is not for the main one; see
+ * `compose_open` in `ipc/compose.rs`.
+ *
+ * `enter` and `over` are folded into one `hover`: the window only needs to know whether to show
+ * the drop target, and `over` repeats at pointer rate.
+ */
+export async function onFileDrop(handler: (event: FileDrop) => void): Promise<UnlistenFn> {
+  // No native handler in a browser, and an HTML5 drop there has no paths to offer.
+  if (!runningInTauri) return () => undefined
+
+  return getCurrentWebview().onDragDropEvent((event) => {
+    switch (event.payload.type) {
+      case 'enter':
+      case 'over':
+        handler({ type: 'hover' })
+        break
+      case 'leave':
+        handler({ type: 'leave' })
+        break
+      case 'drop':
+        handler({ type: 'drop', paths: event.payload.paths })
+        break
+    }
+  })
 }
 
 /** The total attachment size at which to warn. Decided by the core. */
@@ -1010,18 +1254,30 @@ export type SettingsPane =
  * are no OS windows at all, so this opens a tab instead, which is what the Playwright run and
  * the component gallery need it to do.
  */
-export async function settingsOpen(pane: SettingsPane = 'general'): Promise<void> {
+export async function settingsOpen(
+  pane: SettingsPane = 'general',
+  accountId?: number,
+): Promise<void> {
   if (!runningInTauri) {
-    window.open(`${window.location.pathname}?settings=1&pane=${pane}`, '_blank')
+    const account = accountId === undefined ? '' : `&account=${String(accountId)}`
+    window.open(`${window.location.pathname}?settings=1&pane=${pane}${account}`, '_blank')
     return
   }
-  await invoke('settings_open', { pane })
+  await invoke('settings_open', { pane, account: accountId ?? null })
 }
 
 /** The already-open Settings window being told to show a different pane. */
 export async function onSettingsPane(handler: (pane: SettingsPane) => void): Promise<UnlistenFn> {
   if (!runningInTauri) return () => undefined
   return listen<SettingsPane>('settings:pane', (event) => {
+    handler(event.payload)
+  })
+}
+
+/** The already-open Settings window being asked to show one account. `Edit "Account"…`. */
+export async function onSettingsAccount(handler: (accountId: number) => void): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<number>('settings:account', (event) => {
     handler(event.payload)
   })
 }

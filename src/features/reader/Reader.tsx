@@ -27,6 +27,7 @@ import { useThreadBodies } from './useBodyPrefetch'
 import { attachmentSave, attachmentsSaveAll, composeOpen, storeNow } from '@/lib/ipc'
 
 import { RedirectSheet } from './RedirectSheet'
+import { SelectionDeck } from './SelectionDeck'
 import { useMailStore } from '@/store/mail'
 import {
   Avatar,
@@ -422,7 +423,13 @@ export function Reader({ toolbar }: ReaderProps) {
         <Toolbar {...toolbar} />
       </header>
 
-      {messages.length > 0 ? (
+      {selectedMessageIds.length > 1 ? (
+        // Several rows caught at once: the fanned deck, not a blank pane with a number on it.
+        // Checked before the thread, and not as a third case below it, because `useThread` is
+        // disabled for a multi-selection — there is no conversation to open — so falling
+        // through would always land on the empty state and read like an error.
+        <SelectionDeck ids={selectedMessageIds} />
+      ) : messages.length > 0 ? (
         <>
           <div className={styles.countRow}>
             <span className={styles.count}>
@@ -476,11 +483,7 @@ export function Reader({ toolbar }: ReaderProps) {
             // A failed read is not an empty selection. Saying "No Message Selected" while a
             // message plainly is selected tells the user they clicked wrong, and sends them
             // clicking again at something that will fail the same way.
-            threadFailed
-              ? 'This conversation could not be loaded'
-              : selectedMessageIds.length > 1
-                ? `${String(selectedMessageIds.length)} Messages Selected`
-                : 'No Message Selected'
+            threadFailed ? 'This conversation could not be loaded' : 'No Message Selected'
           }
           description={threadFailed ? 'The mail store could not be read.' : undefined}
         />

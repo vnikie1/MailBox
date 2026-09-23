@@ -32,8 +32,16 @@
 
   /* The value column takes the slack, so a long search term grows while the two dropdowns
    * beside it stay put. Condition builders whose controls resize as you type are the reason
-   * they feel unsteady. */
-  grid-template-columns: minmax(0, 10rem) minmax(0, 10rem) minmax(0, 1fr) auto auto;
+   * they feel unsteady.
+   *
+   * And it has a floor, which it did not. With `minmax(0, 1fr)`, grid sizing grows the two
+   * fixed-limit popup columns to their full 10rem *before* a flexible column is given
+   * anything, so in the 380px rule sheet the columns came out `150px 150px 0px 28px 28px` and
+   * a condition's value could not be typed at all. Measured with the original bare selects as
+   * well as with `Select`; it predates both. */
+  grid-template-columns:
+    minmax(0, 10rem) minmax(0, 10rem) minmax(var(--rule-value-min-width), 1fr)
+    auto auto;
   gap: var(--sp-3);
   align-items: center;
 }
@@ -44,18 +52,19 @@
   display: block;
 }
 
+/**
+ * The popups in a condition or action row — `ui/Select`, placed here and nothing more.
+ *
+ * These were bare `<select>`s on `--fill-hover`, a 4% black: a fine field on a pane, and no
+ * surface at all for the list Windows draws from it, so in the dark theme every option but the
+ * one under the pointer was light text on white. `Select` owns its surface, its focus ring and
+ * the colours of that list; this rule only stops a row from shrinking a popup to nothing.
+ */
 .select {
-  min-width: 0;
-  height: var(--field-height);
-  padding: 0 var(--field-pad-x);
-  font: inherit;
-  color: var(--label-1);
-  background: var(--fill-hover);
-  border: 0;
-  border-radius: var(--field-radius);
-}
+  flex: 0 0 auto;
 
-.select:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
+  /* Allowed below `Select`'s settings-form floor. That floor suits a popup alone on a form
+   * row; here two share a row with a value field, and when the sheet is narrow it is the
+   * popups that should give way — they truncate their label, which the value cannot. */
+  --select-min-width: 0;
 }

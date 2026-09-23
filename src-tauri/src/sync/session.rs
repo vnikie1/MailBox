@@ -73,6 +73,21 @@ pub enum SyncError {
     #[error("no client secret is stored for {provider}")]
     MissingClientSecret { provider: String },
 
+    /// The sign-in application itself is missing, or the provider refused it.
+    ///
+    /// A sibling of [`MissingClientSecret`] and not of [`Rejected`], for the same reason: what
+    /// is wrong is Halcyon's registration with the provider, not the user's account, and
+    /// "sign in again" reruns the identical rejected request. Both cases arrive here —
+    /// `configured: false` when nothing is stored at all, `true` when what is stored came back
+    /// `invalid_client` — because the sentence differs but the place to go does not.
+    ///
+    /// Before this existed, the no-client case was a `Rejected` carrying the detail string
+    /// "no oauth client configured", which rendered as "The saved sign-in for this account was
+    /// refused. Signing in again will fix it." So clearing a client id in Settings broke every
+    /// OAuth account at once and offered each of them a button that could not work.
+    #[error("the sign-in application for {provider} is missing or was refused")]
+    OauthClientUnusable { provider: String, configured: bool },
+
     /// The account is configured for a transport this engine will not use.
     ///
     /// Its own variant rather than a synthesised TLS error: refusing to connect in the clear
@@ -139,6 +154,7 @@ impl SyncError {
             SyncError::Rejected { .. }
                 | SyncError::NotConfigured { .. }
                 | SyncError::MissingClientSecret { .. }
+                | SyncError::OauthClientUnusable { .. }
                 | SyncError::Insecure { .. }
                 | SyncError::ShuttingDown
         )

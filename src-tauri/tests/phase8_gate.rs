@@ -300,6 +300,44 @@ fn compiled_count(conn: &Connection, predicate: &Predicate) -> i64 {
         .expect("compiled")
 }
 
+/// A private copy of the machine's mail store — but only if it has mail in it.
+///
+/// "Is there a store" used to be the whole test, and it is not the same question. A freshly
+/// installed app creates its store on first launch, before any account is added, so the store
+/// exists and holds nothing. The gate then compared two queries over zero rows, and its own
+/// vacuity check failed it — on 2026-09-16, the first time the suite was run on a machine that
+/// had just been reset to test the first-run experience. An empty store is no better a corpus
+/// than no store, so both now take the fixture.
+fn copy_of_store_with_mail(live: &std::path::Path) -> Option<Connection> {
+    if !live.exists() {
+        return None;
+    }
+
+    let scratch = std::env::temp_dir().join("halcyon-phase8-gate.db");
+    for stale in ["db", "db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(scratch.with_extension(stale));
+    }
+
+    // Copied, never opened in place. The app may be running against this file, and a gate that
+    // takes a lock on the store it is measuring is the thing that broke it.
+    std::fs::copy(live, &scratch).expect("copy");
+    for suffix in ["-wal", "-shm"] {
+        let from = live.with_extension(format!("db{suffix}"));
+        if from.exists() {
+            let _ = std::fs::copy(&from, scratch.with_extension(format!("db{suffix}")));
+        }
+    }
+
+    let conn = Connection::open(&scratch).expect("open copy");
+
+    // A store too new to have the table at all counts as empty, not as a failure.
+    let messages: i64 = conn
+        .query_row("SELECT COUNT(*) FROM message", [], |row| row.get(0))
+        .unwrap_or(0);
+
+    (messages > 0).then_some(conn)
+}
+
 #[test]
 fn gate_2_a_five_predicate_smart_mailbox_agrees_with_hand_written_sql() {
     let predicate = five_predicate();
@@ -309,26 +347,8 @@ fn gate_2_a_five_predicate_smart_mailbox_agrees_with_hand_written_sql() {
     // handful of fixture rows says almost nothing, because every branch is exercised by one row
     // and a compiler that dropped a clause entirely could still agree.
     let live = halcyon_lib::db::default_path();
-    let (conn, corpus) = if live.exists() {
-        let scratch = std::env::temp_dir().join("halcyon-phase8-gate.db");
-        for stale in ["db", "db-wal", "db-shm"] {
-            let _ = std::fs::remove_file(scratch.with_extension(stale));
-        }
-
-        // Copied, never opened in place. The app may be running against this file, and a gate
-        // that takes a lock on the store it is measuring is the thing that broke it.
-        std::fs::copy(&live, &scratch).expect("copy");
-        for suffix in ["-wal", "-shm"] {
-            let from = live.with_extension(format!("db{suffix}"));
-            if from.exists() {
-                let _ = std::fs::copy(&from, scratch.with_extension(format!("db{suffix}")));
-            }
-        }
-
-        (
-            Connection::open(&scratch).expect("open copy"),
-            "the seeded store",
-        )
+    let (conn, corpus) = if let Some(conn) = copy_of_store_with_mail(&live) {
+        (conn, "the seeded store")
     } else {
         let conn = store();
 

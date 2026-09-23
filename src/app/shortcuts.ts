@@ -78,6 +78,7 @@ export type ShortcutId =
   | 'collapseThread'
   | 'previewAttachment'
   | 'jumpToMailbox'
+  | 'moveFavourite'
   | 'showShortcuts'
   | 'settings'
 
@@ -171,6 +172,15 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'search', keys: 'Ctrl+F', label: 'Search', group: 'Navigate' },
   { id: 'getMail', keys: 'F5', label: 'Get new mail', group: 'Navigate' },
   { id: 'jumpToMailbox', keys: 'Ctrl+1–9', label: 'Jump to mailbox', group: 'Navigate' },
+  // The keyboard's way to do what a drag in Favourites does, on the focused row; the sidebar
+  // owns it, as it owns the arrows that move between rows.
+  {
+    id: 'moveFavourite',
+    keys: 'Alt+↑ / Alt+↓',
+    label: 'Move a favourite up or down',
+    group: 'Navigate',
+    local: true,
+  },
   { id: 'nextMessage', keys: '↓', label: 'Next message', group: 'Navigate', local: true },
   { id: 'previousMessage', keys: '↑', label: 'Previous message', group: 'Navigate', local: true },
   { id: 'nextInThread', keys: 'Ctrl+↓', label: 'Next in thread', group: 'Navigate' },

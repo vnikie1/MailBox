@@ -83,6 +83,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "moved_message_origin",
         sql: include_str!("../../migrations/0012_moved_message_origin.sql"),
     },
+    Migration {
+        version: 13,
+        name: "mailbox_management",
+        sql: include_str!("../../migrations/0013_mailbox_management.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "favourites_roles_rebuild",
+        sql: include_str!("../../migrations/0014_favourites_roles_rebuild.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.
@@ -197,6 +207,82 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(versions, sorted);
+    }
+
+    /// A store at `version`, as an install that stopped there has it.
+    fn at_version(version: i64) -> Connection {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", "ON").expect("fk");
+        conn.execute_batch(
+            "CREATE TABLE schema_migration (
+               version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL)",
+        )
+        .expect("bookkeeping");
+
+        for migration in MIGRATIONS.iter().filter(|m| m.version <= version) {
+            conn.execute_batch(migration.sql).expect("older migration");
+            conn.execute(
+                "INSERT INTO schema_migration (version, name, applied_at) VALUES (?1, ?2, 0)",
+                (migration.version, migration.name),
+            )
+            .expect("record");
+        }
+
+        conn
+    }
+
+    #[test]
+    fn favourites_chosen_before_0014_keep_their_order_after_the_built_in_rows() {
+        let mut conn = at_version(13);
+
+        conn.execute_batch(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'A', 'a@example.test', 'imap', 'password', 'ref');
+             INSERT INTO mailbox (id, account_id, remote_path, display_name, favourite_order)
+             VALUES (1, 1, 'INBOX', 'Inbox', NULL),
+                    (2, 1, 'Clients', 'Clients', 7),
+                    (3, 1, 'Receipts', 'Receipts', 3),
+                    (4, 1, 'Travel', 'Travel', NULL);",
+        )
+        .expect("a version 13 store");
+
+        run(&mut conn).expect("migrate");
+
+        let order: Vec<(i64, Option<String>, Option<i64>)> = conn
+            .prepare("SELECT position, builtin, mailbox_id FROM favourite ORDER BY position")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+
+        assert_eq!(
+            order,
+            vec![
+                (1, Some("allInboxes".to_string()), None),
+                (2, Some("vips".to_string()), None),
+                (3, Some("flagged".to_string()), None),
+                (4, Some("allDrafts".to_string()), None),
+                (5, Some("allSent".to_string()), None),
+                (6, None, Some(3)),
+                (7, None, Some(2)),
+            ]
+        );
+
+        // The column is gone, so nothing can go on reading an order that is no longer kept.
+        assert!(conn.prepare("SELECT favourite_order FROM mailbox").is_err());
+
+        // And a deleted mailbox takes its place in Favourites with it, as the column did.
+        conn.execute("DELETE FROM mailbox WHERE id = 3", [])
+            .expect("delete");
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM favourite WHERE mailbox_id IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(left, 1);
     }
 
     #[test]

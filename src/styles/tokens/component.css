@@ -103,6 +103,13 @@
   --sidebar-chevron: 10px;
   --sidebar-badge-inset: var(--sp-6);
 
+  /* Where a favourite being dragged will land: a line on the edge of a row, drawn over it
+   * rather than between rows, so nothing moves while the pointer travels. */
+  --sidebar-insert-line: 2px;
+
+  /* The favourite being dragged, still in its place until it is dropped. */
+  --sidebar-dragging-opacity: 0.45;
+
   /* ---------- message list row — docs/02 §6.3, heights measured from the reference ----
    * Three heights, by how many preview lines are shown. §6.3 says 46/62/78 and §7 pins
    * only the two-line figure per density. Measured off the reference, the two-line row is
@@ -134,6 +141,72 @@
   /* Enough that a one-line message does not look like a rendering failure while the frame
    * measures itself. docs/03 §6.7. */
   --reader-frame-min-height: 60px;
+
+  /* ---------- the selection deck — docs/01 §4 ----------
+   * What the reader shows when several messages are selected: the messages themselves, as
+   * sheets the size of the pane, fanned so that each one behind shows its own header above the
+   * one in front. features/reader/SelectionDeck.module.css carries the geometry argument; the
+   * fan step is derived, not chosen, and says so where it is defined. */
+
+  /* The pane's margin around the stack. Also the room a tilted sheet swings into sideways: a
+   * sheet rotated about its middle moves each end by (height / 2) x sin(tilt), which is 13px for
+   * a 600px sheet at 2.5deg and reaches this only for a sheet over 1100px tall. */
+  --deck-inset: var(--sp-9);
+
+  /* Wide enough to read a message at, and no wider: past this a sheet stops looking like a page
+   * of mail and starts looking like the pane with a border round it. The corner-drop budget
+   * below is computed at this width, so a narrower sheet only ever has more room. */
+  --deck-sheet-max-width: 760px;
+  --deck-sheet-pad-x: var(--reader-pad-x);
+  --deck-sheet-pad-y: var(--sp-7);
+  --deck-sheet-gap: var(--sp-6);
+  --deck-sheet-radius: var(--r-xl);
+
+  /* A sheet's header — the avatar beside the name line and the subject — pinned rather than
+   * measured, because the fan step is measured from it. The taller of the two, so it holds at
+   * every density. */
+  --deck-header-height: max(
+    var(--reader-avatar),
+    calc(
+      var(--t-headline-size) * var(--t-headline-leading) + var(--sp-1) + var(--t-body-size) *
+        var(--t-body-leading)
+    )
+  );
+
+  /* Tilt, alternating so the stack splays rather than leans. The front sheet is upright: it is
+   * the one being read. Smaller than a card would want, because a sheet this size shows the
+   * same angle as a much larger swing at its corners. */
+  --deck-tilt-1: -1.5deg;
+  --deck-tilt-2: 2.5deg;
+
+  /* What the tilts cost the header of the deepest sheet, at the one place it is tight. The two
+   * tilts converge on the same side — the -1.5deg sheet's right end rises while the 2.5deg
+   * sheet's right end falls — so the costs add:
+   *
+   *   the header behind falls at its end:   (760 / 2 - 20 - 1) x sin(2.5deg) = 15.7px
+   *   the edge in front rises at its corner:  (760 / 2)         x sin(1.5deg) =  9.9px
+   *   tilting about the middle lowers a top:   (height / 2) x (1 - cos(tilt)) <  0.4px
+   *
+   * 26.0px at most, and the budget is 27. The first version said 26 and forgot two of these: it
+   * measured the edge in front at the text rather than at the corner, which reaches 20px
+   * further, and it left the sheet's own border out of the step. The e2e spec caught it by
+   * two-thirds of a pixel, which is what a test measuring real rectangles is for. Raise a tilt
+   * or the width and this has to follow. */
+  --deck-corner-drop: 27px;
+
+  /* Stagger between a sheet and the one behind it: the header and everything above it inside the
+   * sheet, plus what the tilt eats. Derived, so it holds at all three densities. */
+  --deck-fan-step: calc(
+    var(--hairline) + var(--deck-sheet-pad-y) + var(--deck-header-height) + var(--deck-corner-drop)
+  );
+
+  /* Depth by opacity — standing rule 5, not a second background colour. Light: the headers
+   * behind are the point of the fan, and dimming them hard would hide what it exists to show. */
+  --deck-dim-1: 0.88;
+  --deck-dim-2: 0.76;
+
+  /* Between the stack and the count beneath it. */
+  --deck-caption-gap: var(--sp-6);
 
   /* ---------- buttons — docs/02 §6.5 ---------- */
   --btn-height: 28px;
@@ -188,6 +261,16 @@
   --picker-max-height: 320px;
 
   /* ---------- search dropdown ---------- */
+
+  /* ---------- rule and smart mailbox editors ---------- */
+
+  /* Wider than a generic sheet (--sheet-max-width), because a condition row is five controls
+   * abreast. At 420px the two popups took every pixel and the value field was laid out 0px
+   * wide — measured, and present since the editor was written. */
+  --rule-sheet-width: 600px;
+
+  /* The least a condition's value field may be given, whatever the popups beside it want. */
+  --rule-value-min-width: 120px;
 
   /* ---------- keyboard reference ---------- */
   --shortcuts-sheet-width: 720px;
@@ -293,6 +376,12 @@
   --compose-chip-height: 24px;
   --compose-chip-icon: 13px;
   --compose-chip-max-width: 260px;
+
+  /* The drop target a file dragged over the window lights up. Inset from the window edge so
+   * its outline reads as a target rather than as the window's own border. */
+  --compose-drop-inset: var(--sp-3);
+  --compose-drop-icon: 32px;
+  --compose-drop-outline: 2px;
 
   /* ---------- outbox banner — docs/01 §6 ----------
    * Bottom-centre and floating, never in the layout: it comes and goes on its own schedule,

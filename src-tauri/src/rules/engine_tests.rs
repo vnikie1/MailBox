@@ -110,6 +110,37 @@ fn a_matching_rule_applies_its_actions() {
 }
 
 #[test]
+fn a_rule_whose_folder_was_deleted_still_applies_its_other_actions() {
+    // A rule outlives its folder. Moving into a mailbox that no longer exists used to fail the
+    // foreign key, which failed the whole run — so one deleted folder stopped every rule.
+    let mut conn = store();
+    add_message(&conn, 1, "ada@example.test", "The quarterly figures");
+
+    let tx = conn.transaction().expect("tx");
+    run_over(
+        &tx,
+        &[1],
+        &[rule(
+            1,
+            0,
+            Field::From,
+            "ada",
+            vec![Action::MoveTo(99), Action::MarkRead],
+        )],
+    )
+    .expect("run");
+
+    assert_eq!(mailbox_of(&tx, 1), 1, "the message stays where it is");
+
+    let seen: i64 = tx
+        .query_row("SELECT flag_seen FROM message WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("read");
+    assert_eq!(seen, 1, "and the rule's other action still happened");
+}
+
+#[test]
 fn a_rule_that_does_not_match_changes_nothing() {
     let mut conn = store();
     add_message(&conn, 1, "ada@example.test", "The quarterly figures");

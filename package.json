@@ -24,7 +24,7 @@
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "verify": "npm run format:check && npm run lint && npm run lint:css && npm run typecheck && npm run test && npm run test:e2e:gate && npm run rust:fmt && npm run rust:clippy && npm run rust:test",
-    "icon": "node tools/make-icon.cjs src-tauri/icons/icon-source.png && tauri icon src-tauri/icons/icon-source.png"
+    "icon": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-icons.ps1"
   },
   "dependencies": {
     "@floating-ui/react": "^0.27.20",

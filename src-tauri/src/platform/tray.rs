@@ -15,11 +15,38 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 use crate::db::{Db, DbError};
+
+/// The brand's hand-drawn small icons, smallest first. `npm run icon` copies them here.
+///
+/// The notification area shows an icon at the small-icon size — 16px at 100% scale, 20 at 125%,
+/// 24 at 150%, 32 at 200% — and shrinks anything larger to fit. The window icon is the 32px one,
+/// and shrunk to 16 its envelope thins to a hairline: the brand draws the stroke at 8% of the
+/// width at 256px but 12% at 16px for exactly that reason. So the tray carries its own set.
+const TRAY_ICONS: [(u32, &[u8]); 6] = [
+    (16, include_bytes!("../../icons/tray/halcyon-16.png")),
+    (20, include_bytes!("../../icons/tray/halcyon-20.png")),
+    (24, include_bytes!("../../icons/tray/halcyon-24.png")),
+    (32, include_bytes!("../../icons/tray/halcyon-32.png")),
+    (40, include_bytes!("../../icons/tray/halcyon-40.png")),
+    (48, include_bytes!("../../icons/tray/halcyon-48.png")),
+];
+
+/// The drawn icon for a display scale: the smallest that is at least the size Windows will show,
+/// so it is only ever reduced — never enlarged — and at the usual scales not resized at all.
+fn tray_icon_for(scale: f64) -> (u32, &'static [u8]) {
+    let wanted = (16.0 * scale).round();
+    TRAY_ICONS
+        .iter()
+        .copied()
+        .find(|(size, _)| f64::from(*size) >= wanted)
+        .unwrap_or(TRAY_ICONS[TRAY_ICONS.len() - 1])
+}
 
 /// The last count shown, so an unchanged one costs nothing.
 ///
@@ -65,7 +92,19 @@ pub fn install(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error>> 
 
     let menu = Menu::with_items(app, &[&open, &compose, &quit])?;
 
+    // Given explicitly, because nothing supplies one otherwise. Tauri's builder has no default
+    // icon, and without one tray-icon registers the entry with no NIF_ICON at all — which is how
+    // the tray was built until 2026-09-17. The taskbar's notification area lives on the primary
+    // monitor, so that is the scale that decides.
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map_or(1.0, |monitor| monitor.scale_factor());
+    let icon = Image::from_bytes(tray_icon_for(scale).1)?;
+
     let tray = TrayIconBuilder::with_id("halcyon")
+        .icon(icon)
         .tooltip("Halcyon")
         .menu(&menu)
         // The menu belongs on right-click, which is the Windows convention. Showing it on left
@@ -266,6 +305,35 @@ mod tests {
         add(&conn, 1, 2, false, false, None);
 
         assert_eq!(unread_count(&conn).expect("count"), 0);
+    }
+
+    #[test]
+    fn the_tray_takes_the_drawn_icon_for_each_display_scale() {
+        // 100%, 125%, 150% and 200% have an icon of exactly their size; the scales between take
+        // the next one up, so Windows only ever shrinks it.
+        for (scale, size) in [
+            (1.0, 16),
+            (1.25, 20),
+            (1.5, 24),
+            (1.75, 32),
+            (2.0, 32),
+            (2.25, 40),
+            (2.5, 40),
+            (3.0, 48),
+            (4.0, 48),
+        ] {
+            assert_eq!(tray_icon_for(scale).0, size, "at {scale}x");
+        }
+    }
+
+    #[test]
+    fn every_tray_icon_decodes_at_the_size_it_is_filed_under() {
+        // Decoded the way `install` decodes it. The designer's PNGs carry a C2PA provenance
+        // chunk, which a decoder has to skip rather than choke on.
+        for (size, png) in TRAY_ICONS {
+            let icon = Image::from_bytes(png).expect("decodes");
+            assert_eq!((icon.width(), icon.height()), (size, size));
+        }
     }
 
     #[test]

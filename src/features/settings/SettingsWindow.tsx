@@ -9,7 +9,7 @@ import { ComposingSettings } from '@/features/compose/ComposingSettings'
 import { JunkSettings } from '@/features/organise/JunkSettings'
 import { OrganiseSettings } from '@/features/organise/OrganiseSettings'
 import { ReadingSettings } from '@/features/reader/ReadingSettings'
-import { onSettingsPane, setWindowTitle, type SettingsPane } from '@/lib/ipc'
+import { onSettingsAccount, onSettingsPane, setWindowTitle, type SettingsPane } from '@/lib/ipc'
 import { ToastProvider } from '@/ui'
 
 import { AdvancedSettings } from './AdvancedSettings'
@@ -62,20 +62,40 @@ function Panes() {
     paneFrom(new URLSearchParams(window.location.search).get('pane')),
   )
 
+  /**
+   * The account the mailbox menu's `Edit "Account"…` asked for, if any.
+   *
+   * Carries a counter as well as the id, so asking for the same account twice — the window is
+   * already open on it, and the user has scrolled away — still brings it back into view.
+   */
+  const [focus, setFocus] = useState<{ accountId: number; request: number } | null>(() => {
+    const requested = Number(new URLSearchParams(window.location.search).get('account'))
+    return Number.isInteger(requested) && requested > 0
+      ? { accountId: requested, request: 0 }
+      : null
+  })
+
   // Reopening Settings while it is already open moves it to the pane that was asked for rather
   // than opening a second window. See `settings_open` in ipc/window.rs.
   useEffect(() => {
     let cancelled = false
-    let stop: (() => void) | undefined
+    const stops: (() => void)[] = []
 
-    void onSettingsPane(setPane).then((unlisten) => {
+    const keep = (unlisten: () => void) => {
       if (cancelled) unlisten()
-      else stop = unlisten
-    })
+      else stops.push(unlisten)
+    }
+
+    void onSettingsPane(setPane).then(keep)
+    void onSettingsAccount((accountId) => {
+      setFocus((previous) => ({ accountId, request: (previous?.request ?? 0) + 1 }))
+    }).then(keep)
 
     return () => {
       cancelled = true
-      stop?.()
+      stops.forEach((stop) => {
+        stop()
+      })
     }
   }, [])
 
@@ -182,7 +202,7 @@ function Panes() {
               <UpdateSettings />
             </>
           )}
-          {pane === 'accounts' && <AccountsSettings />}
+          {pane === 'accounts' && <AccountsSettings focus={focus} />}
           {pane === 'composing' && <ComposingSettings />}
           {pane === 'signatures' && <SignatureSettings />}
           {pane === 'rules' && (

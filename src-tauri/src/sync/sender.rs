@@ -302,6 +302,19 @@ pub async fn run_once(events: &dyn Events, db: &Db, root: &Path) -> Result<(), S
 /// something they can act on, and paraphrasing it into "could not send" does not.
 fn describe(error: &smtp::SendError) -> String {
     match error {
+        // Gmail's content block, explained before it is quoted. Its own wording — "blocked
+        // because its content presents a potential security issue" — does not say that an
+        // attachment is the cause, that it can be one *inside a .zip*, or that retrying is
+        // pointless, and the banner offered Try Again as the only thing to do. Reported on
+        // 2026-09-17 with a zip of three DLLs. `compose_send` now catches the known cases before
+        // queueing (`mail::attachment_policy`); this covers what only Gmail can see, such as
+        // macros in a document or another archive format.
+        smtp::SendError::Refused { detail, .. } if is_gmail_content_block(detail) => format!(
+            "Gmail blocked this message because of an attachment — usually a program or a \
+             file like a .dll, which Gmail refuses even inside a .zip. Sending it again will \
+             not help: delete it, and share the file as a Google Drive link instead. \
+             Gmail said: {detail}"
+        ),
         smtp::SendError::Refused { detail, .. } => detail.clone(),
         smtp::SendError::Temporary { detail, .. } => detail.clone(),
         smtp::SendError::Insecure { host, port } => {
@@ -322,6 +335,13 @@ fn describe(error: &smtp::SendError) -> String {
 
         other => other.to_string(),
     }
+}
+
+/// Gmail's refusal of a message's content, by the two things it always carries: the `5.7.0`
+/// status and a link to its "BlockedMessage" help page. Matching the link rather than the
+/// sentence, because the link is what Google keeps stable.
+fn is_gmail_content_block(detail: &str) -> bool {
+    detail.contains("5.7.0") && detail.contains("p=BlockedMessage")
 }
 
 async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<(), smtp::SendError> {
@@ -428,6 +448,38 @@ mod tests {
         };
 
         assert_eq!(describe(&refused), "550 5.2.2 mailbox full");
+    }
+
+    #[test]
+    fn gmail_blocking_an_attachment_is_explained_and_still_quoted() {
+        // Word for word what Gmail answered on 2026-09-17 for a zip of three DLLs. The banner
+        // showed exactly this and offered Try Again, which cannot work.
+        let gmail = "permanent error (552): 5.7.0 This message was blocked because its content \
+                     presents a potential security issue. To review our message content and \
+                     attachment content guidelines, go to \
+                     https://support.google.com/mail/?p=BlockedMessage \
+                     d9443c01a7336-2dd89e93316sm22023355ad.14 - gsmtp";
+        let refused = smtp::SendError::Refused {
+            host: "smtp.gmail.com".into(),
+            detail: gmail.into(),
+        };
+
+        let described = describe(&refused);
+        assert!(described.starts_with("Gmail blocked this message because of an attachment"));
+        assert!(described.contains(".zip"), "{described}");
+        assert!(described.contains("will not help"), "{described}");
+        // The server's own words survive, after the explanation.
+        assert!(described.ends_with(gmail), "{described}");
+
+        // And an ordinary refusal is still left alone.
+        let full = smtp::SendError::Refused {
+            host: "smtp.gmail.com".into(),
+            detail: "552 5.2.2 The recipient's inbox is out of storage space".into(),
+        };
+        assert_eq!(
+            describe(&full),
+            "552 5.2.2 The recipient's inbox is out of storage space"
+        );
     }
 
     #[test]

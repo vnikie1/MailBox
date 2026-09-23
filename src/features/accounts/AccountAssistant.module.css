@@ -161,26 +161,16 @@
   max-width: var(--tokenfield-label-width);
 }
 
-.securityLabel {
-  display: flex;
-  gap: var(--sp-4);
-  align-items: center;
-  color: var(--label-2);
-}
-
 /**
- * A native select. The design system has no dropdown primitive yet, and a hand-rolled one
- * here would be a component built in a feature — which docs/02 §6 forbids for good reason.
- * It is styled to the field tokens so it does not look pasted in.
+ * The Encryption popup — `ui/Select`, which the comment here once said did not exist yet.
+ *
+ * It did by the time anyone opened this list in the dark theme, and the hand-styled `<select>`
+ * that stood in for it carried `--fill-hover`, a 4% black: right on a pane, and no surface at
+ * all for the list Windows draws from it. Only the width is decided here — the label now sits
+ * above the control, as Host's and Port's do beside it.
  */
-.select {
-  height: var(--field-height);
-  padding: 0 var(--field-pad-x);
-  color: var(--label-1);
-  font: inherit;
-  background: var(--fill-hover);
-  border: none;
-  border-radius: var(--field-radius);
+.security {
+  align-self: flex-start;
 }
 
 /* ------------------------------------------------------------------ testing step */

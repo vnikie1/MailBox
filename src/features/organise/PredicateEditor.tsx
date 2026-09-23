@@ -2,8 +2,7 @@ import { Plus, X } from 'lucide-react'
 
 import type { Condition } from '@/lib/generated/Condition'
 import type { Field } from '@/lib/generated/Field'
-import type { Op } from '@/lib/generated/Op'
-import { IconButton, TextField } from '@/ui'
+import { IconButton, Select, TextField, type SelectOption } from '@/ui'
 
 import styles from './PredicateEditor.module.css'
 import { BLANK_CONDITION, FIELD_LABELS, OP_LABELS, opsFor, takesValue } from './predicateShape'
@@ -17,6 +16,15 @@ import { BLANK_CONDITION, FIELD_LABELS, OP_LABELS, opsFor, takesValue } from './
  *
  * The shape it edits, and why that shape is flat, is in `predicateShape.ts`.
  */
+
+const MATCH_OPTIONS: readonly SelectOption<'all' | 'any'>[] = [
+  { value: 'all', label: 'all' },
+  { value: 'any', label: 'any' },
+]
+
+const FIELD_OPTIONS: readonly SelectOption<Field>[] = (Object.keys(FIELD_LABELS) as Field[]).map(
+  (field) => ({ value: field, label: FIELD_LABELS[field] }),
+)
 
 export interface PredicateEditorProps {
   matchAll: boolean
@@ -50,20 +58,17 @@ export function PredicateEditor({ matchAll, conditions, onChange }: PredicateEdi
   return (
     <div className={styles.editor}>
       <div className={styles.header}>
-        <label className={styles.matchLabel} htmlFor="predicate-match">
-          If
-        </label>
-        <select
-          id="predicate-match"
+        <span className={styles.matchLabel}>If</span>
+        <Select
+          label="Match"
+          hideLabel
           className={styles.select}
+          options={MATCH_OPTIONS}
           value={matchAll ? 'all' : 'any'}
-          onChange={(event) => {
-            onChange(event.target.value === 'all', conditions)
+          onValueChange={(match) => {
+            onChange(match === 'all', conditions)
           }}
-        >
-          <option value="all">all</option>
-          <option value="any">any</option>
-        </select>
+        />
         <span className={styles.matchLabel}>of the following are true:</span>
       </div>
 
@@ -73,35 +78,27 @@ export function PredicateEditor({ matchAll, conditions, onChange }: PredicateEdi
           // positional list edited in place — and a synthesised id would be one more thing to
           // keep in step with the array for no gain.
           <li key={index} className={styles.row}>
-            <select
+            <Select
+              label="Field"
+              hideLabel
               className={styles.select}
-              aria-label="Field"
+              options={FIELD_OPTIONS}
               value={condition.field}
-              onChange={(event) => {
-                update(index, { field: event.target.value as Field })
+              onValueChange={(field) => {
+                update(index, { field })
               }}
-            >
-              {(Object.keys(FIELD_LABELS) as Field[]).map((field) => (
-                <option key={field} value={field}>
-                  {FIELD_LABELS[field]}
-                </option>
-              ))}
-            </select>
+            />
 
-            <select
+            <Select
+              label="Condition"
+              hideLabel
               className={styles.select}
-              aria-label="Condition"
+              options={opsFor(condition.field).map((op) => ({ value: op, label: OP_LABELS[op] }))}
               value={condition.op}
-              onChange={(event) => {
-                update(index, { op: event.target.value as Op })
+              onValueChange={(op) => {
+                update(index, { op })
               }}
-            >
-              {opsFor(condition.field).map((op) => (
-                <option key={op} value={op}>
-                  {OP_LABELS[op]}
-                </option>
-              ))}
-            </select>
+            />
 
             {takesValue(condition.op) ? (
               <TextField

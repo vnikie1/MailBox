@@ -63,6 +63,7 @@
 }
 
 .row {
+  position: relative;
   display: flex;
   flex: 0 0 auto;
   gap: var(--sidebar-row-gap);
@@ -77,6 +78,38 @@
    * single frame the drop highlight is still dropped for. Zeroed under reduced motion,
    * because the duration tokens are. */
   transition: background var(--dur-micro) var(--ease-out);
+}
+
+/**
+ * Where a favourite being dragged will land: a line along the top or bottom edge of the row the
+ * pointer is over.
+ *
+ * Drawn over the row rather than by opening a gap between rows, so the rows stay where they are
+ * while the pointer travels — standing rule 6, and the reason a drop target here is a fill and
+ * never a border.
+ */
+.row[data-insert]::before {
+  position: absolute;
+  right: var(--sidebar-row-pad-x);
+  left: var(--sidebar-row-pad-x);
+  height: var(--sidebar-insert-line);
+  background: var(--accent);
+  border-radius: var(--sidebar-insert-line);
+  content: '';
+  pointer-events: none;
+}
+
+.row[data-insert='before']::before {
+  top: calc(var(--sidebar-insert-line) / -2);
+}
+
+.row[data-insert='after']::before {
+  bottom: calc(var(--sidebar-insert-line) / -2);
+}
+
+/* The favourite being dragged stays in its place, fainter, until it is dropped. */
+.row[data-dragging] {
+  opacity: var(--sidebar-dragging-opacity);
 }
 
 /* Always laid out, so a row with children and a row without share a text baseline and
@@ -152,42 +185,56 @@
 }
 
 /**
- * The seven colours under Flagged, each drawn in its own colour.
+ * The seven colours under Flagged, each drawn in its own colour — and the same seven as a
+ * per-account tint, which is the only place an account's colour is visible at all.
  *
- * Every sidebar icon is the accent, which for these rows made "Red", "Orange" and "Blue" all
- * draw the same orange flag — the single thing those rows exist to distinguish was the one
- * thing they did not show.
+ * Every sidebar icon is the accent, which for the flag rows made "Red", "Orange" and "Blue"
+ * all draw the same orange flag — the single thing those rows exist to distinguish was the
+ * one thing they did not show. The account colour had the larger version of that problem:
+ * it was stored, offered and read back, and never drawn anywhere.
+ *
+ * The two attributes share these rules rather than getting a block each because the palette
+ * is literally the same seven tokens; they stay separate attributes in the markup because
+ * they answer different questions, and a row never carries both — a flag row belongs to no
+ * account, and a mailbox row is not a flag.
  *
  * Written `.row .icon[...]` so it does not depend on where it sits in this file: it has to
  * outrank `.selected .icon` above, which would otherwise put the accent back on a selected
  * row, and it has to lose to the focused rule below, where the row is filled with the accent
  * and a red flag on an orange fill would be worse than no colour at all.
  */
-.row .icon[data-flag='red'] {
+.row .icon[data-flag='red'],
+.row .icon[data-account='red'] {
   color: var(--flag-red);
 }
 
-.row .icon[data-flag='orange'] {
+.row .icon[data-flag='orange'],
+.row .icon[data-account='orange'] {
   color: var(--flag-orange);
 }
 
-.row .icon[data-flag='yellow'] {
+.row .icon[data-flag='yellow'],
+.row .icon[data-account='yellow'] {
   color: var(--flag-yellow);
 }
 
-.row .icon[data-flag='green'] {
+.row .icon[data-flag='green'],
+.row .icon[data-account='green'] {
   color: var(--flag-green);
 }
 
-.row .icon[data-flag='blue'] {
+.row .icon[data-flag='blue'],
+.row .icon[data-account='blue'] {
   color: var(--flag-blue);
 }
 
-.row .icon[data-flag='purple'] {
+.row .icon[data-flag='purple'],
+.row .icon[data-account='purple'] {
   color: var(--flag-purple);
 }
 
-.row .icon[data-flag='gray'] {
+.row .icon[data-flag='gray'],
+.row .icon[data-account='gray'] {
   color: var(--flag-gray);
 }
 

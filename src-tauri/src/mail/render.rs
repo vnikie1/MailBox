@@ -61,6 +61,18 @@ pub struct Rendered {
     pub failed_remote: u32,
     /// True when the message had no HTML part and this is its plain text, wrapped.
     pub from_plain_text: bool,
+    /// The message's own stylesheet, filtered by `super::css`, for the frame's `<head>`.
+    ///
+    /// Apart from `html` rather than inside it. The body HTML still never contains a `<style`
+    /// element — the XSS corpus holds that line — and a stylesheet in the body would also be the
+    /// body's first child, which is what the frame's own first-margin rule looks for.
+    ///
+    /// Why it exists at all: a message whose look lives in a `<style>` block rather than in
+    /// `style` attributes rendered as bare text. Reported from using the app on a Pi-hole daily
+    /// report, whose bar chart is a column of empty `<span class='bar'>` elements — every visible
+    /// property of a bar is in the stylesheet, so with it gone the chart was not merely plain, it
+    /// was not there.
+    pub css: String,
 }
 
 /// Tags that may never appear, whatever else is allowed. docs/03 §6.2.
@@ -98,7 +110,7 @@ fn filter_data_urls(
     value: &str,
 ) -> Option<std::borrow::Cow<'static, str>> {
     if attribute == "style" {
-        return Some(sanitise_style(value).into());
+        return Some(super::css::filter_declarations(value).into());
     }
 
     let lowered = value.trim_start().to_ascii_lowercase();
@@ -112,53 +124,6 @@ fn filter_data_urls(
     }
 
     None
-}
-
-/// Strips the dangerous parts of an inline `style` attribute.
-///
-/// `ammonia` sanitises *markup*; it passes CSS through untouched, and CSS is not inert. Three
-/// things matter here, and the third is the one that bites in practice:
-///
-/// * `expression()` — script execution in old IE, and the WebView is Chromium, but a
-///   sanitiser that relies on the renderer's version is a sanitiser with an expiry date.
-/// * `javascript:` inside `url()`.
-/// * **`url(https://…)` as a tracking pixel.** `background-image` loads a remote resource
-///   exactly like `<img>` does, and blocking `<img src>` while leaving CSS alone would mean
-///   the "remote content blocked" banner was telling the user something untrue.
-///
-/// The frame's CSP would refuse these loads anyway. That is the point of defence in depth,
-/// and this module's own doc comment says not to build a pipeline whose safety rests on the
-/// last step — so it should not rest on the CSP either.
-fn sanitise_style(style: &str) -> String {
-    let lowered = style.to_ascii_lowercase();
-
-    let dangerous = [
-        "expression(",
-        "javascript:",
-        "@import",
-        "behavior:",
-        "-moz-binding",
-    ];
-
-    if dangerous.iter().any(|needle| lowered.contains(needle)) {
-        return String::new();
-    }
-
-    // Any `url()` that is not an inline image. Declarations are dropped whole rather than
-    // having the url edited out, because a half-removed declaration is unpredictable.
-    if lowered.contains("url(") {
-        return style
-            .split(';')
-            .filter(|declaration| {
-                let lowered = declaration.to_ascii_lowercase();
-
-                !lowered.contains("url(") || lowered.contains("url(data:image/")
-            })
-            .collect::<Vec<_>>()
-            .join(";");
-    }
-
-    style.to_string()
 }
 
 /// Sanitises message HTML.
@@ -210,6 +175,63 @@ fn sanitise(html: &str) -> String {
         .attribute_filter(|element, attribute, value| filter_data_urls(element, attribute, value));
 
     builder.clean(html).to_string()
+}
+
+/// Every `<style>` element's text, in document order, filtered.
+///
+/// ## A second parse, and why it is the safe one
+///
+/// The stylesheet is taken out by running the message through ammonia *again*, with an
+/// allowlist of exactly one element and no attributes at all. What comes back is the message's
+/// text — escaped, so a `<` in it is `&lt;` — and its `<style>` elements, bare. In that output a
+/// literal `<style>` can only be a real element, so a plain scan finds them without the traps a
+/// scan over the main sanitised output would walk into: there, attribute values keep a raw `<`,
+/// and `alt="<style>"` would read as a stylesheet.
+///
+/// It also means the parse that decides what *is* a stylesheet is the same html5ever parse that
+/// decides everything else. A `<style>` inside a `<textarea>`, a comment or a `<script>` is text
+/// there, and is text here too. Stylesheets in `<head>` are found, because the fragment parser
+/// ignores the `<head>` tag itself and keeps its children.
+///
+/// Skipped outright when the source has no `<style` in it at all, which is most mail: this is a
+/// second pass over bodies that can run to megabytes.
+fn stylesheets(html: &str) -> String {
+    const OPEN: &str = "<style>";
+    const CLOSE: &str = "</style>";
+
+    if !html.to_ascii_lowercase().contains("<style") {
+        return String::new();
+    }
+
+    let mut builder = Builder::empty();
+    builder
+        .add_tags(["style"])
+        .rm_clean_content_tags(["style"])
+        .generic_attributes(HashSet::new())
+        .tag_attributes(HashMap::new());
+
+    let extracted = builder.clean(html).to_string();
+
+    let mut css = String::new();
+    let mut rest = extracted.as_str();
+
+    while let Some(start) = rest.find(OPEN) {
+        let after = &rest[start + OPEN.len()..];
+        let Some(end) = after.find(CLOSE) else { break };
+
+        css.push_str(&after[..end]);
+        css.push('\n');
+
+        // Over budget is refused whole, inside `filter_stylesheet` — stopping here only saves
+        // copying the rest of something that is going to be thrown away.
+        if css.len() > super::css::STYLESHEET_BUDGET {
+            break;
+        }
+
+        rest = &after[end + CLOSE.len()..];
+    }
+
+    super::css::filter_stylesheet(&css)
 }
 
 /// Rewrites `<img src>` after sanitisation.
@@ -680,6 +702,7 @@ pub fn render(
 
     Rendered {
         html: folded,
+        css: stylesheets(html),
         blocked_remote,
         loaded_remote,
         failed_remote,
@@ -1063,6 +1086,91 @@ mod tests {
             "{}",
             inline_bg.html
         );
+    }
+
+    /* ------------------------------------------------------------------- stylesheets */
+
+    #[test]
+    fn a_stylesheet_in_the_head_reaches_the_frame_and_not_the_body() {
+        // The shape of the Pi-hole report that found this: a full document, its look entirely in
+        // a head stylesheet, its bar chart a column of empty spans that only the class gives a
+        // size and a colour.
+        let rendered = render_html(
+            "<html><head><meta charset='utf-8'><style>             .bar{display:inline-block;height:8px;background:#0071e3;border-radius:4px}             </style></head><body><table><tr><td>100.64.0.1</td>             <td><span class='bar' style='width:120px'></span></td></tr></table></body></html>",
+        );
+
+        assert!(
+            rendered.css.contains(".bar{display:inline-block"),
+            "{}",
+            rendered.css
+        );
+        assert!(
+            rendered.css.contains("background:#0071e3"),
+            "{}",
+            rendered.css
+        );
+
+        // The body keeps what the stylesheet hangs on: the class, and the width on each bar.
+        assert!(rendered.html.contains("class=\"bar\""), "{}", rendered.html);
+        assert!(rendered.html.contains("width:120px"), "{}", rendered.html);
+
+        // And still has no stylesheet of its own. The XSS corpus holds that line.
+        assert!(!rendered.html.contains("<style"), "{}", rendered.html);
+        assert!(!rendered.html.contains("inline-block"), "{}", rendered.html);
+    }
+
+    #[test]
+    fn every_stylesheet_is_found_in_document_order() {
+        let rendered = render_html(
+            "<style>.first{color:red}</style><p>text</p><style>.second{color:blue}</style>",
+        );
+
+        let first = rendered.css.find(".first").expect("the head sheet");
+        let second = rendered.css.find(".second").expect("the body sheet");
+        assert!(first < second, "{}", rendered.css);
+    }
+
+    #[test]
+    fn a_stylesheet_written_as_text_is_not_a_stylesheet() {
+        // Each of these is text to a browser, so none of it may style the message. The second
+        // parse is the same html5ever parse as the first, which is why it agrees.
+        for source in [
+            "<textarea><style>.leak{color:red}</style></textarea>",
+            "<!-- <style>.leak{color:red}</style> -->",
+            "<script>var s = '<style>.leak{color:red}</style>';</script>",
+            "<p>&lt;style&gt;.leak{color:red}&lt;/style&gt;</p>",
+            "<img alt=\"<style>.leak{color:red}</style>\" src=\"data:image/png;base64,AA\">",
+        ] {
+            let rendered = render_html(source);
+            assert!(
+                !rendered.css.contains(".leak"),
+                "{source} -> {}",
+                rendered.css
+            );
+        }
+    }
+
+    #[test]
+    fn a_stylesheet_still_cannot_load_anything() {
+        let rendered = render_html(
+            "<style>body{background:url(https://tracker.test/p.gif)}             .ok{color:#333}@import 'https://tracker.test/a.css';</style><p>x</p>",
+        );
+
+        assert!(!rendered.css.contains("tracker.test"), "{}", rendered.css);
+        assert!(rendered.css.contains(".ok{color:#333}"), "{}", rendered.css);
+    }
+
+    #[test]
+    fn a_plain_text_message_has_no_stylesheet() {
+        let rendered = render(
+            None,
+            Some("plain words"),
+            &HashMap::new(),
+            false,
+            &HashMap::new(),
+        );
+
+        assert_eq!(rendered.css, "");
     }
 
     #[test]

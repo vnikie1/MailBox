@@ -110,7 +110,9 @@ fn the_setup_hook_has_only_the_fatal_steps_it_is_supposed_to() {
     );
 
     assert!(
-        fatal.iter().any(|line| line.contains("main window missing")),
+        fatal
+            .iter()
+            .any(|line| line.contains("main window missing")),
         "a missing main window is a broken build and is allowed to be fatal: {fatal:#?}"
     );
     assert!(
@@ -197,8 +199,11 @@ fn release_builds_can_still_catch_a_panicking_parser() {
          search/extract.rs do nothing. A malformed attachment would abort the app."
     );
 
-    let extract = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/search/extract.rs"))
-        .expect("extract.rs is readable");
+    let extract = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/search/extract.rs"
+    ))
+    .expect("extract.rs is readable");
 
     assert!(
         extract.contains("catch_unwind"),

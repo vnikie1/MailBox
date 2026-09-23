@@ -46,6 +46,55 @@ test.describe('the first run', () => {
     await expect(page.getByRole('radio', { name: /Google/ })).toBeVisible()
   })
 
+  test('picking a provider that needs a sign-in application offers a way to reach Settings', async ({
+    page,
+    context,
+  }) => {
+    // The trap this closes. On a first run, choosing Google or Microsoft before registering an
+    // OAuth client disabled Continue and left no way forward: `firstRun` suppresses Cancel,
+    // the sheet's `onOpenChange` is a deliberate no-op so Escape does nothing, the modal
+    // overlay covers the sidebar's Settings button, and `useShortcuts` suppresses Ctrl+, while
+    // a dialog is mounted. The tile said "Needs setting up in Settings first" and named a
+    // place that could not be reached from where the user was standing. The only escape was
+    // to pick a different provider, and nothing on screen said so.
+    await page.goto(FIRST_RUN)
+    await page.getByRole('button', { name: 'Add your account' }).click()
+    await page.getByRole('radio', { name: /Google/ }).click()
+
+    // The four walls, asserted rather than assumed — if any of them is ever lifted, this test
+    // should be reconsidered rather than silently protecting a door nobody needs.
+    await expect(page.getByRole('button', { name: 'Continue' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Cancel' })).toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('radio', { name: /Google/ })).toBeVisible()
+
+    // The door.
+    const openSettings = page.getByRole('button', { name: 'Open Settings' })
+    await expect(openSettings).toBeVisible()
+
+    // And it goes somewhere. In the browser there are no OS windows, so Settings opens as a
+    // second tab — which is `settingsOpen`'s documented browser behaviour, not a test artefact.
+    const [settings] = await Promise.all([context.waitForEvent('page'), openSettings.click()])
+    await expect(settings.getByRole('heading', { level: 1, name: 'Accounts' })).toBeVisible()
+
+    // The assistant is still standing behind it. Opening Settings must not have dismissed the
+    // sheet — that would drop somebody into an empty app, which is what the no-cancel rule
+    // exists to prevent.
+    await expect(page.getByRole('radio', { name: /Google/ })).toBeVisible()
+    await settings.close()
+  })
+
+  test('a provider that needs nothing shows no sign-in-application note', async ({ page }) => {
+    // The note is conditional, and a note that showed for every provider would be noise on the
+    // three tiles it does not apply to.
+    await page.goto(FIRST_RUN)
+    await page.getByRole('button', { name: 'Add your account' }).click()
+    await page.getByRole('radio', { name: /iCloud/ }).click()
+
+    await expect(page.getByRole('button', { name: 'Open Settings' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Continue' })).toBeEnabled()
+  })
+
   test('spends well under the three-minute budget on its own screens', async ({ page }) => {
     // Warm first, then measure. The first navigation of a run pays for Vite compiling the
     // first-run chunk on demand, which is the dev server's cost and not the app's — measuring

@@ -2,7 +2,7 @@ import { Plus, X } from 'lucide-react'
 
 import type { Action } from '@/lib/generated/Action'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
-import { IconButton } from '@/ui'
+import { IconButton, Select, type SelectOption } from '@/ui'
 
 import styles from './PredicateEditor.module.css'
 
@@ -28,6 +28,15 @@ const ACTION_LABELS: Record<Kind, string> = {
 }
 
 const COLOURS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray']
+
+const KIND_OPTIONS: readonly SelectOption<Kind>[] = (Object.keys(ACTION_LABELS) as Kind[]).map(
+  (kind) => ({ value: kind, label: ACTION_LABELS[kind] }),
+)
+
+const COLOUR_OPTIONS: readonly SelectOption<string>[] = COLOURS.map((colour) => ({
+  value: colour,
+  label: colour,
+}))
 
 /** Builds a default action of a kind, so switching kinds never leaves an invalid one. */
 function defaultOf(kind: Kind, mailboxes: MailboxRow[]): Action {
@@ -60,55 +69,53 @@ export function ActionEditor({ actions, mailboxes, onChange }: ActionEditorProps
         {actions.map((action, index) => (
           // Positional by nature, like the condition rows next door.
           <li key={index} className={styles.row}>
-            <select
+            <Select
+              label="Action"
+              hideLabel
               className={styles.select}
-              aria-label="Action"
+              options={KIND_OPTIONS}
               value={action.type}
-              onChange={(event) => {
-                replace(index, defaultOf(event.target.value as Kind, mailboxes))
+              onValueChange={(kind) => {
+                replace(index, defaultOf(kind, mailboxes))
               }}
-            >
-              {(Object.keys(ACTION_LABELS) as Kind[]).map((kind) => (
-                <option key={kind} value={kind}>
-                  {ACTION_LABELS[kind]}
-                </option>
-              ))}
-            </select>
+            />
 
             {action.type === 'moveTo' && (
-              <select
+              <Select
+                label="Mailbox"
+                hideLabel
                 className={styles.select}
-                aria-label="Mailbox"
-                value={String(action.value)}
-                onChange={(event) => {
-                  replace(index, { type: 'moveTo', value: Number(event.target.value) })
+                options={mailboxes.map((mailbox) => ({
+                  value: mailbox.id,
+                  label: mailbox.displayName,
+                }))}
+                value={action.value}
+                onValueChange={(mailboxId) => {
+                  replace(index, { type: 'moveTo', value: mailboxId })
                 }}
-              >
-                {mailboxes.map((mailbox) => (
-                  <option key={mailbox.id} value={String(mailbox.id)}>
-                    {mailbox.displayName}
-                  </option>
-                ))}
-              </select>
+              />
             )}
 
             {action.type === 'setColour' && (
-              <select
+              <Select
+                label="Colour"
+                hideLabel
                 className={styles.select}
-                aria-label="Colour"
+                options={COLOUR_OPTIONS}
                 value={action.value}
-                onChange={(event) => {
-                  replace(index, { type: 'setColour', value: event.target.value })
+                onValueChange={(colour) => {
+                  replace(index, { type: 'setColour', value: colour })
                 }}
-              >
-                {COLOURS.map((colour) => (
-                  <option key={colour} value={colour}>
-                    {colour}
-                  </option>
-                ))}
-              </select>
+              />
             )}
 
+            {/* Every row fills all five columns of the grid it shares with the condition rows,
+                so the two buttons always land in the last two. An action with no second popup
+                used to render four cells, and the grid placed its × in the value column and its
+                + in ×'s — invisible only while that column was being laid out 0px wide. */}
+            {action.type !== 'moveTo' && action.type !== 'setColour' && (
+              <span className={styles.spacer} />
+            )}
             <span className={styles.spacer} />
 
             <IconButton
