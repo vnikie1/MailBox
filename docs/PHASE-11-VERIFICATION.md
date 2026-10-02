@@ -737,3 +737,13 @@ were reloaded afterwards and read back field by field.
   dialog landed after the page had scrolled, so the text was typed with nothing focused; the
   spaces scrolled the page. Every field was read back before going on: nothing had been changed.
   The remaining captions were opened by element rather than by position.
+
+### 13.7 Found while preparing Google's verification (2026-10-03)
+
+- **Deviation from docs/04 Phase 4, _remove with purge_: removing an account leaves its mail on
+  disk.** `account_remove` deletes the rows, the search entries and the credential, but every
+  downloaded body is also cached as `bodies/<account>/<message>.eml`, attachments included, and
+  no code deletes those — on account removal or on Erase Deleted Items. Not a wrong-message risk
+  (the reader opens only the `raw_path` on the row, set after a reused id's file is rewritten),
+  but a privacy gap. Not fixed yet; the privacy policy's new Google section promises only what is
+  true now — deleting the data folder deletes the mail.

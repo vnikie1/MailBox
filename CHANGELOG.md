@@ -8823,3 +8823,59 @@ Asked: _"do the 2 optional checks first"_.
   days". It publishes on passing; _Cancel certification_ stays available until then.
 - A satisfaction survey opened over the page as it went; it was closed unanswered, since it asks
   for the publisher's opinion.
+
+### Later still — getting ready for Google's verification
+
+Asked how long Google takes to review the app — the honest answer is that nothing is with Google:
+the sign-in application is published but unverified, and verification is a request not yet made.
+Brand verification is 2–3 business days and the restricted-scope review "several weeks", by
+Google's own pages. Then asked to do the preparation, _"and make the domain on my github hosted
+pages"_ rather than buy one. Prepared, not submitted; `src-tauri/oauth/README.md` route B has a
+status table at the top.
+
+#### Added
+
+- **`vnikie1.github.io` is verified in Google Search Console** — a URL-prefix property for the
+  domain's root, proved by the file `googlebf2615cb1c964bad.html`. The root of a GitHub Pages
+  domain is served only by a repository named after it, and there was none (the root was a 404),
+  so **`vnikie1/vnikie1.github.io`** was created, public, holding that file, `.nojekyll` and a
+  README saying not to delete it. The root still has no page; `/halcyon-mail/` is unaffected. A
+  _Domain_ property was not an option: it needs a DNS record, and `github.io` is GitHub's.
+- **`src-tauri/oauth/consent-logo-120x120.png`**, the consent screen's logo: the designer's 300 px
+  Store icon downscaled with high-quality bicubic sampling and clamped edges, so the red runs to
+  the border. **Not uploaded** — the Branding page says a logo commits the app to verification.
+- **`PRIVACY.md` 1.2: a _Google accounts_ section**, which Google requires before it verifies a
+  restricted scope: the one scope and why it is the only one, use only at the user's direction,
+  storage only on the PC, no transfer, no advertising, no AI training, how to withdraw access, and
+  Google's Limited Use statement in its own wording. Every claim was read in the code first —
+  `Provider::Google.scopes()` is exactly `https://mail.google.com/`, pinned by a test. Published
+  as `vnikie1/halcyon-mail` `768f4a3` and checked live.
+- **The homepage says why Halcyon asks Google for access**, which the review also checks, and
+  links the new section.
+- **A shot list for the demo video** in route B, step 4, with every menu name checked against the
+  app. The recording needs a real Google sign-in and the publisher's YouTube account, so it is
+  theirs to make.
+
+#### Changed
+
+- **The homepage no longer says Halcyon works with Outlook.** The released build has no Microsoft
+  sign-in of its own, and the Store listing already leaves Outlook out. Importing Outlook `.pst`
+  files, which does work, is still listed.
+
+#### Found, not fixed
+
+- **Nothing in the app ever deletes a cached message source.** Every downloaded body is kept as
+  `bodies/<account>/<message>.eml` under the data folder, attachments included, and no code path
+  removes one: not `account_remove`, which purges the rows, the search index and the credential
+  but not the folder; and not Erase Deleted Items. So a removed account's mail, and mail the user
+  erased permanently, stay on disk until the data folder goes. docs/04's _remove with purge_ meant
+  all of it. A reused account or message id cannot surface a stale file — the reader opens only
+  the `raw_path` on the row, which is set after the new file is written over the old — so this is
+  a privacy gap, not a wrong-message bug. The new policy section says only what is true today.
+
+#### Notes
+
+- **The Verification Center says data-access verification "is not required"**, because no scope
+  is declared on the Data Access page — Halcyon asks for `https://mail.google.com/` at sign-in
+  without it. Declaring the scope is what starts the restricted-scope review, so it was left for
+  the submission.

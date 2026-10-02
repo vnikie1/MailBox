@@ -88,7 +88,19 @@ What sign-in then looks like: _"Google hasn't verified this app"_ → **Advanced
 
 ### B. Public distribution — verify the app (weeks)
 
-Removes the warning screen and the 100-user cap. What Google asks for:
+Removes the warning screen and the 100-user cap.
+
+**Prepared on 2026-10-03, not yet submitted:**
+
+| Step | State |
+| --- | --- |
+| 1. Domain | **Done.** `https://vnikie1.github.io/` is verified in Search Console (URL-prefix property, account vnikie1@gmail.com) by the file `googlebf2615cb1c964bad.html` in the repository `vnikie1/vnikie1.github.io`, made for the purpose. **Do not delete that file**: Google re-checks it. A _Domain_ property was not possible — it needs a DNS record, and `github.io` is GitHub's. Homepage and privacy policy are live and say what Google asks for (privacy policy 1.2, _Google accounts_) |
+| 2. Branding | Logo ready: `consent-logo-120x120.png`, beside this file — the designer's 300 px Store icon, downscaled. **Not uploaded**: the Branding page says uploading a logo means the app must then be submitted for verification, so it goes up with the submission |
+| 3. Data Access | Nothing declared yet, which is why the Verification Center says data-access verification "is not required". Declaring `https://mail.google.com/` is what starts the restricted-scope review |
+| 4. Demo video | To record — the shot list is under step 4 below. It needs a real Google sign-in and the publisher's YouTube account |
+| 5. Submit | Not started |
+
+What Google asks for:
 
 1. **A domain you own**, verified in Google Search Console by an owner or editor of the Cloud
    project, hosting:
@@ -113,6 +125,24 @@ Removes the warning screen and the 100-user cap. What Google asks for:
    Halcyon; the browser consent screen with **the client ID visible in the address bar** (it is
    the `client_id=` parameter); the app name matching the consent screen; and each use of the
    scope — reading, sending, moving, deleting and permanently deleting mail.
+
+   A shot list that covers it, about three minutes, recorded with the Snipping Tool's screen
+   recorder (Windows 11) and a test Google account rather than a personal one:
+
+   1. Halcyon open with no Google account. **Settings → Accounts → Add Account → Google**, type
+      the address, continue.
+   2. The browser opens Google's sign-in. Before signing in, click into the address bar and
+      scroll it slowly so the whole `client_id=…` parameter is readable; hold for a few seconds.
+   3. Sign in. Google's unverified-app screen — the app name _Halcyon_ visible — then
+      **Advanced → Go to Halcyon**, the consent screen naming the Gmail permission, **Continue**,
+      and the browser's _Signed in_ page.
+   4. Back in Halcyon: the Inbox fills. Open a message — **reading**.
+   5. **Ctrl+N**, write to the account itself, **send**; show it arriving.
+   6. Drag a message to another mailbox — **moving**. Delete one — **deleting**, into the Bin.
+   7. Right-click the Bin → **Erase Deleted Items…** and confirm — **permanent deletion**, the
+      reason the full scope is needed.
+   8. Optionally, <https://myaccount.google.com/connections>, showing Halcyon among the
+      third-party connections and how to remove its access.
 5. **Verification Center** → submit, and expect questions by email. Budget weeks.
 6. **Security assessment (CASA).** Google's policy says **local client applications — whose data
    is run, stored and processed only on the user's device — do not need one.** An app loses that

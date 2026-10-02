@@ -1,6 +1,6 @@
 # Privacy policy
 
-**Halcyon, version 1.1. Last updated 2 October 2026.**
+**Halcyon, version 1.2. Last updated 3 October 2026.**
 
 > Published at <https://vnikie1.github.io/halcyon-mail/privacy.html>, which is the URL given to
 > the Microsoft Store. This file is the source it is generated from; the two must not drift.
@@ -56,6 +56,29 @@ application is capable of printing one.
 **The mail database is not encrypted.** Anything running as you can read it, which is equally
 true of every desktop mail client. BitLocker — Windows' full-disk encryption — is what protects
 it if your computer is lost or stolen, and turning it on is worthwhile.
+
+## Google accounts
+
+Adding a Google account asks Google for one permission, which Google's own screen describes as
+_"Read, compose, send and permanently delete all your email from Gmail"_ — the scope
+`https://mail.google.com/`. Halcyon asks for that one and no other, because it is the only one
+Google's IMAP and SMTP servers accept.
+
+Halcyon uses it for what a mail client does, at your direction: downloading your mail to your
+computer so that you can read and search it, sending what you write, and moving, flagging and
+deleting messages when you ask. What it receives from Google is stored only on your computer, in
+the places listed above, with the sign-in token in Windows Credential Manager.
+
+Halcyon does not send Google user data to us or to anyone else — none of it reaches us, so no one
+here can read it — does not use it for advertising, and does not use it to develop, improve or
+train artificial-intelligence or machine-learning models. You can withdraw Halcyon's access at
+any time at <https://myaccount.google.com/permissions>. To delete what it has stored, delete the
+folders listed above; the uninstaller offers to do it for you.
+
+Halcyon's use and transfer to any other app of information received from Google APIs will adhere
+to the
+[Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy),
+including the Limited Use requirements.
 
 ## Remote images
 
