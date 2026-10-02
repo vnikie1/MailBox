@@ -6,10 +6,12 @@ is the reasoning behind each answer; this file is the answers.
 Partner Center: <https://partner.microsoft.com/dashboard> → **Apps and games** → **Halcyon Mail**
 → **Start submission**.
 
-**State on 2026-10-03:** submission 1 is filled in, every section reads _Complete_, and the
-reviewer account's credentials are in (§6, _Notes for certification_). One step remains, the
-publisher's: **Submit for certification**. Where Partner Center's form had changed since this guide
-was written, the sections below now say what it actually asked.
+**State on 2026-10-03: submitted for certification** at 00:55 local time (19:25 UTC on 2 October),
+with every section _Complete_ and the reviewer account's credentials in (§6, _Notes for
+certification_). Partner Center's pipeline is _Submission → Pre-processing → Certification →
+Publishing_, "usually a few hours, but in some cases up to 3 business days", and it publishes as
+soon as it passes. Where Partner Center's form had changed since this guide was written, the
+sections below now say what it actually asked.
 
 ---
 

@@ -8813,3 +8813,13 @@ Asked: _"do the 2 optional checks first"_.
 - **The site commit failed on the first try: this machine has no global git identity.** The app
   repository has a local one, `vnikie1`, and so do all of the site's earlier commits; the scratch
   clone was given the same, locally. Nothing had been pushed.
+
+### Submitted
+
+- **Halcyon Mail 1.0.0.0 went to certification at 00:55 local time** (19:25 UTC on 2 October), at
+  the user's word: _"submit it for certification"_. Every section read _Complete_ immediately
+  before. The overview now reads _In certification_: _Submission → Pre-processing → Certification
+  → Publishing_, which Partner Center puts at "a few hours, but in some cases up to 3 business
+  days". It publishes on passing; _Cancel certification_ stays available until then.
+- A satisfaction survey opened over the page as it went; it was closed unanswered, since it asks
+  for the publisher's opinion.

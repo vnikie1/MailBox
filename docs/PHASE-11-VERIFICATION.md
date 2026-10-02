@@ -674,7 +674,9 @@ it did not.
 - ~~**Test account credentials**~~ — entered by the user in Partner Center's _Credentials_ table
   (§13.5) the same night, since entering a password on someone's behalf is not something this work
   does. Checked after a reload: one row, named with the account's address. Its value was not read.
-- **Submit for certification** — the publisher's button.
+- ~~**Submit for certification**~~ — pressed at the user's request at 00:55 local time on
+  2026-10-03 (19:25 UTC on 2 October), after WACK on the uploaded package and the privacy page's
+  update to 1.1. The overview then read _In certification_, at _Pre-processing_.
 - **Clean install and uninstall on a fresh Windows 11 VM** — no VM on this machine.
 - **Data paths, Credential Manager, toasts, `mailto:`, `.eml` and the startup task in a sideloaded
   install** — verified on 2026-08-31 and unchanged in kind since; not re-walked here.
