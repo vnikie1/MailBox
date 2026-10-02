@@ -8649,3 +8649,62 @@ the publisher's own accounts.
   `tests/bundle.rs`, which accepted `storedemo` only because it is behind `devtools`.
 - Outside the gate: the Store configuration under clippy with `-D warnings`, clean; `storedemo`
   under clippy with `--features devtools`, clean; the Favourites tests 50 of 50 across five repeats.
+
+### Later the same evening — the Google sign-in application, published
+
+- **The OAuth consent screen moved from Testing to In production** — project `halcyon-506618`, done
+  at the user's request in their own Chrome. It was blocked at first: _"To publish your app, you
+  must complete your configuration on the Branding page."_ The page had the app name and both
+  contact emails, and no app domain at all, which an app asking for a restricted scope must have.
+  Added the home page `https://vnikie1.github.io/halcyon-mail/`, the privacy policy
+  `https://vnikie1.github.io/halcyon-mail/privacy.html` and the authorised domain
+  `vnikie1.github.io` (the console flags the domain as missing the moment a link names it). No
+  logo: uploading one makes verification mandatory. Then **Publish app → Confirm**, and the status
+  read _In production_, with _Back to testing_ beside it.
+- **What changes.** Any Google account can now add Gmail, through Google's _"hasn't verified this
+  app"_ screen (**Advanced → Go to Halcyon**), and refresh tokens no longer expire after seven days.
+  New users are capped at 100 over the project's lifetime (1 so far) until the app is verified,
+  which `src-tauri/oauth/README.md` route B describes.
+- **The token from this morning's sign-in still dies on 2026-10-09.** It was issued while the app
+  was in Testing and keeps that life. Signing in once more — Settings → Accounts → Sign in again —
+  replaces it with one that does not.
+- `store/README.md` step 1 is marked done and its Gmail caveats removed; the listing keeps Gmail.
+
+### Later still — the App Certification Kit on this build
+
+- **WARNING, the same verdict as 2026-09-01: 22 of 24 pass and no required test fails.** Run once
+  the user was at the machine to approve elevation; report `src-tauri/target/msix/wack-20261002.xml`.
+  The two that did not pass are the two that did not on 2026-09-01:
+  - _Blocked executables_ (optional) — `CreateProcessW` and `ShellExecuteW`, which are Explorer for
+    the diagnostics folder and the system browser for OAuth, both required. Its name matches grew
+    from six to eight (`REG`, `DNX` and `Csi` are new): the test scans the binary's strings for the
+    names of blocked programs, and a month of code and dependencies has more strings in it.
+    Nothing in the app launches any of them.
+  - _DPIAwarenessValidation_ (warning) — "Failed to process the binary", then "not DPI aware". The
+    tool's own first line is the accurate one; 2026-09-01's entry has the measurements showing the
+    app is per-monitor aware from process creation.
+- The test package was uninstalled afterwards. The certificate it was signed with stays trusted in
+  `LocalMachine\TrustedPeople`, ready for the next run — removing it needs elevation and gains
+  nothing.
+
+### Decided the same evening
+
+- **The publisher name stays Unikie1.** It is what Partner Center holds and what the manifest
+  already says, so nothing was rebuilt.
+- **The reviewers get a new Gmail account**, the user's choice over the password-based Yahoo mailbox
+  the guide first suggested. `store/README.md` now carries the Gmail walk-through — Google's
+  unverified-app screen, Advanced → Go to Halcyon — and the two precautions that keep a reviewer
+  from being stopped by Google's own checks: no 2-Step Verification on the account, and one
+  sign-in from this PC before submitting. Its credentials go into Partner Center only, never into
+  the repository, which is public. Creating the account was left to the user: signing up for
+  accounts is not something to do on someone's behalf, and Google's sign-up wants their phone.
+- **The user's own Gmail account is signed in again since publishing**, so its token no longer
+  carries the seven-day life: re-authenticated at 18:14:03 UTC. The attempt before it, at 18:08 —
+  some ten minutes after publishing — met a 500 from Google after the unverified-app link and timed
+  out at 18:13 with Halcyon's listener still waiting, which places the fault on Google's side of
+  the redirect. A diagnostic run of the same flow at 18:11 reached the consent screen cleanly, and
+  stopped there. Consistent with the change still spreading through Google; not reproduced since.
+- **The reviewer account was added to Halcyon and works end to end** — signed in through the
+  unverified-app screen, first sync of 7 folders and 17 messages in nine seconds, and an IDLE
+  notification within a minute — so the walk-through in the certification notes is the path that
+  was actually taken.

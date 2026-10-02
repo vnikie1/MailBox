@@ -664,14 +664,12 @@ it did not.
 | Privacy policy live at a public URL | Live, 200 | <https://vnikie1.github.io/halcyon-mail/privacy.html>; `PRIVACY.md` corrected to 1.1 and the page needs regenerating from it |
 | `runFullTrust` justification written | Done | `store/README.md` §6 |
 | Screenshots — light and dark, three panes, compose, search | Done, five | 3200 × 1800, client area only; invented mail from `storedemo` |
+| WACK passes with no failures | **WARNING** — 22 of 24 pass, no required failure | `wack-20261002.xml`, the same verdict as 2026-09-01: the optional *Blocked executables* (`CreateProcessW`, `ShellExecuteW`, and name matches in the binary's strings) and the *DPIAwarenessValidation* warning the tool cannot process. Run once the user approved elevation; the test package was then removed |
 | Age rating declares user-to-user communication | Answers written | `store/README.md` §4 |
 | Personal-information access declared | Answer written | `store/README.md` §3 |
 
 ### 13.2 Not done, and why
 
-- **WACK has not been run on this build.** Elevation was declined or timed out unattended. The
-  package is installed and waiting; `tools\run-wack.ps1` needs someone at the machine to approve
-  the prompt. The 2026-09-01 build passed 22 of 23, the one failure optional and expected.
 - **Test account credentials in Notes for certification** — the template is written; the mailbox
   has to be created by the publisher.
 - **Clean install and uninstall on a fresh Windows 11 VM** — no VM on this machine.
@@ -680,8 +678,9 @@ it did not.
 
 ### 13.3 Things the listing must not claim yet
 
-- **Gmail, until the Google sign-in application is published.** Its consent screen is in Testing:
-  only listed test users can sign in, and their refresh tokens expire after seven days.
+- ~~Gmail, until the Google sign-in application is published.~~ Published the same evening,
+  unverified: any Google account can sign in, through Google's warning screen, with a 100-user
+  lifetime cap until the app is verified.
 - **Outlook.com, until a Microsoft client is built in.** `HALCYON_MICROSOFT_CLIENT_ID` is empty, so
   the tile asks the user for a sign-in application of their own.
 - **"Tested to meet accessibility guidelines"**, until Phase 10's recorded Narrator walkthrough exists.

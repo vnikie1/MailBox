@@ -12,14 +12,12 @@ Partner Center: <https://partner.microsoft.com/dashboard> → **Apps and games**
 
 Each of these changes what the listing may truthfully say, so settle them first.
 
-1. **Gmail — publish the Google sign-in application.** The Google Cloud project behind Halcyon's
-   built-in Google client is still in **Testing**. Until it is published, only the accounts listed
-   there as test users can add Gmail at all, and even theirs is signed out every seven days. For
-   a Store user that is "Gmail does not work". Google Auth Platform → **Audience** → **Publish
-   app** (`src-tauri/oauth/README.md`, route A). Published but unverified, sign-in shows Google's
-   _"hasn't verified this app"_ screen and stops admitting new users after 100 over the project's
-   lifetime; verification (route B, weeks) removes both. **If you do not publish, delete the Gmail
-   lines from the description and features below.**
+1. **Gmail — publish the Google sign-in application. Done on 2026-10-02.** The project
+   (`halcyon-506618`) is **In production**, unverified: any Google account can add Gmail, through
+   Google's _"hasn't verified this app"_ screen (**Advanced → Go to Halcyon**), and refresh tokens
+   no longer expire after seven days. The cap is 100 new users over the project's lifetime;
+   verification (`src-tauri/oauth/README.md`, route B, weeks) removes the warning and the cap, and
+   is worth starting once the listing is live. The Gmail lines below can stay.
 
 2. **Outlook.com — register a Microsoft sign-in application, or say nothing about Outlook.** This
    build carries no Microsoft client (`HALCYON_MICROSOFT_CLIENT_ID` is empty in
@@ -28,16 +26,24 @@ Each of these changes what the listing may truthfully say, so settle them first.
    Microsoft application" — then put the ID in `clients.env` and rebuild the package. The text below
    does not mention Outlook; add it only once that works.
 
-3. **A test account for the reviewers.** The most common rejection for a mail client is a reviewer
-   who cannot get past the welcome screen. Create a throwaway mailbox that signs in **with a
-   password** — a new Yahoo Mail address with an _app password_ is the simplest — put a few messages
-   in it, and fill it into **Notes for certification** below. Not a Gmail address: the reviewer
-   would meet Google's warning screen, or Testing mode's wall.
+3. **A test account for the reviewers — a new Gmail address (decided 2026-10-02).** The most
+   common rejection for a mail client is a reviewer who cannot get past the welcome screen, and a
+   Gmail account has two ways to stop one:
+   - Google's _"hasn't verified this app"_ screen, until the app is verified. Expected; the notes
+     below tell the reviewer what to click.
+   - Google's _"Verify it's you"_ challenge, which a sign-in from an unfamiliar PC can trigger, with
+     a code the reviewer cannot receive. So: **no 2-Step Verification** on this account, and sign
+     it in to Halcyon once from this PC before submitting, so Google has seen it used.
 
-4. **Your public name.** The listing shows the publisher as **Unikie1**, the account handle. To
-   show something else, change it in Partner Center → **Account settings** before the first
-   submission, then copy the new value into `<PublisherDisplayName>` in
-   `src-tauri/msix/AppxManifest.xml` and rebuild — the two must match or the upload is refused.
+   Send it three or four messages from another address so the reviewer has mail to read. The
+   address and password go into **Notes for certification** in Partner Center **only** — never into
+   this file, which is public. If a reviewer is blocked anyway, the fallback is a mailbox that signs
+   in with a password and no browser at all: a Yahoo address with an _app password_.
+
+4. **Your public name — Unikie1 (decided 2026-10-02).** It is what Partner Center holds and what
+   `<PublisherDisplayName>` in `src-tauri/msix/AppxManifest.xml` already says, so nothing changes.
+   The two must match exactly, capital U included: any other spelling has to be changed in Partner
+   Center first and then copied into the manifest, or the upload is refused.
 
 **Deadline:** the name _Halcyon Mail_ was reserved on 2026-08-25, and a reservation lapses after
 three months without a submission. Submit before **25 November 2026**, or re-reserve it.
@@ -142,9 +148,6 @@ PRIVATE BY DESIGN
 Passwords and sign-in tokens are kept in Windows Credential Manager, never in a file. Messages are shown in a sandbox that cannot run code, and you can stop remote images from loading. The privacy policy says exactly what leaves your PC, which is very nearly nothing: https://vnikie1.github.io/halcyon-mail/privacy.html
 ```
 
-If Gmail is not working for everyone yet (step 1 above), delete the sentence beginning "Gmail
-signs in".
-
 ### What's new in this version
 
 ```text
@@ -173,7 +176,6 @@ Full keyboard control and screen-reader support
 No account, no adverts, no telemetry
 ```
 
-(Third line: the same condition as the description.)
 
 ### Screenshots
 
@@ -250,23 +252,23 @@ Halcyon is a desktop (Win32) email client packaged with the Desktop Bridge. It n
 
 ### Notes for certification
 
-Replace the bracketed parts with the test account from step 3 above.
+Replace the bracketed parts with the test account from step 3 above — in Partner Center, not here.
 
 ```text
-Halcyon is an email client, so testing it needs a mailbox. Please use this account, created for certification:
+Halcyon is an email client, so testing it needs a mailbox. Please use this Gmail account, created for certification:
 
-  Provider:  [Yahoo Mail]
-  Email:     [address]
-  Password:  [app password]
+  Email:     [address]@gmail.com
+  Password:  [password]
 
 To test:
 1. Start Halcyon. With no account yet, the account assistant opens.
-2. Choose [Yahoo Mail], enter the address and password above, and continue. Halcyon tests the connection and adds the account.
-3. The Inbox appears within a few seconds. Select a message to read it.
-4. Press Ctrl+N, or the pencil button, to write a message. Send one to the same address to watch it arrive.
-5. Type in the search field at the top right to search.
+2. Choose Google, enter the address above and continue. Halcyon opens Google's sign-in page in the default browser; sign in there with the password above.
+3. Google shows "Google hasn't verified this app", because Halcyon has not yet completed Google's app verification. Choose Advanced, then "Go to Halcyon (unsafe)", then Continue. The browser then says "Signed in" and can be closed.
+4. Back in Halcyon, the Inbox appears within a few seconds. Select a message to read it.
+5. Press Ctrl+N, or the pencil button, to write a message. Send one to the same address to watch it arrive.
+6. Type in the search field at the top right to search.
 
-Gmail accounts sign in through the system browser (OAuth); the account above needs no browser.
+Google sign-in happens in the system browser because Google does not allow sign-in inside an embedded window. Halcyon never sees the Google password.
 
 Halcyon has no server and collects no data. Everything it stores is on the PC, under %LOCALAPPDATA%\com.uniki.halcyon, and passwords go to Windows Credential Manager. No purchase, sign-up or account other than the mailbox above is needed.
 ```
