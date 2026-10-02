@@ -660,8 +660,9 @@ test.describe('Favourites', () => {
     await openMenu(page, 'Northgate', 'Clients')
     await entry(page, 'Add to Favourites').click()
 
-    const favourites = await labels(page, 'Favourites')
-    expect(favourites.at(-1)).toBe('Clients')
+    // Polled, not read once. `labels` is a snapshot, and the click returns before the section
+    // re-renders — see the removal test below, which failed a full `npm run verify` that way.
+    await expect.poll(async () => (await labels(page, 'Favourites')).at(-1)).toBe('Clients')
 
     await row(page, 'Favourites', 'Clients').click()
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Clients')
@@ -684,7 +685,9 @@ test.describe('Favourites', () => {
     await openMenu(page, 'Favourites', 'Clients')
     await entry(page, 'Remove from Favourites').click()
 
-    expect(await labels(page, 'Favourites')).not.toContain('Clients')
+    // Polled. A one-off read raced the re-render: on 2026-10-02 a full gate run caught the
+    // section with "Clients" still in it, a moment after the removal it was about to show.
+    await expect.poll(() => labels(page, 'Favourites')).not.toContain('Clients')
   })
 
   test('removing the open favourite keeps the folder open, on its own row', async ({ page }) => {

@@ -5,9 +5,22 @@
 # Used for the Phase 6 newsletter check, where the evidence has to be something a person can
 # look at. A description of a rendering is not a rendering.
 
+#
+# -NoActivate captures the window's rectangle as it is on screen, without raising it first. For a
+# shot where another window belongs in front -- a compose window over the main one, as in the
+# Store screenshots -- raising the main window would put it on top of exactly what the shot is of.
+#
+# -ClientOnly captures the client area alone: no caption strip and no window border. The caption
+# is Windows' own and follows the Windows theme rather than the app's, so on a machine set to dark
+# a light-themed app gets a dark caption above it. The Store screenshots use this so the light
+# and dark shots match. Measured from the window itself rather than assumed, because the caption
+# height changes with the display scale.
+
 param(
     [string]$Out = 'window.png',
-    [string]$Title = 'Halcyon'
+    [string]$Title = 'Halcyon',
+    [switch]$NoActivate,
+    [switch]$ClientOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,11 +34,20 @@ public class W {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string n);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
 }
 '@
 Add-Type -TypeDefinition $sig
+
+# Physical pixels for every coordinate below. DWM reports physical pixels whatever this process
+# is, but the client-area calls answer in the caller's own units, and an unaware caller would get
+# them scaled down -- a capture of the wrong rectangle, silently.
+[void][W]::SetProcessDPIAware()
 
 # Found through UI Automation rather than FindWindow. A Tauri window's caption is set by the
 # webview after it loads, and FindWindow matches the caption the shell knows about, which is not
@@ -40,14 +62,27 @@ if (-not $element) { Write-Output "no window titled '$Title'"; exit 1 }
 $handle = [IntPtr]$element.Current.NativeWindowHandle
 if ($handle -eq [IntPtr]::Zero) { Write-Output "'$Title' has no native handle"; exit 1 }
 
-[void][W]::BringWindowToTop($handle)
-[void][W]::SetForegroundWindow($handle)
+if (-not $NoActivate) {
+    [void][W]::BringWindowToTop($handle)
+    [void][W]::SetForegroundWindow($handle)
+}
 Start-Sleep -Milliseconds 700
 
-# DWM's extended frame bounds, not GetWindowRect: on Windows 11 the latter includes an invisible
-# resize border, which puts a strip of desktop down each side of every capture.
 $rect = New-Object W+RECT
-$null = [W]::DwmGetWindowAttribute($handle, 9, [ref]$rect, [System.Runtime.InteropServices.Marshal]::SizeOf($rect))
+if ($ClientOnly) {
+    $client = New-Object W+RECT
+    $null = [W]::GetClientRect($handle, [ref]$client)
+    $origin = New-Object W+POINT
+    $null = [W]::ClientToScreen($handle, [ref]$origin)
+    $rect.Left = $origin.X
+    $rect.Top = $origin.Y
+    $rect.Right = $origin.X + $client.Right
+    $rect.Bottom = $origin.Y + $client.Bottom
+} else {
+    # DWM's extended frame bounds, not GetWindowRect: on Windows 11 the latter includes an
+    # invisible resize border, which puts a strip of desktop down each side of every capture.
+    $null = [W]::DwmGetWindowAttribute($handle, 9, [ref]$rect, [System.Runtime.InteropServices.Marshal]::SizeOf($rect))
+}
 
 $width = $rect.Right - $rect.Left
 $height = $rect.Bottom - $rect.Top

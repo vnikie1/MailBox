@@ -211,6 +211,13 @@ name = "unseed"
 path = "src/bin/unseed.rs"
 required-features = ["devtools"]
 
+# The invented mail the Microsoft Store screenshots are taken from. Writes only to a store of its
+# own, never the real one -- see the header of the file.
+[[bin]]
+name = "storedemo"
+path = "src/bin/storedemo.rs"
+required-features = ["devtools"]
+
 [features]
 # Store builds turn the updater off. The Microsoft Store installs updates itself, and two
 # update mechanisms fighting produces duplicate installs and fails certification — docs/07

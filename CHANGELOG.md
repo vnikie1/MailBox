@@ -8545,3 +8545,107 @@ in the Google Cloud project that no code here can change.
   **167 e2e**, `cargo fmt`, clippy with `-D warnings`, **951 library tests** (9 new) and every
   integration suite; the rig gates ignored as always.
 
+---
+
+## 2026-10-02 — Phase 11: Ready for the Store, short of what only the publisher can do
+
+Asked: _"how do i publish my app on windows store. Please do the necessary things for making it
+ready for publishing now"_. Most of the machinery existed — the reserved name and identity from
+2026-08-25, `tools/make-msix.ps1`, `tools/run-wack.ps1`, three WACK runs on 2026-09-01 — but a
+month of features had landed since the last Store package, the Store configuration was not covered
+by `npm run verify`, and the listing itself (text, screenshots, the submission answers) had never
+been written. Now everything Partner Center asks for is in `store/`, except four things that need
+the publisher's own accounts.
+
+### Added
+
+- **`store/README.md`** — the submission, field by field and in Partner Center's order: package,
+  pricing, properties, the IARC answers, the English (United Kingdom) listing (description,
+  features, search terms, captions, copyright), the `runFullTrust` justification and the Notes for
+  certification. Every claim in the listing was checked against the code. **Outlook is left out on
+  purpose** — this build carries no Microsoft client — and the Gmail lines are marked as conditional
+  on publishing the Google application (see Notes).
+- **`store/screenshots/`** — five at exactly 3200 × 1800, light and dark: the conversation, search,
+  compose over the main window, and a designed newsletter.
+- **`store/logos/`** — 1080 × 1080 box art, composed from the designer's 1024 px white mark on the
+  brand red (`#EC3013`, measured from the designer's own 300 px Store icon) at that icon's
+  proportions — the envelope at half the width — rather than scaled up from 300 px; and the
+  designer's 300 px icon itself.
+- **`src-tauri/src/bin/storedemo.rs`** — writes the invented mail the screenshots show: two
+  accounts, 23 messages, a three-message conversation, attachments, flags and a VIP. Every message
+  goes in through `transfer::import::write_message`, the path imported and synced mail take, so
+  bodies render through the sanitiser and the conversation threads for real. **It refuses any store
+  it did not make** — `--path` is required, and an existing file is touched only if it carries the
+  tool's own marker in `setting`. Probed three ways: no `--path`, an existing store without
+  `--reset`, and a foreign file with `--reset`; all refused, and the foreign file was untouched.
+  Behind `devtools` like the other tools, so a release cannot ship it.
+- **`tools/store-screenshots.cjs`** — runs the Store build against that store and drives it over
+  the DevTools protocol on a plain WebSocket. Every per-user path is redirected — `LOCALAPPDATA` for
+  the store and log, `WEBVIEW2_USER_DATA_FOLDER` for the WebView profile — and the one that cannot be,
+  `%APPDATA%\com.uniki.halcyon\.window-state.json`, is copied aside first and put back afterwards in
+  a `finally`. Checked after each of three runs: the restored file was byte-identical to the user's.
+  It stops rather than closing a running Halcyon, which may be holding drafts.
+- **`tools/shoot-window.ps1 -ClientOnly`**, which asks Windows for the client rectangle instead of
+  assuming a caption height, and **`-NoActivate`**, which leaves a compose window in front.
+
+### Changed
+
+- **`PRIVACY.md`, version 1.1.** Two statements were not true of the downloadable build. The update
+  check was described as happening "only when you press Check for updates", but opening Settings →
+  General — where the Updates section is — also checks, once. And the remote-images setting is
+  labelled _"Show images in messages automatically"_, not _"Load…"_. The Store build has no updater,
+  so the published policy was accurate for everything anyone can currently install; it was still
+  wrong, and the published page needs regenerating from this file.
+- **The Store build compiles without warnings.** `UpdateProblem`'s five variants are never
+  constructed with the updater compiled out, and every Store build said so. The type stays — it is
+  part of the IPC contract both builds share — so the allowance applies to that build only.
+  `cargo clippy --no-default-features --features store --all-targets -- -D warnings` is clean, and
+  so is the demo tool under `--features devtools`. Neither configuration is in `npm run verify`.
+
+### Fixed
+
+- **`mailboxMenu.spec.ts` › _the row says Remove once the folder is a favourite_ failed a full
+  gate run.** It read the Favourites section once, with `allTextContents()`, the moment the click
+  returned, and caught the list before it re-rendered. Polled with `expect.poll` now, and so is the
+  matching read in the test that adds a favourite, which had the same race and had not lost it yet.
+  The other snapshots in the file wait for a retrying check first and were left alone. Then 50 of 50
+  across five repeats.
+
+### Incidents
+
+- **The browser build cannot take Store screenshots.** It was the first plan, and the first probe
+  ended it: its reader shows "Message bodies are only available in the desktop app", and its compose
+  window shows "Composing is only available in the app". Hence `storedemo` and the real app.
+- **The first screenshots were wrong in two ways a reviewer would see.** Windows on this machine is
+  set to dark, and the caption strip and the Mica material follow Windows rather than the app — so
+  the light shots had a dark title bar across the top, and a sidebar the colour of dark Mica seen
+  through a light tint (`#AEB1B9`). Fixed by capturing the client area only, and by taking the light
+  shots with the app's own Reduce Transparency, which shows the light theme as a light-mode machine
+  would. The Windows theme was not changed to get there.
+- **WACK did not run on this build.** `run-wack.ps1` asked for elevation and the prompt was declined
+  or timed out unattended. The package is installed and signed with the test certificate, waiting;
+  the run needs the user at the machine to approve the prompt.
+
+### Notes
+
+- **Four things only the publisher can do, each written up at the top of `store/README.md`:**
+  publish the Google sign-in application (until then Store users cannot add Gmail at all — see the
+  sign-in entry above); register a Microsoft sign-in application or keep Outlook out of the
+  listing; create a password-based test mailbox for the reviewers; and decide whether "Unikie1" is
+  the publisher name to show. **The name reservation lapses around 25 November 2026** without a
+  submission.
+- **The dark-mode reader shows HTML mail on a white card**, which looks odd in a dark screenshot and
+  is deliberate — `frameDocument.ts`: mail is written for white, and it is what Mail does. Kept.
+- **The Store package grew from 5.4 MB to 9.9 MB** since August: a month of features, the designer's
+  icon set and pdf.js's font data. Upload size is not a concern at that scale.
+- The screenshots use Mail's blue as the accent. A user gets their Windows accent unless they pick
+  one; this is the only choice the screenshots make on their behalf.
+
+### Verified
+
+- `npm run verify`, clean on the second run of the day's Store work — the first failed only on the
+  favourites race above: format, lint, stylelint, types, **325 unit**, **167 e2e**, `cargo fmt`,
+  clippy with `-D warnings`, **951 library tests** and every integration suite, including
+  `tests/bundle.rs`, which accepted `storedemo` only because it is behind `devtools`.
+- Outside the gate: the Store configuration under clippy with `-D warnings`, clean; `storedemo`
+  under clippy with `--features devtools`, clean; the Favourites tests 50 of 50 across five repeats.

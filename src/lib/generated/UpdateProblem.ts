@@ -17,5 +17,13 @@
  * a non-2xx response leaves `last_error` unset and falls through to `ReleaseNotFound`, while a
  * transport failure returns `Reqwest` — so the distinction is made here, once, and the UI
  * branches on a value instead of guessing from a sentence.
+ *
+ * ## Why a Store build allows it to be unused
+ *
+ * Every Store build warned that all five variants are never constructed, and it was right: with
+ * the updater compiled out, `update_check` only ever answers "not supported here". The type
+ * stays anyway, because it is part of `UpdateStatus` and so of the IPC contract both builds
+ * share — the window is the same code in each. Allowed for that build only, so a variant left
+ * unused by the self-updating build still warns where it means something.
  */
 export type UpdateProblem = "unreachable" | "noRelease" | "malformed" | "unsupported" | "unavailable";

@@ -644,3 +644,50 @@ window-position file the test instance wrote to was restored from a copy.
   which was the likeliest cause of a single unexplained failure while that day's work was being
   written), and the gate runs since: nothing. It stays in the changelog as unexplained rather than
   as fixed.
+
+## 13. Ready for the Store, short of the publisher's own steps (2026-10-02)
+
+Against docs/07 §5's pre-submission checklist. What a run of this session established, and what
+it did not.
+
+### 13.1 Done and verified
+
+| Checklist item | State | How it was checked |
+| --- | --- | --- |
+| Name reserved; identity copied exactly | Done (2026-08-25) | The installed package's family name is `Unikie1.HalcyonMail_anw48tyhk74bp`, character for character the one Partner Center issued |
+| Version `Major.Minor.Build.0` | `1.0.0.0` | Read by `make-msix.ps1` from `tauri.conf.json`; first submission, so nothing to exceed |
+| Updater disabled in the Store build | Done | `make-msix.ps1` searched the built binary for the plugin's command strings and found none |
+| Store configuration warning-free | Done | `cargo clippy --no-default-features --features store --all-targets -- -D warnings`, clean after `UpdateProblem` was allowed to be unused in that build only |
+| Full icon asset set | Done | Identical to `assets/brand/msix/` apart from the splash images the manifest deliberately does not use; `resources.pri` built |
+| Package built | `Halcyon_1.0.0.0_x64.msix`, 9,908,392 bytes, unsigned | `Get-AuthenticodeSignature` → `NotSigned`, which is what the Store wants |
+| Installs as a real package | Done | Signed with the test certificate and installed under `WindowsApps` |
+| Privacy policy live at a public URL | Live, 200 | <https://vnikie1.github.io/halcyon-mail/privacy.html>; `PRIVACY.md` corrected to 1.1 and the page needs regenerating from it |
+| `runFullTrust` justification written | Done | `store/README.md` §6 |
+| Screenshots — light and dark, three panes, compose, search | Done, five | 3200 × 1800, client area only; invented mail from `storedemo` |
+| Age rating declares user-to-user communication | Answers written | `store/README.md` §4 |
+| Personal-information access declared | Answer written | `store/README.md` §3 |
+
+### 13.2 Not done, and why
+
+- **WACK has not been run on this build.** Elevation was declined or timed out unattended. The
+  package is installed and waiting; `tools\run-wack.ps1` needs someone at the machine to approve
+  the prompt. The 2026-09-01 build passed 22 of 23, the one failure optional and expected.
+- **Test account credentials in Notes for certification** — the template is written; the mailbox
+  has to be created by the publisher.
+- **Clean install and uninstall on a fresh Windows 11 VM** — no VM on this machine.
+- **Data paths, Credential Manager, toasts, `mailto:`, `.eml` and the startup task in a sideloaded
+  install** — verified on 2026-08-31 and unchanged in kind since; not re-walked here.
+
+### 13.3 Things the listing must not claim yet
+
+- **Gmail, until the Google sign-in application is published.** Its consent screen is in Testing:
+  only listed test users can sign in, and their refresh tokens expire after seven days.
+- **Outlook.com, until a Microsoft client is built in.** `HALCYON_MICROSOFT_CLIENT_ID` is empty, so
+  the tile asks the user for a sign-in application of their own.
+- **"Tested to meet accessibility guidelines"**, until Phase 10's recorded Narrator walkthrough exists.
+
+### 13.4 Deviations
+
+- **Screenshots carry no window frame.** docs/07 §2.7 does not ask for one, and the frame follows
+  the Windows theme rather than the app's: on a machine set to dark, every light shot had a dark
+  caption across its top. Client area only, for all five, so the set matches.

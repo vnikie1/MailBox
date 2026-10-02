@@ -1,6 +1,6 @@
 # Privacy policy
 
-**Halcyon, version 1.0. Last updated 31 August 2026.**
+**Halcyon, version 1.1. Last updated 2 October 2026.**
 
 > Published at <https://vnikie1.github.io/halcyon-mail/privacy.html>, which is the URL given to
 > the Microsoft Store. This file is the source it is generated from; the two must not drift.
@@ -26,14 +26,14 @@ would with any other mail client.
 
 ## What Halcyon connects to, and why
 
-| Connection                                        | When                                                  | What it carries                                                 |
-| ------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
-| Your email provider's IMAP server                 | While the app is running                              | Your username, your password or access token, and your mail     |
-| Your email provider's SMTP server                 | When you send                                         | The message and its recipients                                  |
-| Your provider's sign-in page, in your own browser | When you add an OAuth account                         | Whatever your provider's sign-in requires                       |
-| `autoconfig` records for your email domain        | Once, when adding an account, to find server settings | Your email domain — for example `example.com`, not your address |
-| `github.com`                                      | Only when you press **Check for updates**             | Nothing about you. A request for a small public file            |
-| Servers named in the messages you read            | Only if you allow images to load                      | See **Remote images** below                                     |
+| Connection                                        | When                                                                                                         | What it carries                                                 |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| Your email provider's IMAP server                 | While the app is running                                                                                     | Your username, your password or access token, and your mail     |
+| Your email provider's SMTP server                 | When you send                                                                                                | The message and its recipients                                  |
+| Your provider's sign-in page, in your own browser | When you add an OAuth account                                                                                | Whatever your provider's sign-in requires                       |
+| `autoconfig` records for your email domain        | Once, when adding an account, to find server settings                                                        | Your email domain — for example `example.com`, not your address |
+| `github.com`                                      | When you open **Settings → General**, or press **Check for updates**. Never from the Microsoft Store version | Nothing about you. A request for a small public file            |
+| Servers named in the messages you read            | Only if you allow images to load                                                                             | See **Remote images** below                                     |
 
 There are no other connections. Nothing runs on a schedule except your own mail sync.
 
@@ -66,7 +66,7 @@ read receipt nobody agreed to, and it is how commercial mail tracks you.
 Halcyon loads remote images **automatically by default**, because a mail client that shows
 broken pictures is one people stop using. This is the one default in the application chosen
 against the security advice, and it is a setting rather than a decision made for you:
-**Settings → Privacy → "Load images in messages automatically."** Turning it off shows a banner
+**Settings → Privacy → "Show images in messages automatically."** Turning it off shows a banner
 on each message instead, and images load only when you ask.
 
 Whatever the setting, message content is stripped of scripts and displayed in a sandbox that
@@ -86,10 +86,12 @@ attaching the file — and you can read exactly what is in it first.
 
 ## Updates
 
-Pressing **Check for updates** requests one small public file from GitHub. Your address is
-visible to GitHub, as it is to any web server you contact; nothing identifying you, your
-accounts or your mail is sent, and no request is made unless you press the button. The
-Microsoft Store version does not do this at all — the Store handles its own updates.
+Opening **Settings → General**, where the Updates section is, asks GitHub once whether there is
+a newer version, and so does pressing **Check for updates**. Each is one request for one small
+public file. Your address is visible to GitHub, as it is to any web server you contact; nothing
+identifying you, your accounts or your mail is sent, and nothing checks at any other time —
+not at start-up, and not on a timer. The Microsoft Store version does not do this at all: the
+updater is not in it, and the Store handles its own updates.
 
 For Store installs, Microsoft gives us aggregate install counts, ratings and crash figures. That
 is Microsoft measuring their own platform rather than this application reporting on you, and it
