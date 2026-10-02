@@ -659,19 +659,22 @@ it did not.
 | Updater disabled in the Store build | Done | `make-msix.ps1` searched the built binary for the plugin's command strings and found none |
 | Store configuration warning-free | Done | `cargo clippy --no-default-features --features store --all-targets -- -D warnings`, clean after `UpdateProblem` was allowed to be unused in that build only |
 | Full icon asset set | Done | Identical to `assets/brand/msix/` apart from the splash images the manifest deliberately does not use; `resources.pri` built |
-| Package built | `Halcyon_1.0.0.0_x64.msix`, 9,908,392 bytes, unsigned | `Get-AuthenticodeSignature` → `NotSigned`, which is what the Store wants |
+| Package built | `Halcyon_1.0.0.0_x64.msix`, 9,908,354 bytes, unsigned — rebuilt 2026-10-03 00:13 with the `MinVersion` fix (§13.6); the first was 9,908,392 | `Get-AuthenticodeSignature` → `NotSigned`, which is what the Store wants |
+| `MinVersion` above the Store's floor | `10.0.22000.0` | Read from `AppxManifest.xml` inside the built `.msix`; Partner Center then validated the upload: `1.0.0.0`, x64, _Windows.Desktop_ from 10.0.22000.0 |
 | Installs as a real package | Done | Signed with the test certificate and installed under `WindowsApps` |
 | Privacy policy live at a public URL | Live, 200 | <https://vnikie1.github.io/halcyon-mail/privacy.html>; `PRIVACY.md` corrected to 1.1 and the page needs regenerating from it |
 | `runFullTrust` justification written | Done | `store/README.md` §6 |
 | Screenshots — light and dark, three panes, compose, search | Done, five | 3200 × 1800, client area only; invented mail from `storedemo` |
-| WACK passes with no failures | **WARNING** — 22 of 24 pass, no required failure | `wack-20261002.xml`, the same verdict as 2026-09-01: the optional *Blocked executables* (`CreateProcessW`, `ShellExecuteW`, and name matches in the binary's strings) and the *DPIAwarenessValidation* warning the tool cannot process. Run once the user approved elevation; the test package was then removed |
-| Age rating declares user-to-user communication | Answers written | `store/README.md` §4 |
-| Personal-information access declared | Answer written | `store/README.md` §3 |
+| WACK passes with no failures | **WARNING** — 22 of 24 pass, no required failure | `wack-20261002.xml`, the same verdict as 2026-09-01: the optional *Blocked executables* (`CreateProcessW`, `ShellExecuteW`, and name matches in the binary's strings) and the *DPIAwarenessValidation* warning the tool cannot process. Run once the user approved elevation; the test package was then removed. **Run on the package before the `MinVersion` fix**, which declared `1.0.0.0`. No source changed before the rebuild — the one commit between, `9791d27`, is documents only — but the two packages were not compared byte for byte, and WACK has not been run on the uploaded one |
+| Age rating declares user-to-user communication | Done — IARC 12+, _Users Interact_ | Questionnaire 10.3 answered in Partner Center on 2026-10-03: _Communication_ app type; answers in `store/README.md` §4 |
+| Personal-information access declared | Done | _Yes_, in Partner Center's Properties, with the privacy policy URL |
 
 ### 13.2 Not done, and why
 
-- **Test account credentials in Notes for certification** — the template is written; the mailbox
-  has to be created by the publisher.
+- ~~**Test account credentials**~~ — entered by the user in Partner Center's _Credentials_ table
+  (§13.5) the same night, since entering a password on someone's behalf is not something this work
+  does. Checked after a reload: one row, named with the account's address. Its value was not read.
+- **Submit for certification** — the publisher's button.
 - **Clean install and uninstall on a fresh Windows 11 VM** — no VM on this machine.
 - **Data paths, Credential Manager, toasts, `mailto:`, `.eml` and the startup task in a sideloaded
   install** — verified on 2026-08-31 and unchanged in kind since; not re-walked here.
@@ -690,3 +693,45 @@ it did not.
 - **Screenshots carry no window frame.** docs/07 §2.7 does not ask for one, and the frame follows
   the Windows theme rather than the app's: on a machine set to dark, every light shot had a dark
   caption across its top. Client area only, for all five, so the set matches.
+- **The test credentials are not in the Notes for certification.** docs/07 §2.7 says to put them
+  there. Partner Center has since moved the notes to _Supplemental info → Additional Testing
+  Information_, asks that the description carry no credentials, and gives them a table of their
+  own on the same page. The notes point the reviewer to it.
+- **No "what's new" text.** docs/07 §2.7 lists it with the listing; the form says to leave it blank
+  on a product's first submission.
+- **The `runFullTrust` justification is shorter than `store/README.md` first had it.** The field
+  takes 500 characters; the 535-character draft was refused. The 497-character version keeps every
+  fact and names Google alone, because this build has no Microsoft client.
+
+### 13.5 Partner Center, filled in (2026-10-03)
+
+Submission 1 of product `9ND14F638LPJ`, in the user's own Chrome, at their request. Every section
+reads _Complete_; every page was saved, and the two that matter most — the listing and the notes —
+were reloaded afterwards and read back field by field.
+
+| Section | What went in |
+| --- | --- |
+| Pricing and availability | All worldwide and future markets; public; discoverable. Base price _USD - United States_, **0** — the form's only way to say free — for the 240-market default group. Released as soon as it passes |
+| Properties | Productivity, no secondary category. Personal information: yes, with the privacy URL. Website and support email. _Record and broadcast clips_ came ticked and was unticked: games only. Accessibility left unticked |
+| Age ratings | IARC questionnaire 10.3 — _Social or Communication → Communication_; blocking yes; location, purchases, reporting, moderation, friends-only no. IARC 12+, Microsoft Store 12+, PEGI _!_, ESRB _Everyone_, USK 0. The Terms of Use box ticked with the user's explicit agreement |
+| Packages | The fixed `.msix`, validated; its only note is the `runFullTrust` warning |
+| Store listing (en-GB) | Description (1,931 characters), 15 features, five screenshots in order with captions, box art and tile icon, 7 keywords, copyright, _Developed by_ |
+| Submission options | The 497-character `runFullTrust` justification |
+| Additional Testing Information | The notes for certification, without credentials; then, entered by the user, one credential row for the reviewer account |
+
+### 13.6 Incidents
+
+- **Every package since 2026-08-31 declared `MinVersion="1.0.0.0"`, and Partner Center was the
+  first thing to notice.** `make-msix.ps1` stamped the package version with a text replacement,
+  `-replace 'Version="\d+\.\d+\.\d+\.\d+"'`, which also matched the tail of
+  `MinVersion="10.0.22000.0"` — from the script's first commit, `9cf4082`. Windows installed every
+  such package, and in six App Certification Kit runs, 2026-08-31 to 2026-10-02, no test objected;
+  the first upload was refused — _"You cannot upload msix/msixbundle/msixupload packages that targets
+  Windows MinVersion <= 10.0.17134.0"_. The script now edits `<Identity Version>` through the XML
+  parser, reads the staged manifest back, and stops if `MinVersion` changed or is at or below the
+  Store's floor. The same read also stopped Windows PowerShell 5.1's ANSI decoding from turning
+  the manifest comments' em dashes into mojibake.
+- **A misdirected caption.** Typing the fourth screenshot's caption, the click meant to open its
+  dialog landed after the page had scrolled, so the text was typed with nothing focused; the
+  spaces scrolled the page. Every field was read back before going on: nothing had been changed.
+  The remaining captions were opened by element rather than by position.

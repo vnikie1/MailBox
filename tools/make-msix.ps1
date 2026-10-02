@@ -140,9 +140,43 @@ Copy-Item (Join-Path $msix 'Assets') (Join-Path $staging 'Assets') -Recurse
 
 # The manifest, with the version substituted. Written into staging rather than edited in place,
 # so the committed manifest keeps one canonical version and the build never dirties the tree.
-$manifest = Get-Content (Join-Path $msix 'AppxManifest.xml') -Raw
-$manifest = $manifest -replace 'Version="\d+\.\d+\.\d+\.\d+"', "Version=`"$msixVersion`""
-Set-Content -Path (Join-Path $staging 'AppxManifest.xml') -Value $manifest -Encoding UTF8
+#
+# Through the XML parser, setting <Identity Version> and nothing else -- not a text replacement.
+# The replacement this used to be, `-replace 'Version="\d+\.\d+\.\d+\.\d+"'`, also matched the
+# tail of MinVersion="10.0.22000.0" (nothing anchored it to <Identity>, and PowerShell's -replace
+# ignores case), so every package since 2026-08-31 declared MinVersion="1.0.0.0". Windows installs
+# that and the App Certification Kit passes it; Partner Center refuses it on upload -- "You cannot
+# upload msix/msixbundle/msixupload packages that targets Windows MinVersion <= 10.0.17134.0" --
+# which is where it was found, on the first real upload.
+#
+# Read as UTF-8 on purpose. Windows PowerShell 5.1 reads an unmarked file in the ANSI code page,
+# and the old Get-Content -Raw turned every em dash in the manifest's comments into three
+# characters of mojibake on the way through. Harmless in a comment; it would not be in a value.
+$source = Join-Path $msix 'AppxManifest.xml'
+$document = New-Object System.Xml.XmlDocument
+$document.PreserveWhitespace = $true
+$document.LoadXml([System.IO.File]::ReadAllText($source, [System.Text.Encoding]::UTF8))
+$sourceMinVersion = $document.Package.Dependencies.TargetDeviceFamily.MinVersion
+$document.Package.Identity.Version = $msixVersion
+
+$stagedManifest = Join-Path $staging 'AppxManifest.xml'
+$settings = New-Object System.Xml.XmlWriterSettings
+$settings.Encoding = New-Object System.Text.UTF8Encoding($false)
+$writer = [System.Xml.XmlWriter]::Create($stagedManifest, $settings)
+try { $document.Save($writer) } finally { $writer.Close() }
+
+# Asked of the file that will be packed, not of the variables that built it. The Store's own
+# floor is checked here too, because breaking it costs an upload round trip to find out.
+$check = New-Object System.Xml.XmlDocument
+$check.LoadXml([System.IO.File]::ReadAllText($stagedManifest, [System.Text.Encoding]::UTF8))
+$packedVersion = $check.Package.Identity.Version
+$packedMinVersion = $check.Package.Dependencies.TargetDeviceFamily.MinVersion
+if ($packedVersion -ne $msixVersion) { throw "the staged manifest says Version=$packedVersion, not $msixVersion" }
+if ($packedMinVersion -ne $sourceMinVersion) { throw "MinVersion changed while staging: $sourceMinVersion became $packedMinVersion" }
+if ([version]$packedMinVersion -le [version]'10.0.17134.0') {
+  throw "MinVersion ${packedMinVersion} is too low; the Store refuses MSIX packages that target 10.0.17134.0 or earlier"
+}
+"manifest: version $packedVersion, Windows $packedMinVersion and later"
 
 # The base names the manifest refers to. Windows resolves `.scale-100` and friends by
 # convention, but makeappx wants the unqualified file to exist as well or it warns on every one.

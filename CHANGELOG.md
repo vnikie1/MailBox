@@ -8708,3 +8708,84 @@ the publisher's own accounts.
   unverified-app screen, first sync of 7 folders and 17 messages in nine seconds, and an IDLE
   notification within a minute — so the walk-through in the certification notes is the path that
   was actually taken.
+
+## 2026-10-03 — Phase 11: The Store submission, filled in
+
+Asked: _"commit the changes and fill the partner center fields"_. Every section of submission 1 now
+reads _Complete_ in Partner Center, and the user has entered the reviewer account's credentials.
+What is left is the publisher's button: **Submit for certification**. Several of Partner Center's
+forms had changed since `store/README.md` was written, so the guide now says what they actually
+asked.
+
+### Fixed
+
+- **`tools/make-msix.ps1` declared `MinVersion="1.0.0.0"` in every package it had ever built.** It
+  stamped the package version with a text replacement, `-replace 'Version="\d+\.\d+\.\d+\.\d+"'`,
+  which matched the tail of `MinVersion="10.0.22000.0"` as readily as `<Identity Version>`. It now
+  sets `<Identity Version>` through the XML parser, reads back the manifest it is about to pack, and
+  stops if `MinVersion` differs from the source or is at or below the Store's floor, 10.0.17134.0.
+  Reading the file as UTF-8 also ended a second, harmless fault: Windows PowerShell 5.1 read the
+  unmarked manifest as ANSI and wrote every em dash in its comments back as mojibake. Rebuilt:
+  9,908,354 bytes, unsigned, `MinVersion` 10.0.22000.0 — and accepted by Partner Center.
+
+### Changed
+
+- **`store/README.md` matches Partner Center as it was on 2026-10-03.** Where the form had moved on:
+  - Free is a base price of **0**, chosen after a currency; the price list is disabled until then.
+  - The product declarations are the form's current seven. _Record and broadcast clips_ comes ticked
+    and is for games, so it was unticked; the generative-AI declaration is new, and is no.
+  - IARC's questionnaire is now version 10.3, with different questions: a _Communication_ app,
+    blocking yes (_Block Sender_), reporting no (_Move to Junk_ sorts mail on the PC and reports
+    nobody). The table in §4 is the questions asked and the answers given.
+  - _What's new_ stays blank: the form says so for a first submission.
+  - The listing has no _additional system requirements_ field any more; `MinVersion` covers it.
+  - The `runFullTrust` field takes 500 characters, and the 535-character draft was refused. The
+    justification is 497 now, every fact kept, and names Google alone: there is no Microsoft client.
+  - The notes for certification moved to _Supplemental info → Additional Testing Information_,
+    which wants credentials in a table of its own and none in the text. The template points the
+    reviewer to that table instead of carrying placeholders.
+- `docs/PHASE-11-VERIFICATION.md` §13: the fixed package, what went into each section (§13.5), the
+  deviations from docs/07 §2.7 those forms forced, and the incidents (§13.6).
+
+### Incidents
+
+- **The `MinVersion` fault was found by the Store, on the first upload, after a month.** _"You
+  cannot upload msix/msixbundle/msixupload packages that targets Windows MinVersion <=
+  10.0.17134.0."_ Nothing local could have caught it: Windows installs such a package, and six App
+  Certification Kit runs since 2026-08-31 never mentioned it. The script never read back what it
+  packed; it does now.
+- **A caption typed into nothing.** The click meant to open the fourth screenshot's caption dialog
+  landed after the page had scrolled, so the caption was typed with nothing focused, and its spaces
+  scrolled the page further. Every field was read back before going on, and nothing had changed.
+  The last two captions were opened by element rather than by screen position.
+- **A wrong answer to the user, on the evening of 2026-10-02.** Asked about their second Gmail
+  sign-in, I said it was not in the log. It was, at 18:14:03 UTC: `tail -40` had cut it off. Put
+  right in the next reply. For an event, search the log; its tail is not the log.
+
+### Notes
+
+- **One step remains: Submit for certification.** The reviewer account's address and password went
+  into _Additional Testing Information → Credentials_ (**+ New credential**) by the user's own hand
+  — typing someone's password is not done on their behalf — and were checked after a reload: one
+  row, named with the address, its value not read. The name reservation lapses around
+  **25 November 2026** without a submission.
+- **WACK has not run on the uploaded package.** Its run on 2026-10-02 was on the package before the
+  fix. No source changed between the two builds — the one commit between them, `9791d27`, touched
+  only documents — so the manifest should be the only difference, though nobody compared the two
+  byte for byte. A re-run needs the user at the machine to approve elevation.
+- **The rating is IARC 12+**, with _Users Interact_; PEGI shows _!_ (parental guidance recommended)
+  and ESRB _Everyone_. Saving it took agreeing to IARC's Terms of Use and confirming the age of
+  majority: ticked at the user's explicit say-so.
+- Left empty on purpose: the 9:16 poster art (Xbox; the box art stands in), the short description
+  and the trailers — all optional.
+
+### Verified
+
+- Partner Center validated the rebuilt package: `1.0.0.0`, x64, _Windows.Desktop_ from 10.0.22000.0,
+  with only the `runFullTrust` note.
+- After saving, the listing and the notes were reloaded and read back field by field: a description
+  of 1,931 characters, 15 features in order, five screenshots with their captions in order, seven
+  keywords, the copyright and developer lines, and notes of 1,286 characters with no credentials.
+- `npm run verify`, clean: format, lint, stylelint, types, **325 unit**, **167 e2e**, `cargo fmt`,
+  clippy with `-D warnings`, **951 library tests** and every integration suite. Nothing it covers
+  changed — the script is PowerShell and the rest is prose — but `CHANGELOG.md` is under Prettier.

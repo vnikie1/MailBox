@@ -6,6 +6,11 @@ is the reasoning behind each answer; this file is the answers.
 Partner Center: <https://partner.microsoft.com/dashboard> → **Apps and games** → **Halcyon Mail**
 → **Start submission**.
 
+**State on 2026-10-03:** submission 1 is filled in, every section reads _Complete_, and the
+reviewer account's credentials are in (§6, _Notes for certification_). One step remains, the
+publisher's: **Submit for certification**. Where Partner Center's form had changed since this guide
+was written, the sections below now say what it actually asked.
+
 ---
 
 ## Before you submit — four things only you can do
@@ -36,9 +41,10 @@ Each of these changes what the listing may truthfully say, so settle them first.
      it in to Halcyon once from this PC before submitting, so Google has seen it used.
 
    Send it three or four messages from another address so the reviewer has mail to read. The
-   address and password go into **Notes for certification** in Partner Center **only** — never into
-   this file, which is public. If a reviewer is blocked anyway, the fallback is a mailbox that signs
-   in with a password and no browser at all: a Yahoo address with an _app password_.
+   address and password go into Partner Center **only** — the _Credentials_ table beside the Notes
+   for certification (§6) — never into this file, which is public. If a reviewer is blocked
+   anyway, the fallback is a mailbox that signs in with a password and no browser at all: a Yahoo
+   address with an _app password_.
 
 4. **Your public name — Unikie1 (decided 2026-10-02).** It is what Partner Center holds and what
    `<PublisherDisplayName>` in `src-tauri/msix/AppxManifest.xml` already says, so nothing changes.
@@ -62,13 +68,20 @@ three months without a submission. Submit before **25 November 2026**, or re-res
 Every later submission needs a higher version: bump `version` in `src-tauri/tauri.conf.json` and
 rebuild. `make-msix.ps1` reads it from there.
 
+`make-msix.ps1` also reads back the manifest it is about to pack, and stops if `MinVersion` is not
+what the source says or is at or below the Store's floor of 10.0.17134.0. Until 2026-10-02 it
+stamped `1.0.0.0` there by accident; Windows and the App Certification Kit accept that, and Partner
+Center refused it on the first upload.
+
 ## 2. Pricing and availability
 
-- **Markets:** all markets.
-- **Discoverability:** make this product available and discoverable in the Microsoft Store.
-- **Pricing:** Free. No free trial, no sale.
-- **Schedule:** release as soon as it passes certification (or "manually", to press the button
-  yourself).
+- **Markets:** all worldwide markets, and any future market.
+- **Audience:** public. **Discoverability:** available and discoverable in the Microsoft Store.
+- **Pricing:** free, which the form has no word for. Under _Market groups_ → _Default_ (240
+  markets), set **Currency** to _USD - United States_ and **Retail price** to **0**; the price list
+  is disabled until a currency is chosen. No free trial, no sale.
+- **Schedule:** release as soon as it passes certification. The choice to hold it for a manual
+  **Publish now** is on the _Submission options_ page, not this one.
 
 ## 3. Properties
 
@@ -80,34 +93,46 @@ rebuild. `make-msix.ps1` reads it from there.
 | Support contact | vnikie1@gmail.com (already public on the site) |
 | Does your product access, collect or transmit personal information? | **Yes** — it stores the user's mail and credentials on their PC and talks to their mail provider. Hence the privacy policy. |
 
-Product declarations:
+Product declarations, as the form listed them on 2026-10-03:
 
-- _This app allows users to make purchases, but does not use the Microsoft Store commerce system_ —
-  **no**.
-- _This app has been tested to meet accessibility guidelines_ — **leave unticked** until the Narrator
-  walkthrough Phase 10 still wants has been recorded. Ticking it is a claim.
-- _Customers can install this app to alternate drives or removable storage_ — leave ticked.
-- _Windows can include this app's data in automatic backups to OneDrive_ — leave ticked.
-- _This app depends on non-Microsoft drivers or NT services_ — **no**.
+- _This product allows users to make purchases, but does not use the Microsoft Store commerce
+  system_ — **no**.
+- _This product has been tested to meet accessibility guidelines_ — **leave unticked** until the
+  Narrator walkthrough Phase 10 still wants has been recorded. Ticking it is a claim.
+- _Customers can install this product to alternate drives or removable storage_ — leave ticked.
+- _Windows can include this product's data in automatic backups to OneDrive_ — leave ticked.
+- _Customers can use Windows 10/11 features to record and broadcast clips of this product_ —
+  **untick it.** It comes ticked, with a warning beneath that broadcast and recording are for the
+  Games category only.
+- _This product supports pen and ink input_ — no.
+- _This product incorporates generative AI features_ — **no**; nothing in Halcyon generates content.
 
 System requirements: nothing is required beyond Windows 11; a keyboard is "recommended" if you want
 to tick something.
 
 ## 4. Age ratings (IARC questionnaire)
 
-Category: **Communication**. Answer honestly — misdeclaring here is a certification failure and can
-get the app pulled later (docs/07 §2.7):
+Answer honestly — misdeclaring here is a certification failure and can get the app pulled later
+(docs/07 §2.7). IARC rewrote the questionnaire before the first submission; these are the questions
+version 10.3 asked, and the answers given on 2026-10-03:
 
 | Question | Answer |
 | --- | --- |
-| Do users interact or exchange content with other users? | **Yes** — it is email |
-| Is user-generated content moderated? | No |
-| Does it share the user's location? | No |
-| Digital purchases? | No |
-| Unrestricted internet access, like a web browser? | No — links open in the user's own browser |
-| Violence, sexual content, gambling, drugs, crude humour | None in the app itself |
+| I'm ready to complete the IARC questionnaire / I already have a certificate ID | Ready to complete it |
+| App type | **Social or Communication** — its examples include SMS and Gmail |
+| Which best describes the app? | **Communication** — with people the user already knows, one to one or in small groups |
+| Does the app share the user's current and precise physical location with other users? | No |
+| Does the app allow users to purchase digital goods? | No |
+| Does the app include the ability to block users or user-generated content? | **Yes** — _Block Sender_, in the message list's context menu |
+| Does the app include the ability to report users or user-generated content? | No — _Move to Junk_ sorts mail and trains the filter on the PC; it reports nobody to anyone |
+| Does the app include chat moderation? | No |
+| Can interactions in the app be limited to invited friends only? | No — anyone can send mail to an address |
+| Ratings obtained directly from a ratings board, or physical media in any region? | No |
 
-Expect the "Users Interact" notice on the rating.
+The result, with _Users Interact_ throughout: **IARC 12+** and **Microsoft Store 12+**, PEGI _!_
+(parental guidance recommended), ESRB _Everyone_, USK 0, and _All ages_ in Brazil, Chile and Russia.
+Saving needs the box agreeing to IARC's Terms of Use and confirming the age of majority — the
+publisher's agreement, given on 2026-10-03. IARC emails the certificate once the app is published.
 
 ## 5. Store listing — English (United Kingdom)
 
@@ -150,9 +175,8 @@ Passwords and sign-in tokens are kept in Windows Credential Manager, never in a 
 
 ### What's new in this version
 
-```text
-First release.
-```
+Leave it **blank** for this submission: the form says to, for a product's first. From 1.0.1 on,
+it is the release notes.
 
 ### Product features
 
@@ -205,12 +229,16 @@ In `store/logos/`:
 | 1:1 App tile icon (300 × 300) | `AppTileIcon-300x300.png` — the designer's own Store icon |
 
 Optional for a Windows desktop app, but without box art the Store falls back to the package's
-small logo, which reads poorly at listing sizes.
+small logo, which reads poorly at listing sizes. The 9:16 poster art slot is left empty: it is for
+Xbox, and the box art stands in for it as the main logo when it is missing.
 
 ### Search terms
 
-Seven at most. Other products' names are left out on purpose: keyword-stuffing with someone else's
-brand is a listing violation.
+Partner Center calls them **Keywords**: seven at most, 40 characters each and 21 words in all
+(these are 10). Type each one and press Enter to make it a chip. The box keeps the last one's text
+in its field afterwards; clear it before saving, and remember that Backspace in an empty field
+deletes the last chip. Other products' names are left out on purpose: keyword-stuffing with someone
+else's brand is a listing violation.
 
 ```text
 email
@@ -238,31 +266,40 @@ Vishal Singh
 
 ### Additional system requirements
 
-```text
-Windows 11, 64-bit. The WebView2 runtime, which Windows 11 already includes.
-```
+The listing no longer has this field. Windows 11 is already enforced by the package's
+`MinVersion`, and WebView2 comes with Windows 11, so nothing is lost.
 
 ## 6. Submission options
 
+Publishing hold: leave it on _Publish this submission as soon as it passes certification_, or pick
+_Don't publish this submission until I select Publish now_ to press the button yourself.
+
 ### Restricted capabilities — why `runFullTrust`
 
+The field takes **500 characters at most**; this is 497. The first draft was 535 and was refused.
+It names Google alone because this build has no Microsoft client.
+
 ```text
-Halcyon is a desktop (Win32) email client packaged with the Desktop Bridge. It needs runFullTrust to connect to the user's own IMAP and SMTP servers over TLS sockets, to keep the user's mail in a local SQLite database under %LOCALAPPDATA%, to store passwords and OAuth tokens in Windows Credential Manager, and to open the user's default browser for OAuth sign-in, which Google and Microsoft require instead of an embedded web view. It requests no other restricted capability, runs no background services, and has no server of its own.
+Halcyon is a desktop (Win32) email client packaged with the Desktop Bridge. It needs runFullTrust to connect to the user's own IMAP and SMTP servers over TLS, to keep their mail in a local SQLite database under %LOCALAPPDATA%, to store passwords and OAuth tokens in Windows Credential Manager, and to open the default browser for OAuth sign-in, which Google requires instead of an embedded web view. It uses no other restricted capability, runs no background services and has no server of its own.
 ```
 
 ### Notes for certification
 
-Replace the bracketed parts with the test account from step 3 above — in Partner Center, not here.
+These are no longer on the _Submission options_ page, which only points to them. They live under
+**Supplemental info → Additional Testing Information**, in two parts:
+
+- **Description** — the text below, already saved there on 2026-10-03. The form asks for no
+  credentials in it, so it names none and points to the second part.
+- **Credentials** — **+ New credential**, a name and a value per row. Entered by the publisher on
+  2026-10-03: one row, the reviewer account's address as its name and its password as its value.
+  In Partner Center only, never here.
 
 ```text
-Halcyon is an email client, so testing it needs a mailbox. Please use this Gmail account, created for certification:
-
-  Email:     [address]@gmail.com
-  Password:  [password]
+Halcyon is an email client, so testing it needs a mailbox. Please use the Gmail test account in the Credentials section of this page, created for certification.
 
 To test:
 1. Start Halcyon. With no account yet, the account assistant opens.
-2. Choose Google, enter the address above and continue. Halcyon opens Google's sign-in page in the default browser; sign in there with the password above.
+2. Choose Google, enter the test account's address and continue. Halcyon opens Google's sign-in page in the default browser; sign in there with the test account's password.
 3. Google shows "Google hasn't verified this app", because Halcyon has not yet completed Google's app verification. Choose Advanced, then "Go to Halcyon (unsafe)", then Continue. The browser then says "Signed in" and can be closed.
 4. Back in Halcyon, the Inbox appears within a few seconds. Select a message to read it.
 5. Press Ctrl+N, or the pencil button, to write a message. Send one to the same address to watch it arrive.
@@ -270,7 +307,7 @@ To test:
 
 Google sign-in happens in the system browser because Google does not allow sign-in inside an embedded window. Halcyon never sees the Google password.
 
-Halcyon has no server and collects no data. Everything it stores is on the PC, under %LOCALAPPDATA%\com.uniki.halcyon, and passwords go to Windows Credential Manager. No purchase, sign-up or account other than the mailbox above is needed.
+Halcyon has no server and collects no data. Everything it stores is on the PC, under %LOCALAPPDATA%\com.uniki.halcyon, and passwords go to Windows Credential Manager. No purchase, sign-up or account other than the test mailbox is needed.
 ```
 
 ---
