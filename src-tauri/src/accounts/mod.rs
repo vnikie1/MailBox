@@ -336,12 +336,46 @@ pub fn write_expiry(conn: &Connection, reference: &str, expires_at: i64) -> Resu
     Ok(())
 }
 
+fn signed_in_key(reference: &str) -> String {
+    format!("oauth.signed_in.{reference}")
+}
+
+/// When the refresh token in use was issued: the last browser sign-in, in epoch seconds.
+///
+/// Kept for the log and nothing else — no decision reads it. A refused refresh says only
+/// `invalid_grant`, which is the same word for a grant the user revoked and for one Google
+/// expired on schedule, and Google expires every refresh token **seven days** after it is issued
+/// while the OAuth application is in testing (src-tauri/oauth/README.md). Telling those apart
+/// from the log used to mean lining up timestamps by hand; with this the line says "signed in
+/// 7.0 days ago" and the cause is plain.
+///
+/// A setting rather than a credential for the same reason as the expiry: it is not a secret.
+pub fn write_signed_in(conn: &Connection, reference: &str, at: i64) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO setting (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![signed_in_key(reference), at.to_string()],
+    )?;
+
+    Ok(())
+}
+
+/// See [`write_signed_in`]. `None` for an account signed in before this was recorded.
+pub fn read_signed_in(conn: &Connection, reference: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT value FROM setting WHERE key = ?1",
+        params![signed_in_key(reference)],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .and_then(|value| value.parse().ok())
+}
+
 /// Clears the settings rows an account leaves behind. Called alongside `credentials::purge`.
 pub fn forget_settings(conn: &Connection, reference: &str) -> Result<(), DbError> {
-    conn.execute(
-        "DELETE FROM setting WHERE key = ?1",
-        params![expiry_key(reference)],
-    )?;
+    for key in [expiry_key(reference), signed_in_key(reference)] {
+        conn.execute("DELETE FROM setting WHERE key = ?1", params![key])?;
+    }
 
     Ok(())
 }
@@ -765,6 +799,32 @@ mod tests {
 
         forget_settings(&conn, "halcyon:ada@example.test").expect("forget");
         assert_eq!(read_expiry(&conn, "halcyon:ada@example.test"), 0);
+    }
+
+    #[test]
+    fn the_sign_in_time_is_kept_per_account_and_forgotten_with_it() {
+        let conn = store();
+
+        assert_eq!(
+            read_signed_in(&conn, "halcyon:ada@example.test"),
+            None,
+            "an account signed in before this was recorded has no time, not a zero"
+        );
+
+        write_signed_in(&conn, "halcyon:ada@example.test", 1_790_000_000).expect("write");
+        write_signed_in(&conn, "halcyon:bo@example.test", 1_790_500_000).expect("write");
+        assert_eq!(
+            read_signed_in(&conn, "halcyon:ada@example.test"),
+            Some(1_790_000_000)
+        );
+
+        forget_settings(&conn, "halcyon:ada@example.test").expect("forget");
+        assert_eq!(read_signed_in(&conn, "halcyon:ada@example.test"), None);
+        assert_eq!(
+            read_signed_in(&conn, "halcyon:bo@example.test"),
+            Some(1_790_500_000),
+            "removing one account must not take another's row with it"
+        );
     }
 
     #[test]

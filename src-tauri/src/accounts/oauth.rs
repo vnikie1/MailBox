@@ -110,7 +110,7 @@ pub struct PendingAuthorisation {
     pub redirect_uri: String,
 }
 
-fn now_seconds() -> i64 {
+pub(crate) fn now_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

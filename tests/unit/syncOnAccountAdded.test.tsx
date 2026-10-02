@@ -31,6 +31,7 @@ vi.mock('@/lib/ipc', () => ({
   },
   onSyncProgress: () => Promise.resolve(() => undefined),
   onAccountError: () => Promise.resolve(() => undefined),
+  onAccountReauthenticated: () => Promise.resolve(() => undefined),
   onMessagesAdded: () => Promise.resolve(() => undefined),
   onMailboxesChanged: () => Promise.resolve(() => undefined),
 }))

@@ -322,6 +322,18 @@ fn oauth_failure(
     }
 }
 
+/// How long ago an account last signed in through the browser, for the log.
+///
+/// The figure that tells a scheduled expiry from a revocation: Google ends every refresh token
+/// of an OAuth application in testing exactly seven days after it is issued, so a refusal at
+/// "7.0 days ago" is that and nothing else. See `accounts::write_signed_in`.
+fn sign_in_age(signed_in: Option<i64>, now: i64) -> String {
+    match signed_in {
+        Some(at) => format!("{:.1} days ago", (now - at) as f64 / 86_400.0),
+        None => "unknown".to_string(),
+    }
+}
+
 /// Turns a sync failure into a sentence for the UI.
 ///
 /// Never the underlying error's `Display`: those carry hostnames and protocol text, and
@@ -426,15 +438,42 @@ pub(crate) async fn credential_for(
                 });
             }
 
-            let expiry = {
+            let (expiry, signed_in) = {
                 let reference = reference.clone();
-                db.read(move |conn| Ok(accounts::read_expiry(conn, &reference)))
-                    .await?
+                db.read(move |conn| {
+                    Ok((
+                        accounts::read_expiry(conn, &reference),
+                        accounts::read_signed_in(conn, &reference),
+                    ))
+                })
+                .await?
             };
 
             let (token, refreshed) = accounts::access_token(expiry, provider, &client, &reference)
                 .await
-                .map_err(|error| oauth_failure(provider, &account.email, &error))?;
+                .map_err(|error| {
+                    // The provider's own words, here and nowhere else. `SyncError::Rejected`
+                    // deliberately renders without its detail — an IMAP server can echo a
+                    // password back — so until this line the log of an expired Google sign-in
+                    // read only "rejected the sign-in", the same as a wrong password, and the
+                    // cause had to be worked out from timestamps. An `OAuthError` holds
+                    // provider ids and error codes and nothing secret.
+                    let description = match &error {
+                        accounts::oauth::OAuthError::Refused { description, .. } => {
+                            description.as_deref().unwrap_or("")
+                        }
+                        _ => "",
+                    };
+                    tracing::warn!(
+                        account_id = account.id,
+                        %error,
+                        description,
+                        signed_in = %sign_in_age(signed_in, accounts::oauth::now_seconds()),
+                        "token refresh failed"
+                    );
+
+                    oauth_failure(provider, &account.email, &error)
+                })?;
 
             if let Some(expires_at) = refreshed {
                 let reference = reference.clone();
@@ -2100,6 +2139,18 @@ mod tests {
         });
 
         assert!(described.contains("Signing in again"), "{described}");
+    }
+
+    #[test]
+    fn a_refused_refresh_logs_how_old_the_sign_in_was() {
+        // The number that would have answered "why does Google keep signing me out" from the
+        // log alone: the Gmail account's token was refused one minute after its seventh day.
+        let now = 1_790_000_000;
+
+        assert_eq!(sign_in_age(Some(now - 7 * 86_400), now), "7.0 days ago");
+        assert_eq!(sign_in_age(Some(now - 36 * 3_600), now), "1.5 days ago");
+        // Signed in before the time was recorded. Said plainly rather than shown as fifty years.
+        assert_eq!(sign_in_age(None, now), "unknown");
     }
 
     #[test]

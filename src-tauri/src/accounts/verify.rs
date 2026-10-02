@@ -28,6 +28,14 @@ use super::provider::{AuthKind, Provider, Security, ServerSettings};
 /// Per-step budget. A mail server that has not answered in ten seconds is not going to.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The sign-in step's name, on both halves.
+///
+/// A constant rather than the literal it used to be in twenty places, because it is no longer
+/// only a label: [`DiagnosticReport::imap_sign_in`] finds the step by it, and re-authentication
+/// depends on that. Renamed in one place and not the other, every re-sign-in would be refused
+/// as unverifiable.
+const SIGN_IN: &str = "Sign in";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]
@@ -92,6 +100,22 @@ impl DiagnosticReport {
             smtp,
             summary,
         }
+    }
+
+    /// How the incoming server's sign-in went: `Some(true)` signed in, `Some(false)` refused,
+    /// `None` never reached — the connection failed first.
+    ///
+    /// Re-authentication asks this rather than [`ok`](Self::ok). What it has to establish is
+    /// whose mailbox the new token opens, and the IMAP sign-in settles that on its own: the
+    /// server checks the token against the address it is presented with. Requiring the outgoing
+    /// half as well threw away a good sign-in — and asked for another trip through the browser —
+    /// whenever SMTP had a slow ten seconds, while the stored credential it would have replaced
+    /// was already dead.
+    pub fn imap_sign_in(&self) -> Option<bool> {
+        self.imap
+            .iter()
+            .find(|step| step.name == SIGN_IN && step.status != StepStatus::Skipped)
+            .map(|step| step.status == StepStatus::Passed)
     }
 }
 
@@ -372,7 +396,7 @@ async fn check_imap(
                 Some(error.to_string()),
                 started,
             );
-            for step in ["Secure the connection", "Sign in", "Open Inbox"] {
+            for step in ["Secure the connection", SIGN_IN, "Open Inbox"] {
                 report.skip(step, "Not attempted — the server could not be reached.");
             }
             return report.steps;
@@ -385,7 +409,7 @@ async fn check_imap(
                 None,
                 started,
             );
-            for step in ["Secure the connection", "Sign in", "Open Inbox"] {
+            for step in ["Secure the connection", SIGN_IN, "Open Inbox"] {
                 report.skip(step, "Not attempted — the server did not answer.");
             }
             return report.steps;
@@ -418,7 +442,7 @@ async fn check_imap(
                     Some(error.to_string()),
                     started,
                 );
-                report.skip("Sign in", "Not attempted — the connection is not secure.");
+                report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
                 report.skip(
                     "Open Inbox",
                     "Not attempted — the connection is not secure.",
@@ -434,7 +458,7 @@ async fn check_imap(
     let complete = |text: &str| text.ends_with("\r\n");
     if let Err(error) = stream.read_response(complete).await {
         report.failed(
-            "Sign in",
+            SIGN_IN,
             "The server did not send a greeting.",
             Some(
                 "The port answered, but nothing on it behaves like an IMAP server. Check the \
@@ -461,7 +485,7 @@ async fn check_imap(
                 Some(error.to_string()),
                 started,
             );
-            report.skip("Sign in", "Not attempted — the connection is not secure.");
+            report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
             report.skip(
                 "Open Inbox",
                 "Not attempted — the connection is not secure.",
@@ -484,7 +508,7 @@ async fn check_imap(
                 response.ok(),
                 started,
             );
-            report.skip("Sign in", "Not attempted — the connection is not secure.");
+            report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
             report.skip(
                 "Open Inbox",
                 "Not attempted — the connection is not secure.",
@@ -507,7 +531,7 @@ async fn check_imap(
             None,
             started,
         );
-        report.skip("Sign in", "Not attempted.");
+        report.skip(SIGN_IN, "Not attempted.");
         report.skip("Open Inbox", "Not attempted.");
         return report.steps;
     }
@@ -526,7 +550,7 @@ async fn check_imap(
 
     if let Err(error) = stream.write_line(&command).await {
         report.failed(
-            "Sign in",
+            SIGN_IN,
             "The sign-in could not be sent.",
             Some(connect_remedy(&server.host, server.port)),
             Some(error.to_string()),
@@ -543,7 +567,7 @@ async fn check_imap(
         Ok(text) => text,
         Err(error) => {
             report.failed(
-                "Sign in",
+                SIGN_IN,
                 "The server stopped responding during sign-in.",
                 Some(connect_remedy(&server.host, server.port)),
                 Some(error),
@@ -558,7 +582,7 @@ async fn check_imap(
         // The raw response goes into `server_said` and never into a log — it can echo the
         // username, and a failed LOGIN response has been known to quote the command.
         report.failed(
-            "Sign in",
+            SIGN_IN,
             "The server rejected the sign-in.",
             Some(diagnose(provider, &response, false)),
             Some(redact_command_echo(&response)),
@@ -568,7 +592,7 @@ async fn check_imap(
         return report.steps;
     }
 
-    report.passed("Sign in", "Signed in successfully.", started);
+    report.passed(SIGN_IN, "Signed in successfully.", started);
 
     // ---- open the inbox -----------------------------------------------------------------
     // Authenticating proves the credential; selecting INBOX proves the account can actually
@@ -646,7 +670,7 @@ async fn check_smtp(
                 started,
             );
             report.skip("Secure the connection", "Not attempted.");
-            report.skip("Sign in", "Not attempted.");
+            report.skip(SIGN_IN, "Not attempted.");
             return report.steps;
         }
     };
@@ -684,7 +708,7 @@ async fn check_smtp(
                     Some(error.to_string()),
                     started,
                 );
-                report.skip("Sign in", "Not attempted — the connection is not secure.");
+                report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
                 return report.steps;
             }
         }
@@ -694,7 +718,7 @@ async fn check_smtp(
 
     if stream.read_response(complete).await.is_err() {
         report.failed(
-            "Sign in",
+            SIGN_IN,
             "The server did not send a greeting.",
             Some("The port answered, but nothing on it behaves like an SMTP server.".into()),
             None,
@@ -723,7 +747,7 @@ async fn check_smtp(
                 Some(capabilities),
                 started,
             );
-            report.skip("Sign in", "Not attempted — the connection is not secure.");
+            report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
             return report.steps;
         }
 
@@ -742,7 +766,7 @@ async fn check_smtp(
                 Some(response),
                 started,
             );
-            report.skip("Sign in", "Not attempted — the connection is not secure.");
+            report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
             return report.steps;
         }
 
@@ -757,7 +781,7 @@ async fn check_smtp(
                     None,
                     started,
                 );
-                report.skip("Sign in", "Not attempted.");
+                report.skip(SIGN_IN, "Not attempted.");
                 return report.steps;
             }
         };
@@ -784,7 +808,7 @@ async fn check_smtp(
                     Some(error.to_string()),
                     started,
                 );
-                report.skip("Sign in", "Not attempted — the connection is not secure.");
+                report.skip(SIGN_IN, "Not attempted — the connection is not secure.");
                 return report.steps;
             }
         };
@@ -816,14 +840,14 @@ async fn check_smtp(
     let response = stream.read_response(complete).await.unwrap_or_default();
 
     if response.starts_with("235") {
-        report.passed("Sign in", "Signed in to the outgoing server.", started);
+        report.passed(SIGN_IN, "Signed in to the outgoing server.", started);
     } else {
         // Redacted for the same reason as the IMAP side: a server that echoes the rejected
         // command back puts `AUTH PLAIN <base64 of user and password>` on screen, and that
         // base64 is trivially reversible. This half was passing the response through raw
         // while the IMAP half had guarded against it since it was written.
         report.failed(
-            "Sign in",
+            SIGN_IN,
             "The outgoing server rejected the sign-in.",
             Some(diagnose(provider, &response, true)),
             Some(redact_command_echo(&response)),
@@ -1032,7 +1056,7 @@ mod tests {
                 elapsed_ms: 1,
             },
             CheckStep {
-                name: "Sign in".into(),
+                name: SIGN_IN.into(),
                 status: StepStatus::Failed,
                 detail: "rejected".into(),
                 remedy: Some("Do the thing.".into()),
@@ -1135,5 +1159,47 @@ mod tests {
             steps.iter().any(|s| s.status == StepStatus::Failed),
             "but the test must not report success"
         );
+    }
+
+    #[test]
+    fn re_authentication_can_tell_a_refused_sign_in_from_one_it_never_reached() {
+        let started = Instant::now();
+
+        // Signed in to IMAP; SMTP timed out. Not `ok` — but the question re-authentication asks,
+        // whose mailbox this token opens, has been answered. It used to be refused here, and
+        // the user sent back to the browser for a sign-in that had worked.
+        let mut imap = Report::new();
+        imap.passed("Connect", "Connected.", started);
+        imap.passed("Secure the connection", "Secured.", started);
+        imap.passed(SIGN_IN, "Signed in successfully.", started);
+        imap.passed("Open Inbox", "Opened.", started);
+        let mut smtp = Report::new();
+        smtp.failed("Connect", "No answer.", None, None, started);
+        smtp.skip("Secure the connection", "Not attempted.");
+        smtp.skip(SIGN_IN, "Not attempted.");
+
+        let report = DiagnosticReport::build(imap.steps, smtp.steps);
+        assert!(!report.ok);
+        assert_eq!(report.imap_sign_in(), Some(true));
+
+        // The server refused the token: the one answer that says "wrong account".
+        let mut imap = Report::new();
+        imap.passed("Connect", "Connected.", started);
+        imap.passed("Secure the connection", "Secured.", started);
+        imap.failed(SIGN_IN, "Refused.", None, None, started);
+        imap.skip("Open Inbox", "Not attempted — sign-in failed.");
+
+        let report = DiagnosticReport::build(imap.steps, Vec::new());
+        assert_eq!(report.imap_sign_in(), Some(false));
+
+        // Never got that far. A skipped step is not a refusal, and must not be reported as one.
+        let mut imap = Report::new();
+        imap.failed("Connect", "No answer.", None, None, started);
+        imap.skip("Secure the connection", "Not attempted.");
+        imap.skip(SIGN_IN, "Not attempted.");
+        imap.skip("Open Inbox", "Not attempted.");
+
+        let report = DiagnosticReport::build(imap.steps, Vec::new());
+        assert_eq!(report.imap_sign_in(), None);
     }
 }

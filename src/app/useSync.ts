@@ -3,6 +3,7 @@ import { useQueryClient } from '@tanstack/react-query'
 
 import {
   onAccountError,
+  onAccountReauthenticated,
   onAccountsChanged,
   onMailboxesChanged,
   onMessagesAdded,
@@ -146,6 +147,23 @@ export function useSync(): SyncState {
         setErrors((current) => {
           const next = new Map(current)
           next.set(error.accountId, error)
+          return next
+        })
+      }),
+    )
+
+    // A new sign-in is also proof, and it arrives long before progress does. Waiting for
+    // progress alone is what made a sign-in that worked look as though it had not: the strip
+    // went on saying "The saved sign-in for this account was refused. Signing in again will fix
+    // it." over a Sign In button for as long as the first sync took to report — 18 seconds to
+    // connect and minutes to finish, on the Gmail account this was found on — so people signed
+    // in a second time, and a third.
+    track(
+      onAccountReauthenticated((accountId) => {
+        setErrors((current) => {
+          if (!current.has(accountId)) return current
+          const next = new Map(current)
+          next.delete(accountId)
           return next
         })
       }),

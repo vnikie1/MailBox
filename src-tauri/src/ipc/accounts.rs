@@ -6,7 +6,7 @@
 //! comes back out. There is deliberately no `credential_get`.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use ts_rs::TS;
 
 use crate::accounts::{
@@ -20,6 +20,7 @@ use crate::accounts::{
     ClientSource,
 };
 use crate::db::Db;
+use crate::sync::idle::Watchers;
 
 use super::mail::AppError;
 
@@ -181,6 +182,28 @@ async fn client_for_sign_in(db: &Db, provider: Provider) -> Result<oauth::Client
     }
 
     Ok(client)
+}
+
+/// Records what a browser sign-in leaves in `setting`: the access token's expiry, and — when a
+/// refresh token came with it — when that refresh token was issued.
+///
+/// One transaction, and one helper for both commands that sign in, so the two can never record
+/// different things. The tokens themselves have already gone to the Credential Manager.
+async fn store_sign_in(db: &Db, reference: &str, tokens: &oauth::Tokens) -> Result<(), AppError> {
+    let reference = reference.to_string();
+    let expires_at = tokens.expires_at;
+    let issued = tokens.refresh.is_some().then(oauth::now_seconds);
+
+    db.write(move |tx| {
+        accounts::write_expiry(tx, &reference, expires_at)?;
+        if let Some(at) = issued {
+            accounts::write_signed_in(tx, &reference, at)?;
+        }
+        Ok(())
+    })
+    .await?;
+
+    Ok(())
 }
 
 /// The provider picker's contents.
@@ -539,12 +562,7 @@ pub async fn account_add_oauth(
         }
     })?;
 
-    {
-        let reference = reference.clone();
-        let expires_at = tokens.expires_at;
-        db.write(move |tx| accounts::write_expiry(tx, &reference, expires_at))
-            .await?;
-    }
+    store_sign_in(&db, &reference, &tokens).await?;
 
     let (imap, smtp) = provider
         .servers()
@@ -698,6 +716,22 @@ pub async fn account_remove(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
 /// The email is not taken from the caller. It comes from the stored account and is passed to
 /// the provider as a login hint, so this cannot quietly re-point an account at a different
 /// mailbox — sign in as someone else and the verify step below rejects it.
+///
+/// ## What happens once it succeeds, and why each piece is here
+///
+/// Signing in used to work and *look* as though it had not. The log of a Gmail account whose
+/// seven-day token had expired shows the sequence: re-authenticated at 13:43:40, its sync
+/// starting the same second — and the user signing in a second time at 13:44:29, because the
+/// strip at the foot of the sidebar still read "The saved sign-in for this account was refused.
+/// Signing in again will fix it." with a Sign In button under it. Nothing cleared that until the
+/// sync reported progress, and that pass took 18 seconds just to connect and four and a half
+/// minutes to finish. Meanwhile the IDLE watcher, which had given up on the refused token at
+/// launch, was never started again, so new mail waited for the five-minute safety net.
+///
+/// So, in order: `account:reauthenticated` tells the window the refusal it is showing is no
+/// longer true; the watcher is resumed here rather than left to a round trip through the
+/// window; and `accounts:changed` still goes out, because Settings shows `hasCredential` and the
+/// window's answer to it — `sync_all` and `sync_watch` — is what fetches the mail.
 #[tauri::command]
 pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Response<()> {
     let account = db
@@ -736,11 +770,36 @@ pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
     )
     .await;
 
+    // The incoming sign-in, not the whole report. That is what proves whose mailbox this is,
+    // and the outgoing half failing — a slow SMTP server, a network that blocks the port —
+    // used to discard a sign-in that had worked and send the user back to the browser for it.
+    match report.imap_sign_in() {
+        Some(true) => {}
+        Some(false) => {
+            return Err(bad_request(&format!(
+                "That sign-in did not work for {email}. Check you signed in as that address \
+                 and not another."
+            )));
+        }
+        // Never reached the sign-in, so whose token this is was never established. Nothing is
+        // stored, and the report says what did fail instead of blaming the account chosen.
+        None => {
+            return Err(AppError {
+                code: "network".into(),
+                message: format!(
+                    "Halcyon could not check that sign-in, so it has not been saved. {}",
+                    report.summary
+                ),
+            });
+        }
+    }
+
     if !report.ok {
-        return Err(bad_request(
-            "That sign-in did not work for this account. Check you signed in as the same \
-             address.",
-        ));
+        tracing::warn!(
+            account_id = id,
+            summary = %report.summary,
+            "re-authenticated, but the outgoing server check failed"
+        );
     }
 
     let reference = credentials::reference_for(&email);
@@ -752,17 +811,16 @@ pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
         }
     })?;
 
-    {
-        let reference = reference.clone();
-        let expires_at = tokens.expires_at;
-        db.write(move |tx| accounts::write_expiry(tx, &reference, expires_at))
-            .await?;
-    }
+    store_sign_in(&db, &reference, &tokens).await?;
 
     tracing::info!(account_id = id, "account re-authenticated");
 
-    // `accounts:changed` restarts the watcher, which is what actually gets mail flowing again;
-    // without it the new token sits unused until the next poll.
+    let _ = app.emit("account:reauthenticated", id);
+
+    if let Some(watchers) = app.try_state::<Watchers>() {
+        watchers.resume(id);
+    }
+
     let _ = app.emit("accounts:changed", ());
     Ok(())
 }

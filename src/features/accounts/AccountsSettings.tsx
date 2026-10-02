@@ -269,8 +269,10 @@ function AccountRow({
                 setSigningIn(true)
                 accountReauth(account.id)
                   .then(() => {
+                    // No sync from here. The core announces `accounts:changed`, and the main
+                    // window answers it by fetching mail and resuming the watcher; this used to
+                    // add a `syncAll()` of its own, which synced every account a second time.
                     toast.show({ title: `Signed in to ${account.email}` })
-                    return syncAll()
                   })
                   .catch((cause: unknown) => {
                     toast.show({

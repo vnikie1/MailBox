@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { AlertTriangle, CloudOff, RefreshCw } from 'lucide-react'
 
 import type { SyncAccountError } from '@/lib/ipc'
-import { accountReauth, syncAll } from '@/lib/ipc'
+import { accountReauth, codeFor, reasonFor, syncAll } from '@/lib/ipc'
+import { useToast } from '@/ui'
 
 import styles from './SyncStatus.module.css'
 
@@ -42,6 +43,7 @@ export function SyncStatus({ errors, busy, online, accountNames }: SyncStatusPro
   // The browser sign-in takes as long as the user takes, so the button has to say it is doing
   // something or it reads as not having worked.
   const [signingIn, setSigningIn] = useState(false)
+  const toast = useToast()
 
   if (!online) {
     return (
@@ -82,7 +84,11 @@ export function SyncStatus({ errors, busy, online, accountNames }: SyncStatusPro
             refused, and asking again cannot fix one of those — the message says "Signing in
             again will fix it" while the only button re-ran the sync that had just failed. The
             flag was in the payload and read by nothing, so an account whose refresh token had
-            expired could not be recovered from anywhere in the app. */}
+            expired could not be recovered from anywhere in the app.
+
+            Success needs nothing from here. The core announces the new sign-in, which clears
+            this strip (`useSync`), and `accounts:changed`, which fetches the mail. This used to
+            call `syncAll()` as well, so every sign-in synced every account twice over. */}
         {error.needsReauth ? (
           <button
             type="button"
@@ -91,11 +97,19 @@ export function SyncStatus({ errors, busy, online, accountNames }: SyncStatusPro
             onClick={() => {
               setSigningIn(true)
               accountReauth(accountId)
-                .then(() => syncAll())
-                .catch(() => {
-                  // The banner is already saying the account cannot connect, and it stays until
-                  // a sync succeeds. A second message about a sign-in the user just abandoned
-                  // would be telling them something they know.
+                .catch((cause: unknown) => {
+                  // Walking away from the browser is not news to the person who did it, and
+                  // the strip still says the account cannot connect.
+                  if (codeFor(cause) === 'timedOut') return
+
+                  // Anything else is. This used to swallow every failure, so a sign-in refused
+                  // for the wrong address — or one the outgoing check threw away — left the
+                  // strip exactly as it was, and the only thing to do was press the button again
+                  // with no idea why the last press had not worked.
+                  toast.show({
+                    title: 'That sign-in did not complete',
+                    description: reasonFor(cause),
+                  })
                 })
                 .finally(() => {
                   setSigningIn(false)

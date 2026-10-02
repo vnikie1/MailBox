@@ -49,6 +49,18 @@ export function reasonFor(cause: unknown): string {
   return String(cause)
 }
 
+/**
+ * The core's machine-readable code from a rejection — `timedOut`, `needsReauth` and the rest —
+ * or `undefined` for anything that did not come from the core. `reasonFor`'s twin, for the
+ * callers that have to branch rather than display.
+ */
+export function codeFor(cause: unknown): string | undefined {
+  if (typeof cause === 'object' && cause !== null && 'code' in cause) {
+    return String(cause.code)
+  }
+  return undefined
+}
+
 /* ------------------------------------------------------------------ appearance */
 
 function browserAppearance(): Appearance {
@@ -774,6 +786,23 @@ export async function onAccountError(
 ): Promise<UnlistenFn> {
   if (!runningInTauri) return () => undefined
   return listen<SyncAccountError>('account:error', (event) => {
+    handler(event.payload)
+  })
+}
+
+/**
+ * Fires when an account has been signed in again and the new sign-in is stored.
+ *
+ * The core has already proved it works — the re-authentication only stores a token that has
+ * just signed in to the account's own mailbox — so whatever refusal the window is showing for
+ * the account is out of date the moment this arrives. From the core rather than from the button
+ * that started it, because Settings is a separate window and cannot reach the sidebar's state.
+ */
+export async function onAccountReauthenticated(
+  handler: (accountId: number) => void,
+): Promise<UnlistenFn> {
+  if (!runningInTauri) return () => undefined
+  return listen<number>('account:reauthenticated', (event) => {
     handler(event.payload)
   })
 }

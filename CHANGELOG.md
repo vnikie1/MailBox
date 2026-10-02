@@ -8373,3 +8373,175 @@ border-radius:4px;vertical-align:middle}`; a three-message selection draws three
 - Format, lint, stylelint, types, **321 unit, 167 e2e**. Rust unchanged since its own clean run
   earlier: fmt, clippy, **942 library tests**, every integration suite, and the XSS corpus at 91
   payloads with 0 survivors.
+
+---
+
+## 2026-10-02 — Phase 4: Signing in again once, and why Google keeps asking
+
+Reported from the installed app: _"after opening the app and signing in again into the google
+account it doesnt automatically starts syncing the mails again, it takes 2 attempts atleast to re
+login and authenticate it"_ — and _"why is the signin being expired for google, it should not
+expire"_. Both are answered by `%LOCALAPPDATA%\com.uniki.halcyon\diagnostics\halcyon.log`, and the
+two answers are very different: the first was four bugs in this repository, the second is a setting
+in the Google Cloud project that no code here can change.
+
+### Why the Google sign-in expires — not fixable in code
+
+- **Google ends it after exactly seven days, because the OAuth application is still in Testing.**
+  The log shows it twice:
+
+  | Refresh token issued             | Last sync that worked | Refused                             |
+  | -------------------------------- | --------------------- | ----------------------------------- |
+  | 09-16 ~14:59 UTC (account added) | 09-23 14:55:38        | 09-23 15:00:38, in 166 ms — day 7.0 |
+  | 09-23 15:46:21 (signed in again) | 09-29 04:11:08        | 10-02 13:43:20, at launch — day 8.9 |
+
+  166 ms is a token-endpoint round trip with no IMAP connection, so the refusal is Google's
+  `invalid_grant`, not the mail server. Google documents the rule: a project whose consent screen
+  is _External_ and _Testing_ is issued refresh tokens that expire in seven days, unless it asks for
+  nothing beyond name, email and profile — and `https://mail.google.com/` is the scope IMAP needs.
+  `src-tauri/oauth/README.md` has described this since 2026-09-16; the account has simply been
+  living inside it.
+
+- **The cure is in the Google Cloud console, and was not done here.** Google Auth Platform →
+  Audience → _Publish app_ (`src-tauri/oauth/README.md`, "Publishing the Google application", route
+  A). Then sign in once more: a token issued while the app was in Testing keeps its seven-day life.
+  It is the user's decision rather than a step to take on their behalf: publishing unverified puts
+  Google's _"hasn't verified this app"_ screen in front of every sign-in and starts the 100-user
+  lifetime cap. Until it is done, the token issued today at 13:44:29 UTC will be refused from about
+  13:44 UTC on **2026-10-09**.
+
+### Fixed
+
+- **The first sign-in worked and looked as though it had not.** The log: re-authenticated at
+  13:43:40, its sync starting in the same second, and a _second_ sign-in at 13:44:29. In between,
+  the strip at the foot of the sidebar still said _"The saved sign-in for this account was refused.
+  Signing in again will fix it."_ above a Sign In button, because the only thing that cleared it was
+  `sync:progress` — and that pass took 18 seconds to connect and four and a half minutes to finish.
+  So the user did what the strip said.
+
+  `account_reauth` now emits `account:reauthenticated` once the new sign-in is verified and stored,
+  and `useSync` drops that account's error on it. From the core rather than from the button,
+  because Settings is a separate window and cannot reach the sidebar's state.
+
+- **The IDLE watcher that met a refused sign-in never came back.** It `return`ed on any
+  non-retryable error and left its entry in the registry, and `Watchers::reconcile` skips an
+  account it already holds — so the `accounts:changed` that `account_reauth`'s own comment said
+  "restarts the watcher" reached everything except the watcher that needed it. The 09-23 log, which
+  was written at debug level, shows it plainly: _"idle watcher giving up: not retryable"_ at
+  15:18:38, a successful sign-in at 15:46:21, and no IDLE traffic for that account until the app was
+  restarted at 15:55:34. New mail in that window waited for the five-minute safety net.
+
+  The watcher now **pauses** instead, and is resumed three ways: by `reconcile` (every caller of
+  it is a moment an account may have been fixed), by `account_reauth` directly, and by its own
+  safety net after a pass that signs in — which recovers it within one interval whatever fixed the
+  account. The resume is a `tokio::sync::watch` channel's version rather than a `Notify`, because
+  both of `Notify`'s modes lose something here: `notify_waiters` drops a resume that lands while
+  the refused attempt is still in flight, and `notify_one` keeps a permit indefinitely, so a resume
+  sent while the account was healthy would spend a second request on the first refusal. The
+  version answers the real question — was anything resumed since the failing attempt began?
+
+- **Every sign-in synced every account twice.** The strip's button and Settings both called
+  `syncAll()` after `accountReauth`, and the window already answers `accounts:changed` with
+  `syncAll()` — two passes of every account per sign-in. Today's log has five back-to-back passes
+  of _each_ account after the two sign-ins, the Yahoo account included. The button-side calls are
+  gone.
+
+- **A sign-in that worked could be discarded over the outgoing server.** `account_reauth` required
+  the whole connection test to pass, SMTP included, before storing anything — so an SMTP server
+  slow for ten seconds, or a network blocking the port, sent the user back through the browser for
+  a sign-in that had succeeded, while the credential it would have replaced was already dead. It
+  now asks `DiagnosticReport::imap_sign_in()`: the IMAP sign-in is what proves whose mailbox the
+  token opens, because the server checks the token against the address presented. A failed
+  outgoing check is logged. The two refusals now say different things — a sign-in the server
+  refused names the address to use, and one never reached says what failed instead of blaming the
+  account chosen.
+
+- **The strip's Sign In button swallowed every failure**, so a refused or unverifiable sign-in
+  left the strip unchanged and gave no reason to do anything but press it again. It now shows the
+  core's reason in a toast — except for `timedOut`, the browser simply abandoned, which is not news
+  to the person who abandoned it.
+
+### Added
+
+- **`oauth.signed_in.<reference>`** in `setting`: when the refresh token in use was issued. Written
+  by both commands that sign in, through one helper (`store_sign_in`) so they cannot record
+  different things; cleared by `forget_settings`. Nothing decides anything on it.
+- **A `token refresh failed` log line** carrying the provider's error, its description and
+  `signed_in = "7.0 days ago"`. `SyncError::Rejected` renders without its detail on purpose — an
+  IMAP server can echo a password — so until now the log of an expired Google token read only
+  _"rejected the sign-in"_, identical to a wrong password, and the seven-day pattern above had to be
+  rebuilt from timestamps. An `OAuthError` holds provider ids and error codes and nothing secret.
+  The 2026-09-03 entry asked for exactly this — _"The detail belongs in the log line"_ — after the
+  same refusal cost the same time a month ago; it was not done then.
+- `codeFor()` in `src/lib/ipc.ts`, `reasonFor`'s twin for callers that branch on the core's code.
+- `verify::SIGN_IN`, replacing twenty copies of the literal. It stopped being only a label when
+  re-authentication began finding the step by name; renamed in one place, every re-sign-in would be
+  refused as unverifiable.
+
+### Tests
+
+- Rust: `a_resume_that_lands_while_the_failing_attempt_is_in_flight_is_not_lost`,
+  `a_resume_from_before_the_failing_attempt_does_not_wake_the_pause`,
+  `a_paused_watcher_resumes_when_asked_and_ends_when_stopped`,
+  `a_paused_watcher_with_no_one_left_to_resume_it_ends`,
+  `resuming_one_account_leaves_the_others_alone`, `reconcile_resumes_a_watcher_it_already_holds`,
+  `re_authentication_can_tell_a_refused_sign_in_from_one_it_never_reached`,
+  `the_sign_in_time_is_kept_per_account_and_forgotten_with_it`,
+  `a_refused_refresh_logs_how_old_the_sign_in_was`.
+- `tests/unit/reauthClearsTheStrip.test.tsx`: the strip clears for the account signed in and no
+  other; the button no longer syncs; a failure is explained; an abandoned browser is not.
+- **Each regression test was checked against the bug.** With `reconcile`'s resume removed,
+  `reconcile_resumes_a_watcher_it_already_holds` fails; with `useSync`'s new handler emptied and the
+  button's `syncAll()` restored, the first two frontend tests fail. Both restored before the gate.
+
+### Notes
+
+- **Why the first connection after signing in took 18 seconds is not known.** Every later connect
+  that session took 1.2–1.8 s. The installed build logs at `info`, which has nothing between "sync
+  starting" and "connected". Nothing here depends on it any more — the strip no longer waits for it.
+- **The 09-23 log goes silent mid-sync at 15:46:43 for both accounts**, then the app starts at
+  15:55:34 and again at 15:57:32. That is that day's reinstall — the 09-23 entry records closing the
+  app, installing over it, and launching once with a debugging port and once without — not a hang.
+  Written down so the next reader of that log does not chase it.
+- **The Dovecot rig gates were not run.** They are `#[ignore]`d and need the rig and its CA — the
+  one trusted on this machine was due to expire on 2026-09-25 unless the staged replacement has
+  been trusted since, which was not checked. The only thing here they exercise is the watcher, and
+  its new paths are covered by the unit tests above, without a server.
+
+### Rebuilt and reinstalled
+
+- `npm run app:build` → `Halcyon_1.0.0_x64-setup.exe`, 8,117,477 bytes, release profile in 4m 55s.
+  It exits 1 at the very end over the missing updater signing key, after the installer is
+  complete — the 2026-09-23 entry's incident, unchanged. `clients.env` was checked first, by
+  counting filled lines rather than printing them: Google's id and secret are both present, so the
+  build carries the same Google application as the one it replaced. Microsoft's is empty, as it was.
+- **Checked the binary before installing it**, because the bundle folder still holds a
+  `Halcyon_1.0.1_x64-setup.exe` from 2026-09-01 — an updater test, older code under a higher
+  version number, and the easy one to pick by mistake. `target/release/halcyon.exe` contains
+  `account:reauthenticated`, `token refresh failed` and the watcher's new pause line; the installed
+  exe before the install contained none of them.
+- The user closed the app themselves first (it may hold drafts). Installed with
+  `Start-Process -ArgumentList '/S' -Wait` from PowerShell — never Git Bash, which rewrites `/S`
+  into a path. Exit code 0; `halcyon.exe` 22,743,040 bytes (was 22,728,704), carrying the same
+  three strings and the NSIS bundle marker. Relaunched at 20:01:53 IST: core side of cold start
+  719 ms, both accounts connected in 1.9 s, and both passes finished inside 40 s with nothing
+  failed — Gmail 45 mailboxes, Yahoo 31, two new messages each. The Gmail token signed in this
+  morning is still inside its seven days, so the new refusal paths could not be watched happen
+  live; the unit tests are what cover them.
+
+### Incidents
+
+- **The first `npm run verify` failed on two tests this work does not touch.**
+  `selectionDeck.test.tsx` › _fetches three messages however many are selected_ took 5,384 ms
+  against Vitest's 5,000 ms limit, and the test after it then found two `role="status"` captions —
+  the timed-out test's render still in the document. Alone, the file passed 11 of 11 with that test
+  at 1,259 ms, and the full gate passed on the next run. A test whose time quadruples under the
+  suite's load is a flake waiting to recur; recorded rather than given a longer timeout, because
+  nothing here explains why it is that slow.
+
+### Verified
+
+- `npm run verify`, clean: format, lint, stylelint, types, **325 unit** (35 files, 4 new),
+  **167 e2e**, `cargo fmt`, clippy with `-D warnings`, **951 library tests** (9 new) and every
+  integration suite; the rig gates ignored as always.
+
