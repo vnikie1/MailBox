@@ -8789,3 +8789,27 @@ asked.
 - `npm run verify`, clean: format, lint, stylelint, types, **325 unit**, **167 e2e**, `cargo fmt`,
   clippy with `-D warnings`, **951 library tests** and every integration suite. Nothing it covers
   changed — the script is PowerShell and the rest is prose — but `CHANGELOG.md` is under Prettier.
+
+### Later the same night — the two checks left before submitting
+
+Asked: _"do the 2 optional checks first"_.
+
+- **WACK on the uploaded package itself: WARNING, the same verdict on all 24 tests as the night
+  before.** `make-msix.ps1 -Test` was not used for this: it rebuilds and signs the package in
+  place, so it would have tested a repack and left the uploaded file signed. Instead a copy was
+  test-signed and installed, and the original kept its hash, unsigned. The user closed Halcyon
+  first rather than let `run-wack.ps1` force-quit it, and approved the elevation prompt. Report
+  `src-tauri/target/msix/wack-20261003-uploaded.xml`; the test package was removed afterwards.
+- **The public privacy page is version 1.1.** `vnikie1/halcyon-mail` `02090a5`, carrying exactly
+  what changed in `PRIVACY.md` since the page was written: when the update check runs (opening
+  Settings → General, not only the button, and never in the Store version), the image setting's
+  real label, and the Store-analytics paragraph's current wording. Both claims were re-read in the
+  code before publishing — `UpdateSettings` checks once on mount, and `ReadingSettings` says _Show
+  images in messages automatically_. Live 21 seconds after the push: HTTP 200, version 1.1, and
+  each of the four changes found in the served page.
+
+#### Incidents
+
+- **The site commit failed on the first try: this machine has no global git identity.** The app
+  repository has a local one, `vnikie1`, and so do all of the site's earlier commits; the scratch
+  clone was given the same, locally. Nothing had been pushed.
