@@ -64,15 +64,26 @@ pub struct Attachment {
     pub is_inline: bool,
 }
 
+/// The folder every account's cached sources are under. What deletes them is `sync::sources`.
+pub fn sources_folder(root: &Path) -> PathBuf {
+    root.join("bodies")
+}
+
+/// One account's cached sources.
+pub fn account_folder(root: &Path, account_id: i64) -> PathBuf {
+    sources_folder(root).join(account_id.to_string())
+}
+
 /// Where a message's raw source is cached.
 ///
 /// One file per message under the account, named by message id. Keeping the `.eml` means a
 /// reply can quote the original exactly, and Phase 6 can re-render without another round
 /// trip to the server.
+///
+/// Ids are reused, so this names where a source *would* go, not whose source is there. Read a
+/// message's source through its row's `raw_path`, which is recorded only once the file holds it.
 pub fn cache_path(root: &Path, account_id: i64, message_id: i64) -> PathBuf {
-    root.join("bodies")
-        .join(account_id.to_string())
-        .join(format!("{message_id}.eml"))
+    account_folder(root, account_id).join(format!("{message_id}.eml"))
 }
 
 /// Fetches one message's full source from the server.

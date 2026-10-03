@@ -8872,6 +8872,8 @@ status table at the top.
   all of it. A reused account or message id cannot surface a stale file — the reader opens only
   the `raw_path` on the row, which is set after the new file is written over the old — so this is
   a privacy gap, not a wrong-message bug. The new policy section says only what is true today.
+  **Wrong, as the next morning found:** the reader is safe, but Redirect and Forward as Attachment
+  read the file by id. Fixed below, under _Later that morning_.
 
 #### Notes
 
@@ -8879,3 +8881,55 @@ status table at the top.
   is declared on the Data Access page — Halcyon asks for `https://mail.google.com/` at sign-in
   without it. Declaring the scope is what starts the restricted-scope review, so it was left for
   the submission.
+
+### Later that morning — approved, and the leftover mail fixed
+
+Asked: _"fix the leftover mail bug and make a demo video of the app, the app has been approved by
+microsoft so please check that too"_.
+
+#### Notes
+
+- **Microsoft approved Halcyon Mail 1.0.0.0, and it is live.** Partner Center reads _In Microsoft
+  Store_ — "currently available in the Microsoft Store" — and the public listing,
+  <https://apps.microsoft.com/detail/9ND14F638LPJ>, answers 200 with the title, publisher Unikie1,
+  Free, Productivity and _Developed by_ as submitted. Certification took the night.
+
+#### Fixed
+
+- **Deleted mail now leaves the disk.** The source cache's whole lifetime is `sync::sources`, new:
+  migration 0015 queues the file whenever a message row is deleted or its `raw_path` replaced — by
+  trigger, so all four places that delete messages are covered and a fifth will be — and the
+  upkeep tick deletes what is queued, within a minute. Removing an account renames its folder aside
+  at once and deletes it in the background, so the same account added straight back gets a clean
+  folder under the same id. Once a launch, a sweep removes what the queue never saw: everything
+  1.0.0 left behind, and a body whose row was deleted while it was being fetched. Nothing is
+  deleted that a live row points at, that was written in the last ten minutes, or that lies
+  outside the store's own `bodies` folder.
+- **Redirect and Forward as Attachment could send the wrong message.** Both read the source at
+  `bodies::cache_path(account, id)` instead of the row's `raw_path`, and ids are reused — the next
+  message after the newest is deleted gets its id, and an account removed and added back can get
+  its own. So with a leftover file in place and the new message's body not yet downloaded, Redirect
+  resent the _deleted_ message, under the new one's name, to whoever was typed in. Both now read
+  the row's `raw_path`, recorded only once the file holds that message, and say "not downloaded"
+  otherwise. Redirect had also found the cache through `default_path()` rather than the store's
+  own folder, which `Db::folder` exists to prevent.
+- Forward as Attachment's "not downloaded" message had a long run of spaces in the middle: a
+  string literal broken across lines without its backslash.
+
+#### Incidents
+
+- **Last night's entry said the leftover files could not surface the wrong message.** It had
+  checked the reader and not the two compose paths that read the cache by id. Corrected where it
+  was written, and in `docs/PHASE-11-VERIFICATION.md` §13.7.
+- **The first screen recorder for the demo video was blocked as malware.** A PowerShell script
+  that copied the screen and the pointer into numbered frames in a loop — which is also what
+  spyware does — was stopped by AMSI before it ran a line: _"This script contains malicious content
+  and has been blocked by your antivirus software"_, and Defender recorded the detection. Deleted
+  rather than reworded: getting a screen-capturing script past an antivirus is the wrong skill to
+  exercise on someone's machine. The video is recorded with Windows' own Snipping Tool instead.
+
+#### Verified
+
+- `npm run verify`, clean: format, lint, stylelint, types, 35 unit files, **167 e2e**, `cargo fmt`,
+  clippy with `-D warnings`, **962 library tests** (eleven new) and every integration suite.
+- The Store configuration under clippy with `-D warnings`, clean.

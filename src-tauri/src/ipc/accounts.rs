@@ -695,6 +695,29 @@ pub async fn account_remove(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
             .await;
     }
 
+    // And its downloaded mail. Until 1.0.1 the rows went and every cached source stayed on
+    // disk. Renamed out of the way now, so an account added straight back under the same id
+    // starts with an empty folder, and deleted in the background, because for a large account
+    // that takes a while. Anything this misses, the upkeep tick and the next launch's sweep get.
+    match crate::sync::sources::set_aside_account(db.folder(), id) {
+        Ok(Some(aside)) => {
+            let folder = crate::sync::bodies::account_folder(db.folder(), id);
+            let _ = db
+                .write(move |tx| crate::sync::sources::forget_queued_under(tx, &folder))
+                .await;
+
+            tokio::task::spawn_blocking(move || {
+                if let Err(error) = std::fs::remove_dir_all(&aside) {
+                    tracing::warn!(%error, "a removed account's downloaded mail was not all deleted; the next launch's sweep will finish it");
+                }
+            });
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, "a removed account's downloaded mail could not be set aside; it will be deleted file by file");
+        }
+    }
+
     let _ = app.emit("accounts:changed", ());
     Ok(())
 }

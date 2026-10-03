@@ -134,13 +134,19 @@ pub async fn compose_redirect(
     cc: Vec<ComposeAddress>,
     bcc: Vec<ComposeAddress>,
 ) -> Result<i64, AppError> {
-    let (account_id, subject) = db
+    let (account_id, subject, raw_path) = db
         .read(move |conn| {
             Ok(conn
                 .query_row(
-                    "SELECT account_id, COALESCE(subject, '') FROM message WHERE id = ?1",
+                    "SELECT account_id, COALESCE(subject, ''), raw_path FROM message WHERE id = ?1",
                     rusqlite::params![message_id],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
                 )
                 .ok())
         })
@@ -158,20 +164,13 @@ pub async fn compose_redirect(
             message: "That account no longer exists.".into(),
         })?;
 
-    let root = crate::db::default_path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-
     // The original bytes, or nothing. A redirect that quietly fell back to rebuilding the
     // message would send the recipient our reconstruction of it under someone else's name.
-    let path = crate::sync::bodies::cache_path(&root, account_id, message_id);
-    let original = std::fs::read(&path).map_err(|_| AppError {
-        code: "not-cached".into(),
-        message: "This message has not been downloaded in full yet, so it cannot be \
-                  redirected. Open it once and try again."
-            .into(),
-    })?;
+    let original = read_source(
+        raw_path.as_deref(),
+        "This message has not been downloaded in full yet, so it cannot be redirected. Open it \
+         once and try again.",
+    )?;
 
     let request = crate::mail::outgoing::Redirect {
         original: &original,
@@ -200,6 +199,11 @@ pub async fn compose_redirect(
         .map(|address| address.email.trim().to_string())
         .filter(|address| !address.is_empty())
         .collect();
+
+    let root = crate::db::default_path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
 
     let id = outbox::enqueue(
         db.inner(),
@@ -304,8 +308,11 @@ pub async fn compose_reply(
     // Forward as Attachment is the only kind that carries a file, and it is the only kind that
     // can fail for a reason the user can act on: the original has to have been downloaded.
     let attachments = if kind == reply::Kind::ForwardAsAttachment {
+        let raw_path = db
+            .read(move |conn| Ok(recorded_source(conn, message_id)))
+            .await?;
         vec![attach_original(
-            source.account_id,
+            raw_path.as_deref(),
             message_id,
             &source.envelope.subject,
         )?]
@@ -336,21 +343,15 @@ pub async fn compose_reply(
 /// The name comes from the subject because the cache names files by id, and a recipient who
 /// receives `4213.eml` has no idea what it is.
 fn attach_original(
-    account_id: i64,
+    raw_path: Option<&str>,
     message_id: i64,
     subject: &str,
 ) -> Result<PickedFile, AppError> {
-    let root = crate::db::default_path()
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_default();
-
-    let cached = crate::sync::bodies::cache_path(&root, account_id, message_id);
-    let bytes = std::fs::read(&cached).map_err(|_| AppError {
-        code: "not-cached".into(),
-        message: "This message has not been downloaded in full yet, so it cannot be forwarded                   as an attachment. Open it once and try again."
-            .into(),
-    })?;
+    let bytes = read_source(
+        raw_path,
+        "This message has not been downloaded in full yet, so it cannot be forwarded as an \
+         attachment. Open it once and try again.",
+    )?;
 
     let name = attachment_name(subject);
     let path = std::env::temp_dir().join(format!("halcyon-fwd-{message_id}-{name}"));
@@ -365,6 +366,32 @@ fn attach_original(
         filename: name,
         size: bytes.len() as i64,
     })
+}
+
+/// The source the row says this message has, if any.
+fn recorded_source(conn: &rusqlite::Connection, message_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT raw_path FROM message WHERE id = ?1",
+        rusqlite::params![message_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// A message's cached source, read through its row.
+///
+/// Through `raw_path`, never `bodies::cache_path`. Ids are reused, so the file named for a
+/// message's id can still hold the source of a message deleted before it was — and Redirect, which
+/// once read it that way, would have sent that one, under the new message's name, to whoever the
+/// user typed in. `raw_path` is recorded only once the file holds this message's own source.
+fn read_source(raw_path: Option<&str>, not_cached: &str) -> Result<Vec<u8>, AppError> {
+    raw_path
+        .and_then(|path| std::fs::read(path).ok())
+        .ok_or_else(|| AppError {
+            code: "not-cached".into(),
+            message: not_cached.into(),
+        })
 }
 
 /// A filename for a forwarded message, from its subject.
@@ -1442,5 +1469,80 @@ mod describe_tests {
         let described = compose_describe_files(Vec::new()).await.expect("describe");
         assert!(described.files.is_empty());
         assert!(described.skipped.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn store_with(raw_path: Option<&str>) -> rusqlite::Connection {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+            [],
+        )
+        .expect("account");
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (1, 1, 'INBOX', 'Inbox', 'inbox')",
+            [],
+        )
+        .expect("mailbox");
+        conn.execute(
+            "INSERT INTO message (id, account_id, mailbox_id, uid, date_sent, date_received, raw_path)
+             VALUES (7, 1, 1, 7, 0, 0, ?1)",
+            rusqlite::params![raw_path],
+        )
+        .expect("message");
+        conn
+    }
+
+    #[test]
+    fn a_stale_file_at_a_reused_id_is_never_sent_as_this_message() {
+        // Message 7 was deleted with its source still on disk, and the id was handed to a new
+        // message whose body has not been downloaded. The file named for id 7 is the old one;
+        // Forward as Attachment and Redirect used to read it by that name and send it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let stale = crate::sync::bodies::write_cache(dir.path(), 1, 7, b"the deleted message")
+            .expect("write");
+        assert!(stale.exists());
+
+        let conn = store_with(None);
+        let recorded = recorded_source(&conn, 7);
+
+        assert_eq!(recorded, None);
+        let refused = attach_original(recorded.as_deref(), 7, "New message").expect_err("refused");
+        assert_eq!(refused.code, "not-cached");
+        assert!(
+            !refused.message.contains("  "),
+            "the message has a run of spaces in it"
+        );
+    }
+
+    #[test]
+    fn a_recorded_source_is_attached_as_a_copy() {
+        const SOURCE: &[u8] = b"Subject: Hi\r\n\r\nbody";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = crate::sync::bodies::write_cache(dir.path(), 1, 7, SOURCE).expect("write");
+        let path = source.to_string_lossy().to_string();
+
+        let conn = store_with(Some(&path));
+        let recorded = recorded_source(&conn, 7);
+        assert_eq!(recorded.as_deref(), Some(path.as_str()));
+
+        let attached =
+            attach_original(recorded.as_deref(), 7, "Quarterly figures").expect("attached");
+        assert_eq!(attached.size, SOURCE.len() as i64);
+        assert!(attached.filename.contains("Quarterly figures"));
+        assert_ne!(
+            attached.path, path,
+            "the cache file itself was handed to the composer"
+        );
+        assert_eq!(std::fs::read(&attached.path).expect("copy"), SOURCE);
+
+        let _ = std::fs::remove_file(&attached.path);
     }
 }

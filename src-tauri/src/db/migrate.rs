@@ -93,6 +93,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "favourites_roles_rebuild",
         sql: include_str!("../../migrations/0014_favourites_roles_rebuild.sql"),
     },
+    Migration {
+        version: 15,
+        name: "discarded_sources",
+        sql: include_str!("../../migrations/0015_discarded_sources.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.

@@ -676,7 +676,9 @@ it did not.
   does. Checked after a reload: one row, named with the account's address. Its value was not read.
 - ~~**Submit for certification**~~ — pressed at the user's request at 00:55 local time on
   2026-10-03 (19:25 UTC on 2 October), after WACK on the uploaded package and the privacy page's
-  update to 1.1. The overview then read _In certification_, at _Pre-processing_.
+  update to 1.1. The overview then read _In certification_, at _Pre-processing_. **Approved and
+  live by the morning**: Partner Center reads _In Microsoft Store_, and
+  <https://apps.microsoft.com/detail/9ND14F638LPJ> answers 200.
 - **Clean install and uninstall on a fresh Windows 11 VM** — no VM on this machine.
 - **Data paths, Credential Manager, toasts, `mailto:`, `.eml` and the startup task in a sideloaded
   install** — verified on 2026-08-31 and unchanged in kind since; not re-walked here.
@@ -743,7 +745,31 @@ were reloaded afterwards and read back field by field.
 - **Deviation from docs/04 Phase 4, _remove with purge_: removing an account leaves its mail on
   disk.** `account_remove` deletes the rows, the search entries and the credential, but every
   downloaded body is also cached as `bodies/<account>/<message>.eml`, attachments included, and
-  no code deletes those — on account removal or on Erase Deleted Items. Not a wrong-message risk
+  no code deletes those — on account removal or on Erase Deleted Items. ~~Not a wrong-message risk
   (the reader opens only the `raw_path` on the row, set after a reused id's file is rewritten),
-  but a privacy gap. Not fixed yet; the privacy policy's new Google section promises only what is
-  true now — deleting the data folder deletes the mail.
+  but a privacy gap.~~ **That was wrong:** the reader opens the row's `raw_path`, but Redirect and
+  Forward as Attachment read `bodies::cache_path(account, id)` directly, so after an id was reused
+  they could send a deleted message in place of the selected one. **Fixed the next morning** —
+  §13.8.
+
+### 13.8 The leftover mail, fixed (2026-10-03, for 1.0.1)
+
+- **Every discarded source is deleted, from any deletion path.** Migration 0015 adds
+  `discarded_source` and two triggers on `message`, after delete and after `raw_path` changes,
+  that queue the file the row pointed at. `sync::sources::purge_discarded` runs on every upkeep
+  tick and deletes queued files, so deleted mail leaves the disk within a minute. It never
+  deletes a path a live row points at again (a reused id, refetched), a file written in the last
+  ten minutes (the engine writes a body before recording its path), or anything outside the
+  store's own `bodies` folder.
+- **Removing an account renames its folder aside at once** (`<id>.discarded-<nanos>`) and
+  deletes it in the background, so an account re-added under the same id starts empty; its
+  queued paths are forgotten by exact prefix, not `LIKE`.
+- **Once a launch, a sweep** deletes what the queue never heard of — sources left by 1.0.0, and a
+  body whose row was deleted mid-fetch — comparing by account and id, not by path, so a store
+  moved to another folder keeps its sources.
+- **Redirect and Forward as Attachment read the row's `raw_path`**, never the path named for the
+  id. A message whose source was never recorded now says it has not been downloaded, rather than
+  sending whatever file has its id.
+- Tested: eleven new tests — the triggers, a purge, a reused id, the grace period, a foreign path,
+  the set-aside and its prefix, both sweeps, and Forward as Attachment refusing a stale file.
+  `npm run verify` clean (962 library tests) and the Store configuration clean under clippy.

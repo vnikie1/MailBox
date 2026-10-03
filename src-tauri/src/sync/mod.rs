@@ -15,6 +15,7 @@ pub mod persist;
 pub mod sender;
 pub mod session;
 pub mod smtp;
+pub mod sources;
 pub mod threading;
 pub mod upkeep;
 pub mod utf7;

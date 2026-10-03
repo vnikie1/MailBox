@@ -239,6 +239,33 @@ pub async fn run(db: Db, events: Arc<dyn Events>) {
                 tracing::warn!(%error, "upkeep tick failed");
             }
         }
+
+        // The cached sources of messages that are gone, so that deleting mail deletes it from
+        // the disk within a minute. Every tick, because on almost all of them the queue is empty
+        // and finding that out is one read. See `sources`.
+        match super::sources::purge_discarded(&db, super::sources::GRACE).await {
+            Ok(purged) if purged.deleted > 0 => {
+                tracing::debug!(deleted = purged.deleted, "discarded sources deleted");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "discarded sources could not be purged"),
+        }
+
+        // And once a launch, what the queue never heard of. On the first tick rather than at
+        // start-up, so it is not competing with the first sync for the disk.
+        if count == 1 {
+            match super::sources::sweep(&db, super::sources::GRACE).await {
+                Ok(swept) if swept.files > 0 || swept.folders > 0 => {
+                    tracing::info!(
+                        files = swept.files,
+                        folders = swept.folders,
+                        "leftover sources swept"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "leftover sources could not be swept"),
+            }
+        }
     }
 }
 
