@@ -61,9 +61,9 @@ three months without a submission. Submit before **25 November 2026**, or re-res
 
 | | |
 | --- | --- |
-| File | `src-tauri/target/msix/Halcyon_1.0.0.0_x64.msix` — **unsigned**, which is what the Store wants: Microsoft signs it on ingestion |
+| File | `src-tauri/target/msix/Halcyon_1.0.1.0_x64.msix` (10,494,651 bytes, built 2026-11-15; 1.0.0.0 before it) — **unsigned**, which is what the Store wants: Microsoft signs it on ingestion |
 | Built by | `powershell -ExecutionPolicy Bypass -File tools/make-msix.ps1` (updater compiled out, checked in the binary) |
-| Identity | `Unikie1.HalcyonMail` · `CN=AFB09E9D-38C1-4779-9510-AF7E1F2C78F4` · `Unikie1` · `1.0.0.0` · x64 |
+| Identity | `Unikie1.HalcyonMail` · `CN=AFB09E9D-38C1-4779-9510-AF7E1F2C78F4` · `Unikie1` · `1.0.1.0` · x64 |
 | Minimum OS | Windows 11 (10.0.22000.0) |
 
 Every later submission needs a higher version: bump `version` in `src-tauri/tauri.conf.json` and
@@ -176,8 +176,21 @@ Passwords and sign-in tokens are kept in Windows Credential Manager, never in a 
 
 ### What's new in this version
 
-Leave it **blank** for this submission: the form says to, for a product's first. From 1.0.1 on,
-it is the release notes.
+Blank for 1.0.0.0, as the form says for a product's first submission. From 1.0.1 on, it is the
+release notes. For 1.0.1.0 (2026-11-15), the fixes from the 2026-11-14 audit:
+
+```text
+Version 1.0.1 fixes more than a hundred problems found in a full review of the app.
+
+• Stability: a message built with very deeply nested parts can no longer close the app, and every message shows its own content.
+• Your mail stays as you left it: rules, the junk filter and notifications act only on new mail in your Inbox.
+• Drafts are saved, sent and deleted reliably, and Undo Send and Send Later behave as they say.
+• Sync recovers from dropped connections, finds mail that went missing, and shows new mail promptly.
+• Safety: saved attachments are marked as downloaded from the internet, and a link that goes somewhere other than it says asks before opening.
+• Windows: the taskbar badge, notifications, the jump list and Run at login work as they should.
+• Search, smart mailboxes and the message list are more accurate.
+• Writing mail: names with commas, duplicate recipients, signatures and dragging recipients between To, Cc and Bcc.
+```
 
 ### Product features
 

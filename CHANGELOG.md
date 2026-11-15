@@ -10100,3 +10100,26 @@ the updater out. The Store update is 1.0.1, below under its own heading.
   it drives the release build for the demo video Google's verification asks for, against a scratch
   store, while a person records with Snipping Tool and signs in to Google in their own browser.
   Checked first for addresses and secrets: the Gmail address comes from `HALCYON_DEMO_EMAIL`.
+
+### Halcyon Mail 1.0.1, for the Store
+
+#### Changed
+
+- **Version 1.0.1** in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, and
+  their lockfiles; `make-msix.ps1` stamps the package `1.0.1.0`. It carries every audit fix.
+
+#### Notes
+
+- **`Halcyon_1.0.1.0_x64.msix`, 10,494,651 bytes**, built by `tools/make-msix.ps1` with the updater
+  compiled out (the script checks the binary), unsigned for the Store to sign. Its manifest, read
+  back from the package: `Unikie1.HalcyonMail` `1.0.1.0`, x64, Windows 10.0.22000.0 and later.
+- **The release notes** are in `store/README.md` under _What's new in this version_, for Partner
+  Center's field of that name. Every line was checked against a fix in this entry or the
+  2026-11-14 one.
+- **`main` was fast-forwarded to the audit's commit and pushed**, with the demo-video commit and
+  the previous session's unpushed 2026-10-03 commit: `b7220c7..fb6e2c8`.
+- **Partner Center is not filled in yet**: the Chrome extension was not connected when it was
+  tried. The package is 9 KB over the extension's 10 MB upload limit, so it is uploaded by hand
+  in any case. Submitting stays the user's act.
+- The App Certification Kit was not run on this package, as it was on 1.0.0.0: that installs it
+  here, signed with the test certificate. The Store runs its own certification.
