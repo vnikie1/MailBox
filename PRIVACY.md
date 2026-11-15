@@ -2,8 +2,9 @@
 
 **Halcyon, version 1.2. Last updated 3 October 2026.**
 
-> Published at <https://vnikie1.github.io/halcyon-mail/privacy.html>, which is the URL given to
-> the Microsoft Store. This file is the source it is generated from; the two must not drift.
+> Published at <https://halcyon.unikie1.com/privacy.html>, which is the URL given to
+> the Microsoft Store and to Google (the old `vnikie1.github.io/halcyon-mail/` address redirects
+> there). This file is the source it is generated from; the two must not drift.
 
 Halcyon is a mail client that runs on your computer. It has no server, no account, and no
 business model that involves knowing anything about you.

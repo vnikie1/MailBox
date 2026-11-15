@@ -10118,8 +10118,191 @@ the updater out. The Store update is 1.0.1, below under its own heading.
   2026-11-14 one.
 - **`main` was fast-forwarded to the audit's commit and pushed**, with the demo-video commit and
   the previous session's unpushed 2026-10-03 commit: `b7220c7..fb6e2c8`.
-- **Partner Center is not filled in yet**: the Chrome extension was not connected when it was
-  tried. The package is 9 KB over the extension's 10 MB upload limit, so it is uploaded by hand
-  in any case. Submitting stays the user's act.
+- **Halcyon Mail 1.0.1.0 was submitted for certification on 2026-11-15** (submission 2), at the
+  user's request; Partner Center reads _Update in certification_, at pre-processing. The user
+  uploaded the package by hand (below); Partner Center validated it as `1.0.1.0`, x64,
+  _Windows.Desktop_ from 10.0.22000.0, and itself marked `1.0.0.0` for removal as superseded, which
+  saving the page did. The `runFullTrust` justification (497 characters, as in `store/README.md`)
+  carried over from 1.0.0.0, which appears once a package declaring it is in the submission.
+  Publishing is left at _as soon as it passes certification_, as for 1.0.0.0.
+- **Partner Center: submission 2 was built as a draft first**, once the Chrome extension was
+  connected.
+  _What's new in this version_ on the English (United Kingdom) listing holds the release notes
+  above (943 of 1,500 characters) and is saved; the listing reads _Updated_. Pricing, properties,
+  age ratings and the rest of the listing are carried over unchanged. The notes for certification
+  now live on the product-level _Additional Testing Information_ page, not in the submission's
+  options, and still hold the reviewer's account from 1.0.0.0. The package is 9 KB over the
+  extension's 10 MB upload limit, so the user dragged it in.
+- **The extension refused the package on size alone**: its cap is 10 MiB a call, and the package is
+  8,891 bytes over. What was found looking for 9 KB: every PNG in `src-tauri/msix/Assets` carries a
+  5,758-byte `caBX` chunk, C2PA Content Credentials recording that Claude provided the file. That
+  is about 294 KB of the package across its 51 icons. Left in place: removing provenance to get
+  under a tool's limit is not a call to make in passing, and dropping the six unqualified icon
+  copies `make-msix.ps1` adds on purpose would change a package WACK and the Store already passed.
 - The App Certification Kit was not run on this package, as it was on 1.0.0.0: that installs it
   here, signed with the test certificate. The Store runs its own certification.
+
+### Google verification: where it stands
+
+#### Notes
+
+- **Nothing has been submitted for the Gmail scope.** The Verification centre says data-access
+  verification "is not required", because Data access still declares no scope, which is what
+  starts the restricted-scope review (`src-tauri/oauth/README.md`, route B, step 3).
+- **One brand check ran, and failed**, at an unrecorded date: "The website of your homepage URL
+  'https://vnikie1.github.io/halcyon-mail/' is not registered to you." That is already fixed:
+  Search Console shows the publisher as verified owner of `https://vnikie1.github.io/` by the HTML
+  file, and the file, the homepage and the privacy policy all answer 200. Most likely the check
+  ran when the app was published on 2026-10-02, a day before the site was verified. It is asked
+  again ("I have fixed the issues") with the submission, not on its own.
+- **No demo video was found** on the publisher's YouTube channel or in their Google Drive; the user
+  had uploaded one and deleted it since. Its source is on this PC, a Snipping Tool recording of
+  2026-10-04 (5 min 21 s, 3328×1968), made with `tools/demo-video.cjs`. Its frames were checked
+  by serving it to a Chrome tab on 127.0.0.1 and seeking. It covers every step with captions, but
+  cannot go to Google as it is:
+  - **the client ID never shows.** The address bar is cut at `…/auth?client_i…`, and Google asks
+    for the `client_id` to be readable;
+  - **the consent screen does not list the Gmail permission.** The test account had granted access
+    before, so Google showed "Halcyon already has some access" instead of the scope;
+  - **a terminal window covers the app** for about half a minute, through _Reading_ and _Moving_,
+    and again at the end;
+  - Windows' Live Captions bar sits over the top of the app throughout, and Chrome's own
+    "Sign in to Chrome" and an Adblock Plus page take up a minute of the sign-in.
+
+  Trimming fixes none of the first three, so the video is to be recorded again.
+
+---
+
+## 2026-11-16 — Google's demo video, recorded again
+
+### Changed
+
+- **`tools/demo-video.cjs` finds its way to the account form instead of following a script.**
+  `reachEmailForm` looks at what the account assistant shows and takes the next step (the Google
+  tile and Continue, or the welcome's _Add your account_) until the email field is there, for up
+  to two minutes. A page that does not answer counts as "not there yet", and a caption that cannot
+  be shown is logged rather than ending the take. The tiles are checked before the welcome's
+  button, which stays in the page behind the open assistant, where a click would land on the
+  assistant's backdrop.
+
+### Incidents
+
+- **The first take of the day stopped ten seconds in**, before the browser opened: "could not find
+  Continue", one step after the Google tile. The user was starting the Snipping Tool over RustDesk
+  from a MacBook at the time. A rehearsal straight after failed differently, "Runtime.evaluate got
+  no answer in 10 s", while the Snipping Tool was still on screen, and the same rehearsal passed
+  untouched a minute later. Not pinned down further: the overlay, a click or an Esc reaching the
+  window are all possible, and the script now rides out each. Nothing reached Google; the demo copy
+  of the app closed and the window state was put back both times.
+- **The second take, with a 60-second head start, waited for a form that had come and gone.** The
+  app's log has the test account syncing 45 s after the demo began, with none of the script's own
+  steps logged: the account was added at the keyboard, and `reachEmailForm` looked for the email
+  field for two minutes and gave up, so reading, sending and deleting never ran. It now also
+  returns when the sign-in is under way or over (on a first run the only Cancel is the one shown
+  while the browser has the sign-in; the report's Add Account, or a message in the list, means it
+  is done) and the run carries on from there. That sign-in granted the account access again, so
+  it has to be removed at Google once more before the next take, or the consent screen will again
+  not name the permission.
+
+- **The third take ran end to end, and I told the user its recording had frozen. It had not.**
+  The frames I pulled showed the welcome screen throughout, and I blamed the recording, made over
+  RustDesk from a MacBook, and asked for a retake on the Mac. The user watched it and said
+  everything was there; they were right. Today's Snipping Tool files hold **one keyframe** for the
+  whole video (October's had one a second), and the extraction seeked a `<video>` in a headless
+  Edge, which hands back that first keyframe for most positions. Checking the October file the same
+  way "passed" only because it has keyframes everywhere — not proof that the method worked. Done
+  properly the second time: the MP4's sample table read directly, every frame decoded in order with
+  WebCodecs, and frames kept at the times wanted.
+- **The take is good.** `Recording 2026-11-16 010407.mp4`, 4 min 53 s, the user's own save of it:
+  the account added in Halcyon; Google's sign-in, with the address bar scrolled to
+  `client_id=542527954814-fm5650n1pnhcj400s8c21iq12qtqu4mi.apps.googleusercontent.com` and held
+  from 132 to 135 s; "Google hasn't verified this app", Advanced, Go to Halcyon; the consent screen
+  "Halcyon wants access to your Google Account" naming _Read, compose, send and permanently delete
+  all your email from Gmail_, and Continue, 140–142 s; then, each under its caption, the mailbox
+  downloaded, a message sent to the account and arriving, read, moved, deleted to the Bin, and
+  deleted permanently, ending on "All of this mail stays on this PC". About a minute of Chrome's own
+  "Sign in to Chrome" comes before Google's page, harmless. The client ID matches
+  `src-tauri/oauth/clients.env`. Frames and scratch images were deleted after.
+
+### Notes
+
+- Rehearsals (`HALCYON_DEMO_DRY_RUN=1`) pass over RustDesk: the welcome, _Add your account_, the
+  Google tile, and the form filled with Continue enabled, in about twenty seconds.
+- **YouTube:** the take is up as **unlisted**, <https://youtu.be/jw6VUiP64i0>, titled "Halcyon Mail –
+  Google OAuth verification demo (Gmail scope)", not made for kids, with a description that gives
+  the client ID, the scope and a timestamp for each step. YouTube's copyright and policy checks
+  were left to finish ("Checks complete. No issues found.") before it was made unlisted: saving
+  earlier offered _Publish anyway_ with a warning of a possible strike, and that was declined.
+- **Google Auth Platform, filled in:** the 120×120 logo uploaded on _Branding_ ("Branding changes
+  saved"); `https://mail.google.com/` declared on _Data access_ with the feature _Email client_,
+  the justification (IMAP and SMTP accept OAuth only with this scope, permanent deletion,
+  everything local, Limited Use) and the video link ("Data access changes saved"). The project has
+  one OAuth client, the desktop one in the video. Nothing was submitted: _Prepare for
+  verification_ stays disabled until the branding is verified and published, and asking Google to
+  re-check the branding ("I have fixed the issues") is the publisher's to send. The status table in
+  `src-tauri/oauth/README.md`, route B, says the same.
+- **The branding re-check failed again within a minute**, on the same finding: "The website of your
+  homepage URL 'https://vnikie1.github.io/halcyon-mail/' is not registered to you." The user sent
+  it ("I have fixed the issues"); the console's notifications show _Verify branding information_
+  completing a minute later and the finding back in place, with no review in progress. What was
+  ruled out: the Cloud project has one Owner, and it is the account that owns the Search Console
+  property `https://vnikie1.github.io/` (verified by HTML file since 2026-10-03, still live). What
+  is left is the host: Google asks for a homepage "hosted on a verified domain you own", and
+  developers on shared hosts (`vercel.app`, `pages.dev`) report this exact finding despite
+  verified URL-prefix properties, some despite DNS verification too, with no fix from Google in
+  any thread found.
+- **Search Console: `https://vnikie1.github.io/halcyon-mail/` added as its own URL-prefix property**,
+  at the user's go-ahead, so the homepage's exact address is registered too. Search Console
+  verified it at once through the parent property. The user then offered their own domain,
+  `unikie1.com`: its DNS is on Cloudflare, it serves no website yet, and its only TXT record is
+  Cloudflare's mail SPF. Moving the homepage there, verified by DNS, is the route proposed.
+- **The public site moved to `https://halcyon.unikie1.com/`**, on the user's own domain, at their
+  go-ahead, so Google's brand check meets a homepage on a domain verified by DNS:
+  - Search Console: `unikie1.com` added as a **Domain** property and verified by a root TXT record
+    (`google-site-verification=…`). Search Console offered to verify by connecting to the
+    Cloudflare account; the record was added by hand instead, rather than grant Google access to
+    the DNS. **The record must stay**, or the verification lapses.
+  - Cloudflare: that TXT record, and `halcyon` CNAME `vnikie1.github.io`, DNS only (GitHub has to
+    see the name to issue the certificate). The domain's other records were not touched.
+  - GitHub Pages: custom domain `halcyon.unikie1.com` set through the API, which committed `CNAME`
+    to `vnikie1/halcyon-mail` (`d0c2c0c`); certificate approved within minutes; HTTPS enforced.
+    The old `vnikie1.github.io/halcyon-mail/` addresses answer 301 to the new ones. This PC's own
+    resolver kept the negative answer from a lookup made before the record existed, so the site
+    was checked through GitHub's address directly.
+  - Google Branding: homepage `https://halcyon.unikie1.com/`, privacy
+    `https://halcyon.unikie1.com/privacy.html`, and `unikie1.com` as the only authorised domain
+    (the page itself flagged "Missing domain: unikie1.com" until it was). Saved.
+  - `PRIVACY.md`, `SECURITY.md`, `README.md`, `store/README.md` and `src-tauri/oauth/README.md`
+    point at the new address. Partner Center still has the github.io privacy link, which
+    redirects; it changes with the next submission, not the one in certification.
+- **Google verified the branding** once the homepage was on `halcyon.unikie1.com`: the user sent
+  the re-check straight away, and Branding now reads "Your branding has been verified, but is not
+  yet being shown to users. Publish it before the verified result expires in 7 days." Publishing
+  it is the publisher's click, and it is what turns on _Prepare for verification_.
+- **Branding published by the user**; the Verification centre then reads "Your branding has been
+  verified and is being shown to users", and _Prepare for verification_ opened. Its summary
+  carried everything entered earlier (name, logo, the `halcyon.unikie1.com` links, `unikie1.com`,
+  the Gmail scope under _Email client_ with its justification, the video link). The one empty
+  field, _Additional info_, now holds 960 of 1,000 characters: the local-client statement for
+  CASA (data fetched, stored and processed only on the user's PC, no server, no telemetry, tokens
+  in Credential Manager), the Store product ID, the public source repository, the single Desktop
+  OAuth client, and where in the video the client ID and the consent screen are. **Confirm**, which
+  submits it, is left for the user.
+- **Confirm opened Google's _Verification questionnaire_.** Its four questions are answered _No_:
+  personal use only, internal use only, development/testing only, a WordPress Gmail SMTP plug-in.
+  Its two acknowledgements are left for the user, being their attestations: that the app meets
+  the verification requirements, and that restricted scopes require a CASA assessment before
+  approval, independent and recertified yearly. The second reads as unconditional, against
+  Google's policy that local client apps are exempt, which the _Additional info_ claims.
+- **Submitted for verification by the user on 2026-11-16.** The Verification centre reads "Your
+  app's data access is under review". Its progress panel: the Trust and Safety team has the form,
+  will write to the contact address if needed, expects to take 4–6 weeks, and sends a first email
+  within 3–5 days. _Homepage requirements_ and _Branding guidelines_ are ticked (reviewed 16 Nov);
+  _Privacy policy requirements_ is under review; _App functionality_, _Appropriate data access_,
+  _Request minimum scopes_ and _Additional requirements_ are still to come. Until then the
+  current consent screen stays in use, with the unverified warning and the 100-user cap.
+
+### Verified
+
+- `npm run verify` with `CARGO_BUILD_JOBS=6`, clean: format, lint, stylelint, types, **399 unit**,
+  **181 e2e**, `cargo fmt`, clippy, **1,189 Rust tests** (24 ignored, the rig gates).

@@ -1,6 +1,6 @@
 # Reporting a security problem
 
-> Published at <https://vnikie1.github.io/halcyon-mail/security.html>.
+> Published at <https://halcyon.unikie1.com/security.html>.
 
 Halcyon holds people's entire private correspondence and their mail passwords. A vulnerability
 here is serious, and a report about one is welcome — including one that shows something claimed

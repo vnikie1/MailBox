@@ -90,15 +90,15 @@ What sign-in then looks like: _"Google hasn't verified this app"_ → **Advanced
 
 Removes the warning screen and the 100-user cap.
 
-**Prepared on 2026-10-03, not yet submitted:**
+**Submitted 2026-11-16, under review (4–6 weeks; first email within 3–5 days):**
 
 | Step | State |
 | --- | --- |
-| 1. Domain | **Done.** `https://vnikie1.github.io/` is verified in Search Console (URL-prefix property, account vnikie1@gmail.com) by the file `googlebf2615cb1c964bad.html` in the repository `vnikie1/vnikie1.github.io`, made for the purpose. **Do not delete that file**: Google re-checks it. A _Domain_ property was not possible — it needs a DNS record, and `github.io` is GitHub's. Homepage and privacy policy are live and say what Google asks for (privacy policy 1.2, _Google accounts_) |
-| 2. Branding | Logo ready: `consent-logo-120x120.png`, beside this file — the designer's 300 px Store icon, downscaled. **Not uploaded**: the Branding page says uploading a logo means the app must then be submitted for verification, so it goes up with the submission |
-| 3. Data Access | Nothing declared yet, which is why the Verification Center says data-access verification "is not required". Declaring `https://mail.google.com/` is what starts the restricted-scope review |
-| 4. Demo video | To record — the shot list is under step 4 below. It needs a real Google sign-in and the publisher's YouTube account |
-| 5. Submit | Not started |
+| 1. Domain | **Moved to `unikie1.com` on 2026-11-16.** Google's brand check refused the github.io homepage twice ("homepage URL … is not registered to you"), as it does for other shared hosts. The site is now served at <https://halcyon.unikie1.com/> (GitHub Pages custom domain; a `halcyon` CNAME on Cloudflare, DNS only), and `unikie1.com` is a Search Console **Domain** property verified by a root TXT record — **never remove that record**. Branding names the new homepage and privacy links and `unikie1.com` as the only authorised domain. What follows is the earlier setup, kept because the old address still redirects: `https://vnikie1.github.io/` is verified in Search Console (URL-prefix property, account vnikie1@gmail.com) by the file `googlebf2615cb1c964bad.html` in the repository `vnikie1/vnikie1.github.io`, made for the purpose. **Do not delete that file**: Google re-checks it. A _Domain_ property was not possible — it needs a DNS record, and `github.io` is GitHub's. Homepage and privacy policy are live and say what Google asks for (privacy policy 1.2, _Google accounts_) |
+| 2. Branding | **Logo uploaded 2026-11-16**: `consent-logo-120x120.png`, beside this file — the designer's 300 px Store icon, downscaled. An earlier brand check, probably run at publishing on 2026-10-02, failed with "homepage URL … is not registered to you", the day before the site was verified. Re-checking it is **Branding → View issues → "I have fixed the issues" → Proceed**, the publisher's to send; Google says to allow 24 hours after verifying ownership, long past |
+| 3. Data Access | **Declared 2026-11-16**: `https://mail.google.com/` (restricted, _Gmail scopes_), feature _Email client_, the justification in step 3 below in fuller form (820 of 1,000 characters), and the video link. The only OAuth client in the project is the desktop one the builds carry, which the video shows |
+| 4. Demo video | **Recorded 2026-11-16** with `tools/demo-video.cjs` and a test account, checked frame by frame, and **unlisted** at <https://youtu.be/jw6VUiP64i0> (4:54). The client ID is readable at 2:12–2:15 and the consent screen naming the Gmail permission at 2:20 |
+| 5. Submit | Branding **verified and published 2026-11-16** on the new domain. **Prepare for verification** filled the same day: its _Additional info_ states the local-only architecture for CASA (step 6), the Store product ID, the public source and the single Desktop client. **Submitted by the publisher the same day**; the questionnaire answered No to personal, internal, testing and WordPress use |
 
 What Google asks for:
 

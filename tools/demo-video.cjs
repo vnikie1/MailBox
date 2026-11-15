@@ -170,7 +170,10 @@ class Page {
    * into the video, because the recording is the Snipping Tool's and nothing here touches it.
    */
   async caption(text) {
-    await this.eval(`(() => {
+    // A caption is never worth failing a take over: a page that did not answer in time still
+    // gets the next one.
+    await this.eval(
+      `(() => {
       let element = document.getElementById('halcyon-demo-caption')
       if (!element) {
         element = document.createElement('div')
@@ -187,7 +190,10 @@ class Page {
       element.textContent = ${JSON.stringify(text)}
       element.style.display = ${JSON.stringify(text)} ? 'block' : 'none'
       return true
-    })()`)
+    })()`,
+    ).catch((error) => {
+      log(`caption not shown: ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
 
   close() {
@@ -237,6 +243,55 @@ const fieldLabelled = (text) => `(() => {
 /** The account's Bin, which Gmail calls Bin or Trash depending on the account's language. */
 // A sidebar row's text content is its name and then its count, run together: "Bin2", "Inbox3".
 const bin = `[...document.querySelectorAll('[role="treeitem"]')].find((t) => /^(Bin|Trash)\\d*$/.test(t.textContent.trim()))`
+
+/**
+ * To the account form's email field, from wherever the assistant has got to, and again if
+ * something knocks it back. A click or an Esc while the recording is being set up can open the
+ * assistant early, close it, or leave the Google tile unpicked; the take of 2026-11-16, started
+ * over RustDesk, failed on "could not find Continue" one step after the tile. So each pass looks
+ * at what is there and takes the next step, and only gives up after a minute.
+ *
+ * The tiles are checked before the welcome's button, which stays in the page behind the open
+ * assistant: a click at its place would land on the assistant's backdrop instead.
+ */
+async function reachEmailForm(page) {
+  // A rehearsal straight after that take failed differently, "Runtime.evaluate got no answer in
+  // 10 s", while the Snipping Tool was on screen, and passed untouched a minute later. So a page
+  // that does not answer is waited out here like one that is not there yet.
+  const has = (expression) => page.eval(`!!${expression}`).catch(() => false)
+  const step = (click) =>
+    click.catch((error) => {
+      log(
+        `the account assistant: ${error instanceof Error ? error.message : String(error)}; looking again`,
+      )
+    })
+
+  // Or past it, done by hand: the third take of 2026-11-16 had the account added at the keyboard
+  // during the head start, and this waited two minutes for a form that had come and gone. On a
+  // first run the only Cancel is the one shown while the browser has the sign-in, and the report's
+  // Add Account or a message in the list means it is over.
+  const beyond = `!!${buttonWithText('Cancel')} || !!${buttonWithText('Add Account')} || ${rows}.length > 0`
+
+  const deadline = Date.now() + 120_000
+  while (Date.now() < deadline) {
+    if (await has(fieldLabelled('Email Address'))) return 'form'
+    if (await page.eval(beyond).catch(() => false)) return 'beyond'
+    if (await has(googleTile)) {
+      await step(page.click(googleTile, 'the Google tile'))
+      await sleep(1500)
+      await step(page.click(buttonWithText('Continue'), 'Continue'))
+      await sleep(1500)
+      continue
+    }
+    if (await has(buttonWithText('Add your account'))) {
+      await step(page.click(buttonWithText('Add your account'), 'Add your account'))
+      await sleep(1800)
+      continue
+    }
+    await sleep(500)
+  }
+  throw new Error('could not reach the account form in two minutes')
+}
 
 function running() {
   const listed = execFileSync('tasklist', ['/FI', 'IMAGENAME eq halcyon.exe', '/NH'], {
@@ -454,48 +509,38 @@ async function main() {
     await page.caption('Adding a Google account: Add your account → Google.')
     await sleep(2500)
 
-    // From wherever the assistant has got to. A click while the recording was being set up can
-    // open it early, and the run should carry on from there rather than fail on a missing button.
-    await page.until(
-      `!!${buttonWithText('Add your account')} || !!${googleTile} || !!${fieldLabelled('Email Address')}`,
-      'the welcome or the account assistant',
-    )
-    if (await page.eval(`!!${buttonWithText('Add your account')}`)) {
-      await page.click(buttonWithText('Add your account'), 'Add your account')
-      await sleep(1800)
-    }
-    if (!(await page.eval(`!!${fieldLabelled('Email Address')}`))) {
-      await page.until(`!!${googleTile}`, 'the provider tiles')
-      await page.click(googleTile, 'the Google tile')
-      await sleep(1500)
+    const reached = await reachEmailForm(page)
+    if (reached === 'beyond') {
+      log('the account was added at the keyboard -- carrying on from the sign-in')
+    } else {
+      await sleep(1000)
+
+      await page.click(fieldLabelled('Name'), 'the name field')
+      await page.press('a', 'KeyA', 65, 2)
+      await page.type('Halcyon Demo')
+      await sleep(500)
+      await page.click(fieldLabelled('Email Address'), 'the email field')
+      await page.press('a', 'KeyA', 65, 2)
+      await page.type(email)
+      await sleep(1200)
+
+      await page.caption(
+        "Halcyon opens Google's own sign-in page in the default browser. It never sees the Google password.",
+      )
+      await sleep(4000)
+
+      // A rehearsal stops here, before anything opens the browser or talks to Google.
+      if (dryRun) {
+        const enabled = await page.eval(`!${buttonWithText('Continue')}.disabled`)
+        log(
+          `dry run: the account form is filled and Continue is ${enabled ? 'enabled' : 'DISABLED'}`,
+        )
+        return
+      }
+
       await page.click(buttonWithText('Continue'), 'Continue')
+      log('the browser has the sign-in -- over to the person at the keyboard')
     }
-    await page.until(`!!${fieldLabelled('Email Address')}`, 'the email field')
-    await sleep(1000)
-
-    await page.click(fieldLabelled('Name'), 'the name field')
-    await page.press('a', 'KeyA', 65, 2)
-    await page.type('Halcyon Demo')
-    await sleep(500)
-    await page.click(fieldLabelled('Email Address'), 'the email field')
-    await page.press('a', 'KeyA', 65, 2)
-    await page.type(email)
-    await sleep(1200)
-
-    await page.caption(
-      "Halcyon opens Google's own sign-in page in the default browser. It never sees the Google password.",
-    )
-    await sleep(4000)
-
-    // A rehearsal stops here, before anything opens the browser or talks to Google.
-    if (dryRun) {
-      const enabled = await page.eval(`!${buttonWithText('Continue')}.disabled`)
-      log(`dry run: the account form is filled and Continue is ${enabled ? 'enabled' : 'DISABLED'}`)
-      return
-    }
-
-    await page.click(buttonWithText('Continue'), 'Continue')
-    log('the browser has the sign-in -- over to the person at the keyboard')
 
     // ---- the person signs in at Google, and comes back to Halcyon
     await page.caption('Waiting for Google sign-in in the browser…')

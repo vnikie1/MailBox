@@ -118,9 +118,9 @@ ever reads and writes the local database; the Rust core owns every byte that tou
 ## Security and privacy
 
 - [SECURITY.md](SECURITY.md) — how to report a vulnerability.
-  ([published](https://vnikie1.github.io/halcyon-mail/security.html))
+  ([published](https://halcyon.unikie1.com/security.html))
 - [PRIVACY.md](PRIVACY.md) — what leaves this machine, which is very nearly nothing.
-  ([published](https://vnikie1.github.io/halcyon-mail/privacy.html) — this is the URL the
+  ([published](https://halcyon.unikie1.com/privacy.html) — this is the URL the
   Microsoft Store requires, and a dead one is an instant rejection.)
 
 ## Licence

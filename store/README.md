@@ -89,8 +89,8 @@ Center refused it on the first upload.
 | Field | Answer |
 | --- | --- |
 | Category | **Productivity** (no subcategory) |
-| Privacy policy URL | <https://vnikie1.github.io/halcyon-mail/privacy.html> |
-| Website | <https://vnikie1.github.io/halcyon-mail/> |
+| Privacy policy URL | <https://halcyon.unikie1.com/privacy.html> — Partner Center still holds `https://vnikie1.github.io/halcyon-mail/privacy.html` from 1.0.0.0 and 1.0.1.0, which redirects here since 2026-11-16; change it, and the same link in the description, with the next submission |
+| Website | <https://halcyon.unikie1.com/> (the same: the github.io address redirects) |
 | Support contact | vnikie1@gmail.com (already public on the site) |
 | Does your product access, collect or transmit personal information? | **Yes** — it stores the user's mail and credentials on their PC and talks to their mail provider. Hence the privacy policy. |
 
@@ -171,7 +171,7 @@ MADE FOR WINDOWS 11
 Light and dark themes, Mica, Snap Layouts, notifications, a taskbar badge and a jump list. Halcyon can open mailto: links and .eml files, works entirely from the keyboard, and can be driven by a screen reader.
 
 PRIVATE BY DESIGN
-Passwords and sign-in tokens are kept in Windows Credential Manager, never in a file. Messages are shown in a sandbox that cannot run code, and you can stop remote images from loading. The privacy policy says exactly what leaves your PC, which is very nearly nothing: https://vnikie1.github.io/halcyon-mail/privacy.html
+Passwords and sign-in tokens are kept in Windows Credential Manager, never in a file. Messages are shown in a sandbox that cannot run code, and you can stop remote images from loading. The privacy policy says exactly what leaves your PC, which is very nearly nothing: https://halcyon.unikie1.com/privacy.html
 ```
 
 ### What's new in this version
