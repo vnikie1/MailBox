@@ -9536,6 +9536,12 @@ server without MOVE; a draft or a sent copy could not be put in a folder with a 
 backslash in its name; and text put into a recipient field whole became one chip. L44 cannot be
 done: the updater's private key is gone.
 
+Then _"do all this"_ — put the commit on `main` and push it, ship the fixes as a Store update,
+settle L44, and the Google verification's video and submission — and _"i am just publishing this
+app on microsoft store, not on any website"_. That closes L44 as not applicable: the updater, its
+key and a GitHub release serve only copies downloaded from a site, and the Store build compiles
+the updater out. The Store update is 1.0.1, below under its own heading.
+
 ### Added
 
 - **`platform::package`**: whether this process is the Store package, and the AppUserModelID
@@ -10028,7 +10034,11 @@ done: the updater's private key is gone.
   scratch folder on 2026-09-23 and that folder has since been cleared; no copy was found on this
   machine. Unless the user kept one, the public key in `tauri.conf.json` can never sign another
   update, a new key pair has to be made, and copies already installed from the site can only be
-  updated by downloading the installer again.
+  updated by downloading the installer again. **Closed as not applicable** the same day: the user
+  publishes Halcyon on the Microsoft Store only, not on any website, and the Store updates its own
+  installs. The self-updater stays in the default (non-Store) build, pointed at a release that
+  will not exist, which costs a failed check and nothing more; the key matters again only if a
+  download is ever offered outside the Store.
 - **The rig was left as found**: Inbox at 50,000 with UID 137, and no test folder or message
   anywhere, checked with `doveadm` after each run. Its password was stored for the app runs and
   purged after each, by a temporary test file deleted after use.
@@ -10086,4 +10096,7 @@ done: the updater's private key is gone.
   against the rig as Notes says). Run with `CARGO_BUILD_JOBS=6`, as before.
 - **Committed on a branch, `audit-2026-11-14`**, not on `main`, with every batch of the audit in
   one commit: none of the eight had been committed. `tools/demo-video.cjs`, untracked since
-  2026-10-04 and no part of the audit, was left out.
+  2026-10-04 and no part of the audit, was left out, then committed on its own at the user's word:
+  it drives the release build for the demo video Google's verification asks for, against a scratch
+  store, while a person records with Snipping Tool and signs in to Google in their own browser.
+  Checked first for addresses and secrets: the Gmail address comes from `HALCYON_DEMO_EMAIL`.
