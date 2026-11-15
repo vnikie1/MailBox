@@ -5,7 +5,14 @@ import type { Field } from '@/lib/generated/Field'
 import { IconButton, Select, TextField, type SelectOption } from '@/ui'
 
 import styles from './PredicateEditor.module.css'
-import { BLANK_CONDITION, FIELD_LABELS, OP_LABELS, opsFor, takesValue } from './predicateShape'
+import {
+  BLANK_CONDITION,
+  EDITOR_FIELDS,
+  FIELD_LABELS,
+  OP_LABELS,
+  opsFor,
+  takesValue,
+} from './predicateShape'
 
 /**
  * The condition builder shared by rules and smart mailboxes. docs/01 §8.
@@ -22,9 +29,10 @@ const MATCH_OPTIONS: readonly SelectOption<'all' | 'any'>[] = [
   { value: 'any', label: 'any' },
 ]
 
-const FIELD_OPTIONS: readonly SelectOption<Field>[] = (Object.keys(FIELD_LABELS) as Field[]).map(
-  (field) => ({ value: field, label: FIELD_LABELS[field] }),
-)
+const FIELD_OPTIONS: readonly SelectOption<Field>[] = EDITOR_FIELDS.map((field) => ({
+  value: field,
+  label: FIELD_LABELS[field],
+}))
 
 export interface PredicateEditorProps {
   matchAll: boolean

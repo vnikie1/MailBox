@@ -316,7 +316,11 @@ fn diagnose(provider: Provider, response: &str, is_smtp: bool) -> String {
             .into();
     }
 
-    // ---- Generic ------------------------------------------------------------------------
+    generic_remedy(&text, is_smtp)
+}
+
+/// What `diagnose` says when nothing more specific is known. `text` is the response, lowered.
+fn generic_remedy(text: &str, is_smtp: bool) -> String {
     if text.contains("authenticationfailed")
         || text.contains("invalid credentials")
         || text.contains("login failed")
@@ -334,6 +338,166 @@ fn diagnose(provider: Provider, response: &str, is_smtp: bool) -> String {
     } else {
         "The incoming server refused the sign-in.".into()
     }
+}
+
+/// What to tell the user when a sign-in is refused.
+///
+/// A password gets `diagnose`. A token the browser has only just issued is not a wrong password,
+/// and "check the password" says nothing to someone who typed none: the usual cause is that the
+/// browser signed in to a different account than the one being added (M24, 2026-11-14 audit).
+/// Anything more specific `diagnose` finds — a tenant with IMAP turned off, a rate limit — is
+/// as true of a token as of a password, and is kept.
+fn refused_remedy(
+    provider: Provider,
+    email: &str,
+    response: &str,
+    is_smtp: bool,
+    attempt: &Attempt,
+) -> String {
+    let diagnosed = diagnose(provider, response, is_smtp);
+
+    match attempt {
+        Attempt::OAuth { .. }
+            if diagnosed == generic_remedy(&response.to_ascii_lowercase(), is_smtp) =>
+        {
+            format!(
+                "The sign-in was not accepted for {email}. If a different account was chosen in \
+                 the browser, start again and choose {email}."
+            )
+        }
+        _ => diagnosed,
+    }
+}
+
+/// Reads the answer to the IMAP sign-in, `a2`.
+///
+/// Gmail answers a failed XOAUTH2 not with a refusal but with a continuation, `+ <base64 JSON>`,
+/// and sends the tagged NO only after the client answers it with an empty line. This waited for
+/// the NO, Gmail waited for the empty line, and after ten seconds the user was told a firewall
+/// was in the way — the sign-in to the wrong Google account that M24 in the 2026-11-14 audit
+/// describes. The sync's own session has answered it since it was written (`session::XOAuth2`).
+async fn read_sign_in(stream: &mut Stream) -> Result<String, String> {
+    let tagged = |text: &str| text.starts_with("a2 ") || text.contains("\r\na2 ");
+    let continued =
+        |text: &str| (text.starts_with('+') || text.contains("\r\n+")) && text.ends_with("\r\n");
+
+    let mut response = stream
+        .read_response(|text| tagged(text) || continued(text))
+        .await?;
+
+    if !tagged(&response) {
+        stream
+            .write_line("")
+            .await
+            .map_err(|error| error.to_string())?;
+        response.push_str(&stream.read_response(tagged).await?);
+    }
+
+    Ok(response)
+}
+
+/// Whether an SMTP response is complete: its last line has a space after the code.
+fn smtp_complete(text: &str) -> bool {
+    text.lines()
+        .last()
+        .map(|line| line.len() >= 4 && line.as_bytes()[3] == b' ')
+        .unwrap_or(false)
+        && text.ends_with("\r\n")
+}
+
+/// The SASL mechanisms an EHLO answer offers, upper-cased.
+fn auth_mechanisms(ehlo: &str) -> Vec<String> {
+    ehlo.lines()
+        .filter_map(|line| line.get(4..))
+        .filter_map(|rest| {
+            let upper = rest.trim().to_ascii_uppercase();
+            upper
+                .strip_prefix("AUTH ")
+                .or_else(|| upper.strip_prefix("AUTH="))
+                .map(|mechanisms| {
+                    mechanisms
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+        })
+        .flatten()
+        .collect()
+}
+
+/// Signs in to an SMTP server whose EHLO said `capabilities`, and returns its final answer.
+///
+/// AUTH PLAIN where the server offers it, and AUTH LOGIN where it offers only that. This tried
+/// PLAIN alone, so a server offering only LOGIN could not be added at all, though the sender —
+/// which picks a mechanism the server offers — would have worked with it (M25, 2026-11-14 audit).
+async fn smtp_sign_in(
+    stream: &mut Stream,
+    email: &str,
+    attempt: &Attempt,
+    capabilities: &str,
+) -> String {
+    let encode = |value: &str| base64::engine::general_purpose::STANDARD.encode(value);
+
+    let mut response = match attempt {
+        Attempt::OAuth { access_token } => {
+            let _ = stream
+                .write_line(&format!("AUTH XOAUTH2 {}", xoauth2(email, access_token)))
+                .await;
+            stream
+                .read_response(smtp_complete)
+                .await
+                .unwrap_or_default()
+        }
+
+        Attempt::Password(secret) => {
+            let offered = auth_mechanisms(capabilities);
+            let offers = |name: &str| offered.iter().any(|mechanism| mechanism == name);
+
+            if !offers("PLAIN") && offers("LOGIN") {
+                // The username and then the password, each base64, each in answer to a 334.
+                let _ = stream.write_line("AUTH LOGIN").await;
+                let mut answer = stream
+                    .read_response(smtp_complete)
+                    .await
+                    .unwrap_or_default();
+
+                for value in [email, secret.expose()] {
+                    if !answer.starts_with("334") {
+                        break;
+                    }
+                    let _ = stream.write_line(&encode(value)).await;
+                    answer = stream
+                        .read_response(smtp_complete)
+                        .await
+                        .unwrap_or_default();
+                }
+
+                answer
+            } else {
+                // AUTH PLAIN: base64 of NUL user NUL password, on one line.
+                let raw = format!("\0{}\0{}", email, secret.expose());
+                let _ = stream
+                    .write_line(&format!("AUTH PLAIN {}", encode(&raw)))
+                    .await;
+                stream
+                    .read_response(smtp_complete)
+                    .await
+                    .unwrap_or_default()
+            }
+        }
+    };
+
+    // A 334 now is a challenge, not an answer. Gmail sends a failed XOAUTH2's error this way and
+    // waits for an empty line before the 535 that says what went wrong (M24).
+    if response.starts_with("334") {
+        let _ = stream.write_line("").await;
+        response = stream
+            .read_response(smtp_complete)
+            .await
+            .unwrap_or_default();
+    }
+
+    response
 }
 
 fn connect_remedy(host: &str, port: u16) -> String {
@@ -560,10 +724,7 @@ async fn check_imap(
         return report.steps;
     }
 
-    let response = match stream
-        .read_response(|text| text.contains("\r\na2 ") || text.starts_with("a2 "))
-        .await
-    {
+    let response = match read_sign_in(&mut stream).await {
         Ok(text) => text,
         Err(error) => {
             report.failed(
@@ -584,7 +745,7 @@ async fn check_imap(
         report.failed(
             SIGN_IN,
             "The server rejected the sign-in.",
-            Some(diagnose(provider, &response, false)),
+            Some(refused_remedy(provider, email, &response, false, attempt)),
             Some(redact_command_echo(&response)),
             started,
         );
@@ -676,13 +837,7 @@ async fn check_smtp(
     };
 
     // SMTP responses end with a line whose fourth character is a space rather than a hyphen.
-    let complete = |text: &str| {
-        text.lines()
-            .last()
-            .map(|line| line.len() >= 4 && line.as_bytes()[3] == b' ')
-            .unwrap_or(false)
-            && text.ends_with("\r\n")
-    };
+    let complete = smtp_complete;
 
     let started = Instant::now();
     let mut stream = if server.security == Security::Tls {
@@ -729,7 +884,7 @@ async fn check_smtp(
 
     let ehlo = format!("EHLO {}", client_hostname());
     let _ = stream.write_line(&ehlo).await;
-    let capabilities = stream.read_response(complete).await.unwrap_or_default();
+    let mut capabilities = stream.read_response(complete).await.unwrap_or_default();
 
     // ---- STARTTLS ------------------------------------------------------------------------
     if server.security == Security::StartTls {
@@ -815,29 +970,15 @@ async fn check_smtp(
 
         // RFC 3207 requires a second EHLO after the upgrade; the capability list before
         // TLS is not to be trusted, and AUTH is usually only advertised afterwards.
+        // And it is the list that says which AUTH mechanisms there are.
         let _ = stream.write_line(&ehlo).await;
-        let _ = stream.read_response(complete).await;
+        capabilities = stream.read_response(complete).await.unwrap_or_default();
     }
 
     // ---- authenticate ---------------------------------------------------------------------
     let started = Instant::now();
 
-    match attempt {
-        Attempt::OAuth { access_token } => {
-            let _ = stream
-                .write_line(&format!("AUTH XOAUTH2 {}", xoauth2(email, access_token)))
-                .await;
-        }
-        Attempt::Password(secret) => {
-            // AUTH PLAIN: base64 of NUL user NUL password. Sent on one line rather than as
-            // a challenge exchange, which every server here supports.
-            let raw = format!("\0{}\0{}", email, secret.expose());
-            let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
-            let _ = stream.write_line(&format!("AUTH PLAIN {encoded}")).await;
-        }
-    }
-
-    let response = stream.read_response(complete).await.unwrap_or_default();
+    let response = smtp_sign_in(&mut stream, email, attempt, &capabilities).await;
 
     if response.starts_with("235") {
         report.passed(SIGN_IN, "Signed in to the outgoing server.", started);
@@ -849,7 +990,7 @@ async fn check_smtp(
         report.failed(
             SIGN_IN,
             "The outgoing server rejected the sign-in.",
-            Some(diagnose(provider, &response, true)),
+            Some(refused_remedy(provider, email, &response, true, attempt)),
             Some(redact_command_echo(&response)),
             started,
         );
@@ -1201,5 +1342,187 @@ mod tests {
 
         let report = DiagnosticReport::build(imap.steps, Vec::new());
         assert_eq!(report.imap_sign_in(), None);
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    /// A server that answers each line it is sent with the next reply, and returns the lines.
+    async fn scripted(
+        replies: Vec<&'static str>,
+    ) -> (Stream, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let (read, mut write) = socket.into_split();
+            let mut lines = BufReader::new(read).lines();
+            let mut heard = Vec::new();
+
+            for reply in replies {
+                let Ok(Some(line)) = lines.next_line().await else {
+                    break;
+                };
+                heard.push(line);
+                write.write_all(reply.as_bytes()).await.expect("reply");
+            }
+            heard
+        });
+
+        let client = TcpStream::connect(address).await.expect("connect");
+        (Stream::Plain(client), server)
+    }
+
+    #[tokio::test]
+    async fn a_refused_xoauth2_is_answered_and_read_rather_than_waited_on() {
+        // M24. Gmail's answer to a token for the wrong account: a continuation carrying the
+        // error, then — only once the client has answered it with an empty line — the NO.
+        let (mut stream, server) = scripted(vec![
+            "+ eyJzdGF0dXMiOiI0MDAiLCJzY2hlbWVzIjoiQmVhcmVyIn0=\r\n",
+            "a2 NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)\r\n",
+        ])
+        .await;
+
+        stream
+            .write_line("a2 AUTHENTICATE XOAUTH2 dXNlcj0=")
+            .await
+            .expect("send");
+        let response = tokio::time::timeout(Duration::from_secs(3), read_sign_in(&mut stream))
+            .await
+            .expect("answered at once, not after the ten-second timeout")
+            .expect("a response");
+
+        assert!(
+            response.contains("a2 NO [AUTHENTICATIONFAILED]"),
+            "{response}"
+        );
+        let heard = server.await.expect("server");
+        assert_eq!(
+            heard[1], "",
+            "the continuation is answered with an empty line"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_offering_only_auth_login_can_be_signed_in_to() {
+        // M25. The sender would have worked; the test refused the account.
+        let (mut stream, server) = scripted(vec![
+            "334 VXNlcm5hbWU6\r\n",
+            "334 UGFzc3dvcmQ6\r\n",
+            "235 2.7.0 Authentication successful\r\n",
+        ])
+        .await;
+
+        let response = smtp_sign_in(
+            &mut stream,
+            "ada@example.test",
+            &Attempt::Password(Secret::new("hunter2")),
+            "250-mail.example.test\r\n250-SIZE 35882577\r\n250 AUTH LOGIN\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("235"), "{response}");
+        let heard = server.await.expect("server");
+        let decode = |line: &str| {
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(line)
+                    .expect("base64"),
+            )
+            .expect("utf-8")
+        };
+        assert_eq!(heard[0], "AUTH LOGIN");
+        assert_eq!(decode(&heard[1]), "ada@example.test");
+        assert_eq!(decode(&heard[2]), "hunter2");
+    }
+
+    #[tokio::test]
+    async fn plain_is_still_used_wherever_it_is_offered() {
+        let (mut stream, server) = scripted(vec!["235 2.7.0 Accepted\r\n"]).await;
+
+        let response = smtp_sign_in(
+            &mut stream,
+            "ada@example.test",
+            &Attempt::Password(Secret::new("hunter2")),
+            "250-mail.example.test\r\n250 AUTH LOGIN PLAIN\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("235"), "{response}");
+        assert!(server.await.expect("server")[0].starts_with("AUTH PLAIN "));
+    }
+
+    #[tokio::test]
+    async fn an_smtp_xoauth2_challenge_is_answered_for_the_real_refusal() {
+        // Gmail's SMTP side of M24: a 334 carrying the error, then the 535 once answered.
+        let (mut stream, server) = scripted(vec![
+            "334 eyJzdGF0dXMiOiI0MDAifQ==\r\n",
+            "535-5.7.8 Username and Password not accepted.\r\n535 5.7.8 Learn more\r\n",
+        ])
+        .await;
+
+        let response = smtp_sign_in(
+            &mut stream,
+            "ada@example.test",
+            &Attempt::OAuth {
+                access_token: Secret::new("token"),
+            },
+            "250 AUTH XOAUTH2 PLAIN\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("535"), "{response}");
+        assert_eq!(server.await.expect("server")[1], "");
+    }
+
+    #[test]
+    fn the_mechanisms_are_read_from_either_spelling() {
+        assert_eq!(
+            auth_mechanisms("250-mx.test\r\n250-AUTH LOGIN PLAIN\r\n250 AUTH=LOGIN\r\n"),
+            vec!["LOGIN", "PLAIN", "LOGIN"]
+        );
+        assert!(auth_mechanisms("250-mx.test\r\n250 STARTTLS\r\n").is_empty());
+    }
+
+    #[test]
+    fn a_refused_token_is_not_called_a_wrong_password() {
+        let oauth = Attempt::OAuth {
+            access_token: Secret::new("token"),
+        };
+        let refusal = "a2 NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)";
+
+        let said = refused_remedy(Provider::Google, "ada@gmail.com", refusal, false, &oauth);
+        assert!(said.contains("different account"), "{said}");
+        assert!(said.contains("ada@gmail.com"), "{said}");
+        assert!(!said.contains("password"), "{said}");
+
+        // Something more specific stays as it was: a tenant with IMAP off refuses a token too.
+        let tenant = refused_remedy(
+            Provider::Microsoft,
+            "ada@example.test",
+            "a2 NO IMAP is disabled for this tenant",
+            false,
+            &oauth,
+        );
+        assert!(tenant.contains("administrator"), "{tenant}");
+
+        // And a password is diagnosed as before.
+        let password = Attempt::Password(Secret::new("x"));
+        assert_eq!(
+            refused_remedy(
+                Provider::Other,
+                "ada@example.test",
+                refusal,
+                false,
+                &password
+            ),
+            diagnose(Provider::Other, refusal, false)
+        );
     }
 }

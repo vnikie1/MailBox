@@ -98,6 +98,31 @@ const MIGRATIONS: &[Migration] = &[
         name: "discarded_sources",
         sql: include_str!("../../migrations/0015_discarded_sources.sql"),
     },
+    Migration {
+        version: 16,
+        name: "draft_lifecycle",
+        sql: include_str!("../../migrations/0016_draft_lifecycle.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "mailbox_server_exists",
+        sql: include_str!("../../migrations/0017_mailbox_server_exists.sql"),
+    },
+    Migration {
+        version: 18,
+        name: "pending_op_uid_validity",
+        sql: include_str!("../../migrations/0018_pending_op_uid_validity.sql"),
+    },
+    Migration {
+        version: 19,
+        name: "fts_update_only_on_text",
+        sql: include_str!("../../migrations/0019_fts_update_only_on_text.sql"),
+    },
+    Migration {
+        version: 20,
+        name: "imported_inbox_is_a_folder",
+        sql: include_str!("../../migrations/0020_imported_inbox_is_a_folder.sql"),
+    },
 ];
 
 /// Applies whatever has not been applied yet. Safe to call on every start.
@@ -237,6 +262,38 @@ mod tests {
     }
 
     #[test]
+    fn an_imported_inbox_loses_the_inbox_role_and_a_real_one_keeps_it() {
+        // L40. The badge and the Inboxes row read the role, and an archive's old unread mail
+        // joined both.
+        let mut conn = at_version(19);
+        conn.execute_batch(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref) VALUES
+                 (1, 'Work', 'me@work.test', 'imap', 'password', 'ref'),
+                 (2, 'On My PC', 'local@localhost', 'local', 'none', 'local:none');
+             INSERT INTO mailbox (id, account_id, remote_path, display_name, role) VALUES
+                 (1, 1, 'INBOX', 'Inbox', 'inbox'),
+                 (2, 2, 'Outlook/Inbox', 'Inbox', 'inbox'),
+                 (3, 2, 'Outlook/Sent Items', 'Sent Items', 'sent');",
+        )
+        .expect("a version 19 store");
+
+        run(&mut conn).expect("migrate");
+
+        let roles: Vec<Option<String>> = conn
+            .prepare("SELECT role FROM mailbox ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+
+        assert_eq!(
+            roles,
+            vec![Some("inbox".to_string()), None, Some("sent".to_string())]
+        );
+    }
+
+    #[test]
     fn favourites_chosen_before_0014_keep_their_order_after_the_built_in_rows() {
         let mut conn = at_version(13);
 
@@ -343,5 +400,52 @@ mod tests {
         conn.execute("DELETE FROM message WHERE id = ?1", [1])
             .expect("delete");
         assert_eq!(hits(&conn, "annual"), 0, "delete should unindex");
+    }
+
+    #[test]
+    fn changing_what_is_not_indexed_leaves_the_index_alone() {
+        // M19. The update trigger re-indexed a message's whole text on every UPDATE, so marking
+        // one read rewrote its body in the index, and so did every row a threading pass touched.
+        let conn = fresh();
+        conn.execute_batch(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'A', 'a@example.test', 'imap', 'password', 'ref');
+             INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (1, 1, 'INBOX', 'Inbox', 'inbox');
+             INSERT INTO thread (id, account_id, subject_base, last_date, message_count)
+             VALUES (1, 1, 'Quarterly figures', 0, 1);
+             INSERT INTO message
+             (id, account_id, mailbox_id, uid, subject, date_sent, date_received,
+              body_text, from_all, to_all, attachment_names)
+             VALUES (1, 1, 1, 1, 'Quarterly figures', 100, 100, 'the numbers are attached',
+                     'ada@example.test', 'me@example.test', '');",
+        )
+        .expect("seed");
+
+        // What the index has stored, byte for byte.
+        let stored = |conn: &Connection| -> Vec<(i64, Vec<u8>)> {
+            let mut statement = conn
+                .prepare("SELECT id, block FROM message_fts_data ORDER BY id")
+                .expect("prepare");
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+        let before = stored(&conn);
+
+        conn.execute("UPDATE message SET flag_seen = 1 WHERE id = 1", [])
+            .expect("read");
+        conn.execute("UPDATE message SET thread_id = 1 WHERE id = 1", [])
+            .expect("thread");
+        // Setting an indexed column to the value it already has is no change either.
+        conn.execute(
+            "UPDATE message SET subject = 'Quarterly figures', flag_flagged = 1 WHERE id = 1",
+            [],
+        )
+        .expect("flag");
+
+        assert_eq!(stored(&conn), before, "the index was rewritten");
     }
 }

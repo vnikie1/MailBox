@@ -12,6 +12,8 @@ import {
   composeReply,
   composeSend,
   composeBlank,
+  composeDiscardDraft,
+  composeLoadDraft,
   composeDescribeFiles,
   composeSizeLimit,
   onCloseRequested,
@@ -27,7 +29,7 @@ import type { OutgoingMessage } from '@/lib/generated/OutgoingMessage'
 
 import { looksLikeAddress } from './address'
 import { cannotAttach } from './attachments'
-import { Editor } from './Editor'
+import { Editor, type ChangeOrigin, type EditorContent, type EditorSignature } from './Editor'
 import { RecipientField } from './RecipientField'
 import { useAutosave } from './useAutosave'
 import styles from './ComposeWindow.module.css'
@@ -86,29 +88,34 @@ function toToken(address: ComposeAddress): Token {
   }
 }
 
+/** An account's signature as the editor takes it. */
+function signatureOf(draft: ReplyDraft): EditorSignature {
+  return {
+    html: draft.signatureHtml,
+    placement: draft.signaturePlacement === 'below' ? 'below' : 'above',
+  }
+}
+
 /**
- * Assembles the body the editor opens with: the signature, the quote, in the order the account
- * asked for.
+ * Assembles the body the editor opens with: the quote either side of the signature, in the order
+ * the account asked for, with `lead` — a `mailto:` body — at the top.
  *
  * "Above" puts the signature under what the user just wrote and before the quoted history,
  * which is what people who reply inline expect. "Below" puts it at the very bottom, which is
  * what people who top-post expect. Getting it wrong makes every reply look like a mistake,
  * which is why it is a stored choice rather than a guess.
+ *
+ * The signature itself goes in separately, so the editor knows which blocks are the signature
+ * and can swap them for another account's when From changes (M46, 2026-11-14 audit). It once went
+ * in as an empty `<div>` — every message carried the wrapper and none the signature, and nothing
+ * said so — so the blank line above it is added only when there is a signature to sit under.
  */
-function bodyWithSignature(draft: ReplyDraft): string {
-  if (draft.signatureHtml.trim() === '') return draft.quotedHtml
-
-  // The signature itself, which this used to leave out. The template was
-  // `<p><br></p><div></div>` — a blank line and an empty div — so every message carried the
-  // wrapper and none carried the signature, while the guard above proved one had been set.
-  //
-  // Nothing failed and nothing was logged. Settings showed the signature, the editor showed an
-  // empty line where it should have been, and the only way to notice was to know it was missing.
-  const signature = `<p><br></p><div>${draft.signatureHtml}</div>`
+function openingContent(draft: ReplyDraft, lead = ''): EditorContent {
+  const blankLine = draft.signatureHtml.trim() === '' ? '' : '<p><br></p>'
 
   return draft.signaturePlacement === 'below'
-    ? draft.quotedHtml + signature
-    : signature + draft.quotedHtml
+    ? { before: lead + draft.quotedHtml + blankLine, after: '' }
+    : { before: lead + blankLine, after: draft.quotedHtml }
 }
 
 export function ComposeWindow() {
@@ -121,6 +128,10 @@ export function ComposeWindow() {
   const parameters = useMemo(() => new URLSearchParams(window.location.search), [])
   const replyTo = parameters.get('message')
   const replyKind = parameters.get('kind') ?? 'reply'
+  /** A draft reopened from a Drafts mailbox — Edit Draft. */
+  const draftOf = parameters.get('draft')
+  /** That draft's identity, once loaded, for the autosave to carry on under. */
+  const [draftIdentity, setDraftIdentity] = useState<string | null>(null)
 
   const [accounts, setAccounts] = useState<AccountRow[]>([])
   const [accountId, setAccountId] = useState<number | null>(null)
@@ -129,7 +140,14 @@ export function ComposeWindow() {
   const [bcc, setBcc] = useState<Token[]>([])
   const [showCopies, setShowCopies] = useState(false)
   const [subject, setSubject] = useState('')
-  const [quoted, setQuoted] = useState('')
+  /** What the editor opens with, once known. */
+  const [opening, setOpening] = useState<EditorContent | null>(null)
+  /**
+   * The sending account's signature, which the editor keeps current in the body. `null` for a
+   * draft reopened from Drafts, whose signature is already part of its text and cannot be told
+   * apart from it.
+   */
+  const [signature, setSignature] = useState<EditorSignature | null>(null)
   const [threading, setThreading] = useState<{ inReplyTo: string | null; references: string[] }>({
     inReplyTo: null,
     references: [],
@@ -143,6 +161,20 @@ export function ComposeWindow() {
 
   // The editor reports both forms on every change; neither is derived from the other.
   const body = useRef({ html: '', text: '' })
+
+  /**
+   * Whether the user has changed anything since the window opened.
+   *
+   * A reply arrives with recipients, a subject and a quote, and a new message with a signature,
+   * so "is there anything in it" was true of every window the moment it opened: closing an
+   * untouched reply asked to save a draft of it, and switching away from one saved it (L25,
+   * 2026-11-14 audit). What the window was given is not work the user can lose. Set by the
+   * user's own edits only — the loading code writes the state directly, around these.
+   */
+  const touched = useRef(false)
+  const touch = useCallback(() => {
+    touched.current = true
+  }, [])
 
   const totalSize = useMemo(
     () => attachments.reduce((sum, file) => sum + file.size, 0),
@@ -160,6 +192,7 @@ export function ComposeWindow() {
    * it twice.
    */
   const addAttachments = useCallback((files: PickedFile[]) => {
+    if (files.length > 0) touched.current = true
     setAttachments((current) => {
       const seen = new Set(current.map((file) => file.path))
       return [...current, ...files.filter((file) => !seen.has(file.path))]
@@ -225,6 +258,25 @@ export function ComposeWindow() {
     const alive = { current: true }
 
     const load = async () => {
+      // A saved draft, reopened. Drafts could be saved and never opened again anywhere in the
+      // app (C3, 2026-11-14 audit); this is the way back to one.
+      if (draftOf !== null) {
+        const draft = await composeLoadDraft(Number(draftOf))
+        if (!alive.current) return
+
+        setAccountId(draft.accountId)
+        setTo(draft.to.map(toToken))
+        setCc(draft.cc.map(toToken))
+        setBcc(draft.bcc.map(toToken))
+        setShowCopies(draft.cc.length > 0 || draft.bcc.length > 0)
+        setSubject(draft.subject)
+        setOpening({ before: draft.html, after: '' })
+        setThreading({ inReplyTo: draft.inReplyTo, references: draft.references })
+        setAttachments(draft.attachments)
+        setDraftIdentity(draft.messageId)
+        return
+      }
+
       if (replyTo !== null) {
         const draft: ReplyDraft = await composeReply(Number(replyTo), replyKind)
         if (!alive.current) return
@@ -234,7 +286,8 @@ export function ComposeWindow() {
         setCc(draft.cc.map(toToken))
         setShowCopies(draft.cc.length > 0)
         setSubject(draft.subject)
-        setQuoted(bodyWithSignature(draft))
+        setSignature(signatureOf(draft))
+        setOpening(openingContent(draft))
         setThreading({ inReplyTo: draft.inReplyTo, references: draft.references })
         // Forward as Attachment is the only kind that arrives with a file already on it. The
         // core has already written the copy to disk and named it from the subject, so from
@@ -278,22 +331,23 @@ export function ComposeWindow() {
       // The body arrives as plain text — that is all a mailto can carry — so it goes in above
       // the signature as text, not as markup. Treating it as HTML would let a link supply
       // markup into the editor, which is the one thing this whole path exists to prevent.
-      const withSignature = bodyWithSignature(blank)
-      setQuoted(
-        mailtoBody === null || mailtoBody === ''
-          ? withSignature
-          : `<p>${escapeHtml(mailtoBody)}</p>${withSignature}`,
+      setSignature(signatureOf(blank))
+      setOpening(
+        openingContent(
+          blank,
+          mailtoBody === null || mailtoBody === '' ? '' : `<p>${escapeHtml(mailtoBody)}</p>`,
+        ),
       )
     }
 
     load().catch((cause: unknown) => {
-      if (alive.current) setProblem(String(cause))
+      if (alive.current) setProblem(reasonFor(cause))
     })
 
     return () => {
       alive.current = false
     }
-  }, [replyTo, replyKind, parameters])
+  }, [replyTo, replyKind, draftOf, parameters])
 
   /** The message as it stands. Used by both autosave and Send, so they cannot drift. */
   const buildMessage = useCallback((): OutgoingMessage | null => {
@@ -313,10 +367,20 @@ export function ComposeWindow() {
     }
   }, [accountId, to, cc, bcc, subject, threading, attachments])
 
-  const autosave = useAutosave(buildMessage)
+  const isTouched = useCallback(() => touched.current, [])
+  const autosave = useAutosave(buildMessage, isTouched)
+
+  // A reopened draft is saved under its own identity, so each save replaces it rather than
+  // filing a second draft beside it.
+  const { adopt } = autosave
+  useEffect(() => {
+    if (draftIdentity !== null) adopt(draftIdentity)
+  }, [draftIdentity, adopt])
 
   /** Whether there is anything in the window worth not losing. */
   const hasContent = useCallback(() => {
+    if (!touched.current) return false
+
     const message = buildMessage()
     if (message === null) return false
 
@@ -370,9 +434,34 @@ export function ComposeWindow() {
     }
   }, [hasContent])
 
-  const onBodyChange = useCallback((html: string, text: string) => {
+  const onBodyChange = useCallback((html: string, text: string, origin: ChangeOrigin) => {
     body.current = { html, text }
+    if (origin === 'user') touched.current = true
   }, [])
+
+  /**
+   * Changing From brings that account's signature with it, in place of the one already in the
+   * body (M46, 2026-11-14 audit). Not for a reopened draft: its signature is text by now.
+   *
+   * Numbered, so switching twice quickly cannot leave the first account's signature behind
+   * when its answer arrives second.
+   */
+  const signatureRequest = useRef(0)
+  const changeAccount = (next: number) => {
+    setAccountId(next)
+    if (signature === null) return
+
+    const request = signatureRequest.current + 1
+    signatureRequest.current = request
+
+    composeBlank(next)
+      .then((blank) => {
+        if (request === signatureRequest.current) setSignature(signatureOf(blank))
+      })
+      .catch((cause: unknown) => {
+        console.warn('[compose] the signature for that account could not be read', cause)
+      })
+  }
 
   const send = useCallback(async () => {
     if (accountId === null) {
@@ -405,7 +494,10 @@ export function ComposeWindow() {
       // an unsent copy of a message that has gone.
       autosave.abandon()
 
-      await composeSend(message)
+      // With the draft it was written as, which the core lets go of — here and on the server —
+      // once the message has actually gone. Nothing did, so every sent message stayed in Drafts
+      // on every device (H4, 2026-11-14 audit).
+      await composeSend(message, autosave.messageId())
       queued = true
 
       // The core has the message on disk and in the outbox before this resolves, so closing
@@ -441,12 +533,25 @@ export function ComposeWindow() {
    * A React handler on the root rather than a window listener: it reaches here by bubbling
    * through the tree, it dies with the component, and it keeps the rule that the only
    * `addEventListener('keydown')` in the app is the dispatcher's.
+   *
+   * **Asked for here, sent after the next render.** The same Enter, in a recipient field, has
+   * just committed what was typed there as a chip — a state change this handler's `send` cannot
+   * see, because it closed over the recipients as they were. Sending from here sent the message
+   * without the address typed last (M45, 2026-11-14 audit), or refused it for having no
+   * recipient at all. The effect below runs once that render is done, with that render's `send`.
    */
+  const [sendAsked, setSendAsked] = useState(false)
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Enter' || !event.ctrlKey || sending) return
     event.preventDefault()
-    void send()
+    setSendAsked(true)
   }
+
+  useEffect(() => {
+    if (!sendAsked) return
+    setSendAsked(false)
+    void send()
+  }, [sendAsked, send])
 
   return (
     <div className={styles.window} onKeyDown={onKeyDown}>
@@ -483,7 +588,10 @@ export function ComposeWindow() {
         <RecipientField
           label="To:"
           tokens={to}
-          onTokensChange={setTo}
+          onTokensChange={(next) => {
+            touch()
+            setTo(next)
+          }}
           validate={looksLikeAddress}
         />
 
@@ -492,13 +600,19 @@ export function ComposeWindow() {
             <RecipientField
               label="Cc:"
               tokens={cc}
-              onTokensChange={setCc}
+              onTokensChange={(next) => {
+                touch()
+                setCc(next)
+              }}
               validate={looksLikeAddress}
             />
             <RecipientField
               label="Bcc:"
               tokens={bcc}
-              onTokensChange={setBcc}
+              onTokensChange={(next) => {
+                touch()
+                setBcc(next)
+              }}
               validate={looksLikeAddress}
             />
           </>
@@ -535,7 +649,7 @@ export function ComposeWindow() {
                 label: `${account.displayName} — ${account.email}`,
               }))}
               value={accountId}
-              onValueChange={setAccountId}
+              onValueChange={changeAccount}
             />
           </div>
         )}
@@ -547,6 +661,7 @@ export function ComposeWindow() {
             hideLabel
             value={subject}
             onChange={(event) => {
+              touch()
               setSubject(event.target.value)
             }}
             placeholder="Subject"
@@ -567,6 +682,7 @@ export function ComposeWindow() {
                 label={`Remove ${file.filename}`}
                 size="sm"
                 onClick={() => {
+                  touch()
                   setAttachments((current) => current.filter((entry) => entry.path !== file.path))
                 }}
               />
@@ -591,7 +707,12 @@ export function ComposeWindow() {
         </p>
       )}
 
-      <Editor initialHtml={quoted} onChange={onBodyChange} ariaLabel="Message body" />
+      <Editor
+        initialContent={opening}
+        signature={signature}
+        onChange={onBodyChange}
+        ariaLabel="Message body"
+      />
 
       <Sheet
         open={closing}
@@ -615,9 +736,21 @@ export function ComposeWindow() {
               onClick={() => {
                 // Abandoned first, so the autosave timer cannot write it back on the way out.
                 autosave.abandon()
-                closeApproved.current = true
-                setClosing(false)
-                void closeThisWindow()
+
+                // And any draft already saved is thrown away, here and on the server. Delete
+                // used to close the window and leave the autosaved copy in Drafts everywhere.
+                const saved = autosave.messageId()
+                const discarded = saved === null ? Promise.resolve() : composeDiscardDraft(saved)
+
+                void discarded
+                  .catch((cause: unknown) => {
+                    console.warn('[compose] draft not discarded', cause)
+                  })
+                  .finally(() => {
+                    closeApproved.current = true
+                    setClosing(false)
+                    void closeThisWindow()
+                  })
               }}
             >
               Delete
@@ -625,10 +758,19 @@ export function ComposeWindow() {
             <Button
               variant="filled"
               onClick={() => {
-                autosave.saveNow()
-                closeApproved.current = true
-                setClosing(false)
-                void closeThisWindow()
+                // Closed only once the save has finished, and not at all if it failed: this
+                // closed straight away, and a save that had not landed — or could not — took the
+                // message with the window.
+                void autosave.saveNow().then((saved) => {
+                  if (!saved) {
+                    setClosing(false)
+                    setProblem('The draft could not be saved. Try again, or copy the text.')
+                    return
+                  }
+                  closeApproved.current = true
+                  setClosing(false)
+                  void closeThisWindow()
+                })
               }}
             >
               Save as Draft

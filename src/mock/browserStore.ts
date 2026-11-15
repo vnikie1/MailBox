@@ -422,7 +422,8 @@ export function messagesPage(query: ListQuery): Page<MessageRow> {
     .flatMap((mailboxId) => data.byMailbox.get(mailboxId) ?? [])
     .map((id) => data.messages.get(id))
     .filter((message): message is StoredMessage => message !== undefined)
-    .filter((message) => !query.unreadOnly || !message.seen)
+    // As the core does: the selection is kept in an unread-only list once it is read.
+    .filter((message) => !query.unreadOnly || !message.seen || query.keepIds.includes(message.id))
     .sort((a, b) => b.dateReceived - a.dateReceived || b.id - a.id)
 
   const cursor: Cursor | null = query.cursor

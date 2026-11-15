@@ -25,6 +25,20 @@ fn day(year: i32, month: u32, date: u32) -> i64 {
 }
 
 #[test]
+fn a_filter_between_the_words_of_a_date_phrase_is_kept() {
+    // "last" and "week" are not one phrase with a filter between them: the filter was skipped
+    // along with the two words, and the search lost it without a word (L16).
+    let query = parse("last from:bob week", now());
+
+    assert_eq!(query.from, vec!["bob"]);
+    assert_eq!(query.terms, vec!["last", "week"]);
+    assert_eq!(query.after, None);
+
+    let quoted = parse(r#"in "March" 2026"#, now());
+    assert_eq!(quoted.terms, vec!["in", "March", "2026"]);
+}
+
+#[test]
 fn plain_words_are_free_text() {
     let query = parse("quarterly figures", now());
     assert_eq!(query.terms, vec!["quarterly", "figures"]);

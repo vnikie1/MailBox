@@ -22,6 +22,14 @@
 //! never been downloaded exists here as an envelope and nothing more, and writing an envelope
 //! into an mbox produces a file of headers with no content, which looks like data loss and is
 //! indistinguishable from it after the fact. Those are counted and reported instead.
+//!
+//! ## A failed export leaves nothing
+//!
+//! A mailbox that cannot be read is found out before anything is created for it, and one whose
+//! writing fails, a disk filling up, has what was written of it removed. Both used to stay: an
+//! empty `.mbox`, or one cut off partway, beside the whole ones, under the name a person would
+//! take for a finished export of that mailbox (L38). What is removed is only ever this export's
+//! own: the file is created new, never written over one that was there.
 
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -96,15 +104,41 @@ pub fn to_mbox(
     directory: &Path,
     into: &mut Exported,
 ) -> Result<PathBuf, DbError> {
+    let rows = rows(conn, mailbox_id)?;
+
     std::fs::create_dir_all(directory).map_err(DbError::from)?;
 
     let name = mailbox_name(conn, mailbox_id);
     let path = unique_path(directory, &name, "mbox");
 
-    let file = std::fs::File::create(&path).map_err(DbError::from)?;
-    let mut sink = BufWriter::new(file);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(DbError::from)?;
 
-    for row in rows(conn, mailbox_id)? {
+    // Counted apart, so a mailbox that fails adds nothing to the export's totals.
+    let mut counts = Exported::default();
+    if let Err(error) = write_mbox(BufWriter::new(file), rows, &mut counts) {
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+
+    into.messages += counts.messages;
+    into.without_body += counts.without_body;
+    into.mailboxes += 1;
+    into.files.push(path.to_string_lossy().to_string());
+
+    Ok(path)
+}
+
+/// The messages of one mailbox into an mbox file. The file is closed when this returns.
+fn write_mbox(
+    mut sink: BufWriter<std::fs::File>,
+    rows: Vec<Row>,
+    into: &mut Exported,
+) -> Result<(), DbError> {
+    for row in rows {
         let Some(raw) = read_raw(&row) else {
             into.without_body += 1;
             continue;
@@ -121,12 +155,7 @@ pub fn to_mbox(
         into.messages += 1;
     }
 
-    sink.flush().map_err(DbError::from)?;
-
-    into.mailboxes += 1;
-    into.files.push(path.to_string_lossy().to_string());
-
-    Ok(path)
+    sink.flush().map_err(DbError::from)
 }
 
 /// Writes one mailbox as a directory of `.eml` files.
@@ -136,12 +165,33 @@ pub fn to_eml_tree(
     directory: &Path,
     into: &mut Exported,
 ) -> Result<PathBuf, DbError> {
+    let rows = rows(conn, mailbox_id)?;
+
     let name = mailbox_name(conn, mailbox_id);
     let folder = unique_path(directory, &name, "");
 
-    std::fs::create_dir_all(&folder).map_err(DbError::from)?;
+    std::fs::create_dir_all(directory).map_err(DbError::from)?;
+    // `create_dir`, not `create_dir_all`: a folder that is already there is not this export's
+    // to remove if it fails.
+    std::fs::create_dir(&folder).map_err(DbError::from)?;
 
-    for (index, row) in rows(conn, mailbox_id)?.into_iter().enumerate() {
+    let mut counts = Exported::default();
+    if let Err(error) = write_eml_tree(&folder, rows, &mut counts) {
+        let _ = std::fs::remove_dir_all(&folder);
+        return Err(error);
+    }
+
+    into.messages += counts.messages;
+    into.without_body += counts.without_body;
+    into.mailboxes += 1;
+    into.files.push(folder.to_string_lossy().to_string());
+
+    Ok(folder)
+}
+
+/// The messages of one mailbox into `folder`, a file each.
+fn write_eml_tree(folder: &Path, rows: Vec<Row>, into: &mut Exported) -> Result<(), DbError> {
+    for (index, row) in rows.into_iter().enumerate() {
         let Some(raw) = read_raw(&row) else {
             into.without_body += 1;
             continue;
@@ -158,10 +208,7 @@ pub fn to_eml_tree(
         into.messages += 1;
     }
 
-    into.mailboxes += 1;
-    into.files.push(folder.to_string_lossy().to_string());
-
-    Ok(folder)
+    Ok(())
 }
 
 /// Reads a message's cached source.
@@ -282,6 +329,44 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&cache);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn a_mailbox_that_cannot_be_exported_leaves_nothing_behind() {
+        // An empty `.mbox`, or an empty folder, under the mailbox's name, beside the ones that
+        // worked: a person would take it for that mailbox's export (L38).
+        let cache = tempfile::tempdir().expect("cache");
+        let out = tempfile::tempdir().expect("out");
+        let (conn, mailbox) = fixture(cache.path(), 2, true);
+        conn.execute("ALTER TABLE message RENAME COLUMN raw_path TO raw_gone", [])
+            .expect("break the store");
+
+        let mut counts = Exported::default();
+        assert!(to_mbox(&conn, mailbox, out.path(), &mut counts).is_err());
+        assert!(to_eml_tree(&conn, mailbox, out.path(), &mut counts).is_err());
+
+        let left: Vec<_> = std::fs::read_dir(out.path())
+            .expect("list")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+        assert_eq!(counts, Exported::default());
+    }
+
+    #[test]
+    fn an_export_never_writes_over_a_file_that_is_there() {
+        // Removing what a failed export wrote is only safe if it wrote it.
+        let cache = tempfile::tempdir().expect("cache");
+        let out = tempfile::tempdir().expect("out");
+        let (conn, mailbox) = fixture(cache.path(), 1, true);
+
+        let mut counts = Exported::default();
+        let first = to_mbox(&conn, mailbox, out.path(), &mut counts).expect("first");
+        let second = to_mbox(&conn, mailbox, out.path(), &mut counts).expect("second");
+
+        assert_ne!(first, second);
+        assert_eq!(counts.mailboxes, 2);
     }
 
     #[test]

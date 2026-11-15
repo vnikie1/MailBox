@@ -161,12 +161,24 @@ fn transport(
             secret.expose().to_string(),
         ))
         .authentication(mechanisms)
+        .hello_name(hello_name())
         .tls(match server.security {
             Security::Tls => Tls::Wrapper(tls),
             Security::StartTls => Tls::Required(tls),
         });
 
     Ok(builder.build())
+}
+
+/// What the client calls itself in `EHLO`: an address literal, `[127.0.0.1]`.
+///
+/// lettre's default is the computer's name, and Gmail copies the greeting into the `Received`
+/// header every recipient can read — so every message told its recipients what the sender's PC
+/// was called (M10, 2026-11-14 audit). Standing rule 16 forbids exactly that. The account check
+/// in `accounts::verify` has always greeted this way; sending now does too, and lettre's
+/// `hostname` feature is off so nothing can fall back to the real name.
+fn hello_name() -> lettre::transport::smtp::extension::ClientId {
+    lettre::transport::smtp::extension::ClientId::Ipv4(std::net::Ipv4Addr::LOCALHOST)
 }
 
 /// The delivery envelope for a message.
@@ -236,6 +248,15 @@ pub fn is_deliverable(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M10 in the 2026-11-14 audit. lettre greets the server with the computer's name unless told
+    /// otherwise, and Gmail writes the greeting into the `Received` header every recipient can
+    /// read — so each message announced what the sender's PC was called. The account check in
+    /// `accounts::verify` already avoided this; sending did not.
+    #[test]
+    fn the_server_is_greeted_with_an_address_literal_not_the_computers_name() {
+        assert_eq!(hello_name().to_string(), "[127.0.0.1]");
+    }
 
     fn server(port: u16, security: Security) -> ServerSettings {
         ServerSettings {

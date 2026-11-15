@@ -7,6 +7,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Button, useToast } from '@/ui'
 
 import styles from './JunkBanner.module.css'
+import { reasonFor } from '@/lib/ipc'
 
 export interface JunkBannerProps {
   message: MessageFull
@@ -42,7 +43,7 @@ export function JunkBanner({ message }: JunkBannerProps) {
       .catch((error: unknown) => {
         toast.show({
           title: 'That could not be changed',
-          description: error instanceof Error ? error.message : String(error),
+          description: reasonFor(error),
         })
       })
   }

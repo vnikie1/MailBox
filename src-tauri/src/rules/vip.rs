@@ -151,13 +151,57 @@ pub fn block_sender(tx: &Transaction<'_>, address: &str, now: i64) -> Result<(),
     //
     // `junk_by_user` rather than a bare `is_junk`, so the classifier can tell "the user said
     // so" from "the filter thought so" — see junk.rs.
+    //
+    // The sender's address, exactly, as `mark_blocked_arrivals` compares it. This was a substring
+    // of `from_all`, so blocking ann@company.com also junked everything from joann@company.com,
+    // and anything whose sender's *name* happened to contain the address (M17, 2026-11-14 audit).
+    // A `_` in the address was a LIKE wildcard too.
     tx.execute(
         "UPDATE message SET is_junk = 1, junk_by_user = 1
-          WHERE LOWER(from_all) LIKE '%' || ?1 || '%'",
+          WHERE LOWER(TRIM(from_addr)) = ?1",
         params![address],
     )?;
 
     Ok(())
+}
+
+/// Marks the arrivals from a blocked sender as junk, and says how many.
+///
+/// The forward half of blocking, which did not exist: `block_sender` marked the mail already
+/// here, and nothing looked at the list again, so the next message from that sender arrived in
+/// the Inbox and raised a toast (H10, 2026-11-14 audit). Called for Inbox arrivals, before the
+/// rules and the classifier.
+///
+/// Matched exactly on the sender's address, as the list is stored, and as the retroactive half
+/// in `block_sender` now matches too — `notoffers@pest.example` is not `offers@pest.example`.
+pub fn mark_blocked_arrivals(tx: &Transaction<'_>, ids: &[i64]) -> Result<usize, DbError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    // In pieces past SQLite's parameter limit (M7). See `db::write::CHUNK`.
+    if ids.len() > crate::db::write::CHUNK {
+        let mut marked = 0;
+        for chunk in ids.chunks(crate::db::write::CHUNK) {
+            marked += mark_blocked_arrivals(tx, chunk)?;
+        }
+        return Ok(marked);
+    }
+
+    let list = (1..=ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "UPDATE message SET is_junk = 1, junk_by_user = 1
+          WHERE id IN ({list})
+            AND LOWER(TRIM(from_addr)) IN (SELECT address FROM blocked_sender)"
+    );
+
+    let bound: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    Ok(tx.execute(&sql, bound.as_slice())?)
 }
 
 pub fn unblock_sender(tx: &Transaction<'_>, address: &str) -> Result<(), DbError> {
@@ -392,4 +436,61 @@ pub fn detect_follow_ups(tx: &Transaction<'_>, now: i64) -> Result<usize, DbErro
     )?;
 
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocking_a_sender_junks_their_mail_and_no_one_elses() {
+        // M17. Blocking ann@company.com used to junk joann@company.com's mail as well.
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::db::unicode_lower(&conn).expect("lower");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+
+        conn.execute_batch(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me');
+             INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (1, 1, 'INBOX', 'Inbox', 'inbox');",
+        )
+        .expect("seed");
+
+        for (id, name, address) in [
+            (1, "Ann", "ann@company.com"),
+            (2, "Jo Ann", "joann@company.com"),
+            (3, "Ann", " ANN@Company.com "),
+            // Named after the address without being sent from it.
+            (4, "ann@company.com fan club", "fans@example.test"),
+            // A `_` would have been a LIKE wildcard for this one.
+            (5, "Aan", "aan@company.com"),
+        ] {
+            conn.execute(
+                "INSERT INTO message (
+                     id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                     from_name, from_addr, from_all, to_all, body_text, has_attachment,
+                     flag_seen, flag_flagged, is_junk
+                 ) VALUES (?1, 1, 1, ?1, 'S', 0, 0, 10, ?2, ?3, ?2 || ' ' || ?3, '', '', 0,
+                           0, 0, 0)",
+                params![id, name, address],
+            )
+            .expect("message");
+        }
+
+        let tx = conn.transaction().expect("tx");
+        block_sender(&tx, "Ann@Company.com", 0).expect("block");
+        block_sender(&tx, "a_n@company.com", 0).expect("block");
+
+        let mut statement = tx
+            .prepare("SELECT id, is_junk FROM message ORDER BY id")
+            .expect("prepare");
+        let junk: Vec<(i64, i64)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+
+        assert_eq!(junk, vec![(1, 1), (2, 0), (3, 1), (4, 0), (5, 0)]);
+    }
 }

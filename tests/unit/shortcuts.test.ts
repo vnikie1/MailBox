@@ -190,6 +190,14 @@ describe('the Phase 10 exit gate', () => {
     expect(shortcut?.keys).toBeTruthy()
   })
 
+  it('does not list arrows for threads the message list does not have', () => {
+    // L20 in the 2026-11-14 audit: → and ← were in the Help sheet as Expand and Collapse
+    // thread, and nothing anywhere handled them, because there are no thread rows to expand.
+    const keys = SHORTCUTS.map((entry) => entry.keys)
+    expect(keys).not.toContain('→')
+    expect(keys).not.toContain('←')
+  })
+
   it('reaches a message without a pointer', () => {
     // Reading presupposes selecting, and selecting is arrow keys inside the list. These are
     // `local` — owned by the focused control rather than bound globally — which is why they

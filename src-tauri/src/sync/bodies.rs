@@ -33,11 +33,11 @@ use super::session::{ImapSession, SyncError};
 /// app gets killed by the OS rather than reporting a problem.
 const MAX_BODY_BYTES: usize = 40 * 1024 * 1024;
 
-/// How deep a MIME tree may nest before we stop descending.
+/// How deep the walk below descends into a parsed tree.
 ///
-/// A hand-crafted message can nest `multipart/mixed` thousands of levels deep. `mailparse`
-/// has already parsed the structure by the time we walk it, so this bounds *our* recursion,
-/// which is the part that would otherwise overflow the stack on a body someone chose.
+/// This bounds only *our* recursion. It never protected against the deep message it was written
+/// for, because `mailparse` had already recursed to the full depth before the walk began; that
+/// is now refused up front by `mail::mime::parse`, at a deeper limit than this one.
 const MAX_MIME_DEPTH: usize = 32;
 
 /// How much text goes in the list's preview column.
@@ -105,6 +105,35 @@ pub async fn fetch(session: &mut ImapSession, uid: u32) -> Result<Vec<u8>, SyncE
     Ok(raw)
 }
 
+/// Whether a message is too large to download, by the size the server reported for it.
+///
+/// Asked before fetching. Fetching first meant a message over the cap was downloaded in full on
+/// every open and then refused, and never shown (M8, 2026-11-14 audit). A size of 0 is unknown,
+/// not small, and is left to the check after the fetch.
+pub fn too_large(size: i64) -> bool {
+    size > MAX_BODY_BYTES as i64
+}
+
+/// What is stored for a message too large to download: a sentence saying so, in place of a body.
+///
+/// Stored like a body, so the message stops reading as "downloading" for ever and is never asked
+/// for again. The original stays on the server, where its own web mail can open it.
+pub fn too_large_body(size: i64) -> Body {
+    let megabytes = |bytes: i64| (bytes + 512 * 1024) / (1024 * 1024);
+    let text = format!(
+        "This message is {} MB, larger than the {} MB Halcyon downloads, so it has not been \
+         downloaded. It is still on the server, and your provider's web mail can open it.",
+        megabytes(size),
+        megabytes(MAX_BODY_BYTES as i64),
+    );
+
+    Body {
+        preview: build_preview(&text),
+        text: Some(text),
+        ..Body::default()
+    }
+}
+
 /// Writes the raw source to the on-disk cache.
 pub fn write_cache(
     root: &Path,
@@ -128,9 +157,26 @@ pub fn write_cache(
 /// an error, because a message the user can see and not read is better than a message that
 /// vanished. Standing rule 13.
 pub fn parse(raw: &[u8]) -> Body {
-    let Ok(parsed) = mailparse::parse_mail(raw) else {
-        tracing::debug!("message could not be parsed as MIME; storing nothing");
-        return Body::default();
+    let parsed = match crate::mail::mime::parse(raw) {
+        Ok(parsed) => parsed,
+        // Shown as the text it is rather than as nothing. Stored like any other body, so it is
+        // marked downloaded and never fetched and parsed again — the old crash repeated on
+        // every reopen precisely because nothing recorded that this message had been tried.
+        Err(crate::mail::mime::Unparsed::TooDeep { body, .. }) => {
+            let text = String::from_utf8_lossy(body)
+                .replace("\r\n", "\n")
+                .replace('\r', "\n");
+
+            return Body {
+                preview: build_preview(&text),
+                text: Some(text),
+                ..Body::default()
+            };
+        }
+        Err(crate::mail::mime::Unparsed::Malformed(_)) => {
+            tracing::debug!("message could not be parsed as MIME; storing nothing");
+            return Body::default();
+        }
     };
 
     let mut body = Body::default();
@@ -934,6 +980,64 @@ GIF89a\r\n\
         assert!(body.preview.len() <= PREVIEW_CHARS);
     }
 
+    /// A message nested far deeper than the walker's cap, on a stack the size of the one the
+    /// body fetch really runs on.
+    ///
+    /// The 200-level test above passed for months while the app could be killed by one email.
+    /// It only exercised *our* walk, which was already capped. `mailparse::parse_mail` recurses
+    /// once per level before the walk ever starts, and its frames, not ours, are what overflow:
+    /// a ~300 KB message nested 5,000 deep aborted a release build. An abort is not a panic, so
+    /// nothing catches it, and because the body is never marked downloaded the same message
+    /// crashed the app again on every reopen, prefetch and rebuild.
+    ///
+    /// Fixed-width boundaries, so every level costs the same bytes and the depth is what the
+    /// test says it is. Run on a 2 MiB thread because that is a tokio worker's stack; the test
+    /// harness's own threads are larger and would hide it.
+    #[test]
+    fn a_message_nested_fifty_thousand_deep_does_not_overflow_the_stack() {
+        const LEVELS: usize = 50_000;
+
+        let mut raw = String::from("From: a@example.test\r\nSubject: nest\r\n");
+        for level in 0..LEVELS {
+            raw.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"b{level:05}\"\r\n\r\n--b{level:05}\r\n"
+            ));
+        }
+        raw.push_str("Content-Type: text/plain\r\n\r\nthe innermost text\r\n");
+
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || parse(raw.as_bytes()))
+            .expect("thread");
+
+        let body = handle
+            .join()
+            .expect("parsing returned rather than unwinding");
+
+        // Shown as text rather than as nothing. The message is hostile, but it is still a
+        // message somebody sent, and an empty reader would look like a download that failed.
+        let text = body.text.unwrap_or_default();
+        assert!(text.contains("multipart/mixed"), "{}", &text[..200]);
+        assert!(body.attachments.is_empty());
+    }
+
+    #[test]
+    fn ordinary_nesting_is_still_parsed_as_mime() {
+        // The cap must sit well above anything a real client produces. Ten levels is already
+        // more than forwarded-as-attachment chains reach in practice.
+        let mut raw = String::new();
+        for level in 0..10 {
+            raw.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"b{level}\"\r\n\r\n--b{level}\r\n"
+            ));
+        }
+        raw.push_str("Content-Type: text/plain\r\n\r\ndeep but fine\r\n");
+
+        let body = parse(raw.as_bytes());
+
+        assert_eq!(body.text.as_deref().map(str::trim), Some("deep but fine"));
+    }
+
     #[test]
     fn the_preview_skips_quoted_lines_and_signatures() {
         // A reply whose preview reads "> On Tuesday someone wrote:" says nothing about the
@@ -1129,5 +1233,30 @@ The comparison a < b holds, and 5 > 3.\r\n";
         assert!(looks_like_html("  \r\n<html>\n<body>Hi"));
         assert!(!looks_like_html("Hello there."));
         assert!(!looks_like_html(""));
+    }
+}
+
+#[cfg(test)]
+mod oversize_tests {
+    use super::*;
+
+    /// M8 in the 2026-11-14 audit: a message over the 40 MB cap was downloaded in full every
+    /// time it was opened, then refused — and the reader went on saying it was downloading, for
+    /// ever. The server says how big a message is before any of it is fetched.
+    #[test]
+    fn a_message_too_large_to_download_says_so_instead() {
+        assert!(!too_large(MAX_BODY_BYTES as i64));
+        assert!(too_large(MAX_BODY_BYTES as i64 + 1));
+        assert!(!too_large(0), "an unknown size is not a reason to refuse");
+
+        let body = too_large_body(52 * 1024 * 1024);
+        let text = body.text.unwrap_or_default();
+        assert!(text.contains("52 MB"), "{text}");
+        assert!(text.contains("40 MB"), "{text}");
+        assert!(body.attachments.is_empty());
+        assert_eq!(
+            body.preview,
+            text.chars().take(PREVIEW_CHARS).collect::<String>()
+        );
     }
 }

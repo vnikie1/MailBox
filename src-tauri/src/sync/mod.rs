@@ -2,6 +2,7 @@
 
 pub mod backoff;
 pub mod bodies;
+pub mod drafts;
 pub mod engine;
 pub mod envelope;
 pub mod events;
@@ -12,6 +13,7 @@ pub mod mailboxes;
 pub mod ops;
 pub mod outbox;
 pub mod persist;
+pub mod repair;
 pub mod sender;
 pub mod session;
 pub mod smtp;

@@ -171,21 +171,16 @@ function flaggedPredicate(): Predicate {
 }
 
 /**
- * `is flagged, and mentions this colour`.
+ * `the flag is this colour`. The field means the colour the flag shows, so it is false for a
+ * message that is not flagged, and a flag with no colour recorded counts as the orange the list
+ * draws it in. See `Field::FlagColor` in rules/predicate.rs.
  *
- * There is deliberately no `flagColor` field on `Field`. Adding one would let a user write a
- * smart mailbox against a colour and then rename that colour out from under themselves, and the
- * mailbox would silently stop matching. These children are built by the app rather than saved,
- * so they can be rebuilt whenever the names change.
+ * This was "flagged, and any text contains the colour's key", so Red listed flagged mail from
+ * Fred or about credit, and not the mail flagged red (H11, 2026-11-14 audit). The colour's key,
+ * never its name: renaming Red to "Urgent" does not change which mail is red.
  */
 function colourPredicate(color: string): Predicate {
-  return {
-    type: 'all',
-    value: [
-      flaggedPredicate(),
-      { type: 'is', value: { field: 'anyText', op: 'contains', value: color } },
-    ],
-  }
+  return { type: 'is', value: { field: 'flagColor', op: 'is', value: color } }
 }
 
 /**
@@ -205,13 +200,14 @@ function vipNode(vips: Vip[]): SidebarNode | null {
     label: 'VIPs',
     icon: Star,
     mailboxIds: [],
-    // One `any` over the addresses. Matching on `from` rather than `anyText` so a message that
-    // merely *mentions* a VIP does not qualify — the row means "from these people".
+    // One `any` over the addresses: the sender's address, whole. `from` holds the name and the
+    // address run together, so "from contains ann@company.com" also listed joann@company.com's
+    // mail. The core lowercases both sides, and VIP addresses are stored normalised.
     predicate: {
       type: 'any',
       value: vips.map((vip) => ({
         type: 'is' as const,
-        value: { field: 'from' as const, op: 'contains' as const, value: vip.address },
+        value: { field: 'fromAddress' as const, op: 'is' as const, value: vip.address },
       })),
     },
     unreadCount: 0,
@@ -496,6 +492,50 @@ export function visibleRows(nodes: SidebarNode[], collapsed: Set<string>): Sideb
 
   nodes.forEach(walk)
   return rows
+}
+
+/**
+ * The row that holds the sidebar's one Tab stop.
+ *
+ * The tree is a roving-tabindex widget — one row is tabbable and the arrows move between the
+ * rest — and that row was the selected one, unconditionally. Folding the section the selection
+ * was in took the selected row out of the tree, and the sidebar with it: nothing in it could be
+ * reached by Tab at all (L27, 2026-11-14 audit).
+ *
+ * So: the selected row while it is showing; otherwise the row it is folded inside, which is the
+ * outermost collapsed row on the way down to it, as the tree pattern has it; otherwise, with no
+ * selection in the tree, the first row.
+ */
+export function tabStopRow(
+  sections: { nodes: SidebarNode[] }[],
+  collapsed: Set<string>,
+  selectedId: string,
+): string | null {
+  const pathTo = (node: SidebarNode): SidebarNode[] | null => {
+    if (node.id === selectedId) return [node]
+    for (const child of node.children) {
+      const rest = pathTo(child)
+      if (rest !== null) return [node, ...rest]
+    }
+    return null
+  }
+
+  let first: string | null = null
+
+  for (const section of sections) {
+    for (const node of section.nodes) {
+      first ??= node.id
+
+      const path = pathTo(node)
+      if (path === null) continue
+
+      // The path ends at the selected row itself; any row before it that is folded hides it.
+      const folded = path.slice(0, -1).find((step) => collapsed.has(step.id))
+      return folded?.id ?? selectedId
+    }
+  }
+
+  return first
 }
 
 /**

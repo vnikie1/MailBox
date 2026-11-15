@@ -13,4 +13,13 @@ cursor: Cursor | null, limit: number,
 /**
  * Unread only — the list's filter button.
  */
-unreadOnly: boolean, };
+unreadOnly: boolean, 
+/**
+ * Messages to keep in an unread-only list although they have been read: the selection.
+ *
+ * Kept, never added. A message that is no longer in these mailboxes is not returned, so a
+ * deleted or moved message still leaves the list. Without this, reading the open message
+ * dropped it from the list, the selection followed to the next row, that row was read, and
+ * the list read itself one message a second (H1, 2026-11-14 audit).
+ */
+keepIds: number[], };

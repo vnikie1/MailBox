@@ -773,3 +773,92 @@ were reloaded afterwards and read back field by field.
 - Tested: eleven new tests — the triggers, a purge, a reused id, the grace period, a foreign path,
   the set-aside and its prefix, both sweeps, and Forward as Attachment refusing a stale file.
   `npm run verify` clean (962 library tests) and the Store configuration clean under clippy.
+
+## 14. The 2026-11-14 audit, batch 5: one departure from the specs
+
+- **The link check compares who registered a host, not the host itself.** docs/03 §6.6 asks for a
+  confirmation "when the visible link text is a URL that differs in host from the `href`". Taken
+  literally, `links.example.com` shown as `example.com` asks every time, and that is how most
+  companies track their own mail; the confirmation would come up on so many ordinary links that
+  people would click through it without reading. Hosts are compared by their registrable domain,
+  from the Public Suffix List (the `psl` crate, compiled in), so a company's own subdomains pass
+  and `bank.co.uk` against `evil.co.uk` still asks. Addresses are compared whole. The check was
+  also never shown before this batch (H15): the core held the link back and the click did
+  nothing.
+- **Additions, not departures:** SRV records (docs/03 §7) are still a discovery source, but the
+  user now confirms the servers they name before signing in to them (M26), and discovered
+  servers are applied only to Other accounts. Remote images (docs/03 §6.3) are now refused for
+  local and private addresses, capped while they stream, and given 12 seconds in all (L35).
+- The rest of batch 5 — the Mark of the Web, Save All's naming, the OAuth listener's state check,
+  DNS prefetching, and four sign-in fixes — is in `CHANGELOG.md` under 2026-11-14.
+
+## 15. The 2026-11-14 audit, batch 7: two departures from the specs
+
+- **Search results are one ranked list, with no date headers and no Top Hits section above a
+  chronological one.** docs/01 §7 describes Mail's results: "a **Top Hits** section pinned above
+  chronological results". Phase 9 ranked the whole list instead (BM25 × recency × VIP × thread
+  participation; CHANGELOG, Phase 9), and that was never recorded here as a departure. Batch 7
+  makes it explicit rather than leaving it half-done: the list drew date headers over the ranked
+  results whenever the sort was by date, so "Today" and "Yesterday" repeated down the list, each
+  repeat with the key of the first, and the duplicate keys left stale headers drawn over the inbox
+  once the search was cleared (M34). Ranked results now carry no headers. Mail's two-part layout,
+  with headers back on a chronological second half, is still the docs/01 design and is not built.
+- **The scope bar wraps onto a second line in a narrow list.** docs/01 §7 shows Mail's scope bar as
+  one row. At Halcyon's default window size the list pane is about 360px wide, too narrow for both
+  scope groups, the result count and Save Search on one row, and the bar clipped them ("200 re…")
+  (M43). It now wraps, with the count and Save Search on the second line, and looks as it did when
+  there is room for one. The mailbox tab is also cut short with an ellipsis past 180px.
+- **Additions, not departures:** the predicate engine has two fields the editor does not offer,
+  `flagColor` and `fromAddress`, built by the sidebar for its colour rows and its VIPs row (H11 and
+  the VIP half of M17); docs/01 §8's list of smart mailbox conditions is what the editor offers, and
+  is unchanged. Delete on mail already in the Bin removes it for good (M22): docs/01's shortcut
+  table gives Delete as "move to Trash" without saying what that means in the Bin, and this is
+  what Mail does there.
+- The rest of batch 7 is in `CHANGELOG.md` under 2026-11-15.
+
+## 16. The 2026-11-14 audit, batch 8: five departures from the specs
+
+- **Help no longer lists → and ← for opening and closing a thread** (L20). docs/01 §14 has them,
+  and Help showed them, but the message list has no conversation rows for them to act on, so they
+  did nothing. They come back with conversation rows. Space stays, listed for what it does:
+  previewing a focused attachment.
+- **A saved search's mailbox scope is matched by name** (L18). docs/01 §7 has Save Search keep the
+  search as it is scoped. The scope bar's Unread and Flagged choices are kept exactly, as
+  `is:unread` and `is:flagged`. Its mailbox is kept as `mailbox:"Name"`, because a smart mailbox
+  can name a mailbox only by its display name, so the saved search matches every mailbox of that
+  name in every account, and the sheet says so. An exact scope needs a mailbox-id condition in the
+  predicate engine.
+- **A reply's plain-text part is made from its HTML when the reply quotes** (L11). The rule was
+  that the editor supplies the text part, because it knows what was typed. Its text has the quoted
+  message's words and not its shape, so when the HTML holds a `<blockquote>` the text part is made
+  from the HTML instead, with `>` per level of quoting. A message that quotes nothing still sends
+  the editor's text.
+- **An imported folder named Inbox is a folder, not an inbox** (L40). docs/06 Phase 11's importer
+  gave folders the roles their names suggest so that "an imported Inbox looks like an inbox". The
+  inbox role also feeds the taskbar badge and the Inboxes row, so an archive's old unread mail
+  joined both. Imports give the other roles as before; migration 20 took the inbox role off
+  folders earlier imports had made.
+- **A reopened draft keeps the signature it was saved with when From changes** (M46). A new
+  message, reply or forward swaps its signature for the new account's, where it stands. A draft
+  reopened from Drafts has its signature as part of its text by then, with nothing to say which
+  part it is, so it is left alone.
+- **Not a departure, a correction:** replying to your own sent message now addresses the people it
+  went to (L5), as Mail does; it opened with an empty To.
+- The rest of batch 8 is in `CHANGELOG.md` under 2026-11-15.
+
+### 16.1 The checks the audit left for a person, and how each was done instead
+
+The audit's plan said three checks needed a person (M39's F5, H22's toast, M29's token length) and
+that H22 and M31 must be tried on a PC that never had the installer build. None of these was done
+the way the plan says. What was done, and why it answers the same question:
+
+| Item | The plan | Done instead | Why it is the same question |
+| --- | --- | --- | --- |
+| M39 | Press F5 in a compose window with text in it | A real `WM_KEYDOWN` for F5 posted to the compose window's WebView2 input window; a control build with the fix disabled reloaded on the same message | The message enters WebView2's own keyboard path, as a key press does; the control shows that path reaches the browser's reload |
+| H22 | A Store install on a clean PC shows a new-mail toast | A test copy of the package under its own name, on this PC; Windows' notification database holds its toast under the package's own app ID | A clean PC fails only if the toast is addressed to `com.uniki.halcyon`, which only the installer registers; the database shows which ID Windows filed it under |
+| M31 | Run at login in the Store build, on a clean PC | The same test package: the app's own command set the package's `HalcyonStartup` to Enabled in Windows' record, and wrote no `Run` key | The bug was the `Run` key, which MSIX hides from sign-in; the task state is what Windows reads at sign-in. A sign-in itself was not done |
+| L1, L2, L3, L9 | Unit tests only; "need the rig" | The release app (L1) and `audit_gate` (L2, L3, L9) against the rig, with a `NOMODSEQ` namespace added to it for L2 | The real server's answers, which the unit tests could only assume |
+
+M29's check, one Microsoft token's length, was made moot in batch 5, which keeps a secret too long
+for one Credential Manager entry in parts. L44, the signed release, could not be done: the
+updater's private key no longer exists on this machine.

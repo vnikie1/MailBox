@@ -87,6 +87,16 @@ with real `In-Reply-To`/`References` chains, a spread of dates so keyset paginat
 exercised over a real range, HTML messages with quoted replies and tracking numbers, and a
 proportion with the malformed headers and missing charsets that real mail is full of.
 
+## The `Volatile/` namespace
+
+A second namespace whose indexes are kept in memory (`mail_index_path = MEMORY`), added on
+2026-11-15. Its mailboxes keep no permanent modification sequences, so SELECT answers
+`NOMODSEQ` there while every other mailbox has a `HIGHESTMODSEQ`, and Dovecot refuses
+`FETCH MODSEQ` and `CHANGEDSINCE` with "can't be used with non-permanent modseqs". That is the
+case RFC 7162 allows and L2 of the 2026-11-14 audit was about. `audit_gate` makes a mailbox in it
+and removes it; it is otherwise empty. The config is mounted, so changing it is
+`docker restart halcyon-dovecot`, not a rebuild.
+
 ## Resetting
 
 `docker compose down -v` destroys the volume, which is how the `UIDVALIDITY` test starts from

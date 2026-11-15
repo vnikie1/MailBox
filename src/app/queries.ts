@@ -13,6 +13,7 @@ import type { Cursor } from '@/lib/generated/Cursor'
 import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 import type { FlagPatch } from '@/lib/generated/FlagPatch'
 import type { MailboxRow } from '@/lib/generated/MailboxRow'
+import type { MatchCounts } from '@/lib/generated/MatchCounts'
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import type { MessageRow } from '@/lib/generated/MessageRow'
 import type { Rendered } from '@/lib/generated/Rendered'
@@ -20,9 +21,17 @@ import type { Predicate } from '@/lib/generated/Predicate'
 import type { FlagName } from '@/lib/generated/FlagName'
 import type { SmartMailbox } from '@/lib/generated/SmartMailbox'
 import type { Vip } from '@/lib/generated/Vip'
-import { blockedList, flagNames, smartList, smartMessages, vipsList } from '@/lib/organise'
+import {
+  blockedList,
+  flagNames,
+  smartCount,
+  smartList,
+  smartMessages,
+  vipsList,
+} from '@/lib/organise'
 import { useToast } from '@/ui'
 import * as ipc from '@/lib/ipc'
+import { useMailStore } from '@/store/mail'
 
 /**
  * Server state, over the IPC contract. docs/03-architecture.md §4.
@@ -48,6 +57,8 @@ export const keys = {
   // Keyed on the predicate itself, so editing a smart mailbox refetches and two smart
   // mailboxes with the same conditions share one cache entry.
   smart: (predicate: unknown) => ['messages', 'smart', predicate] as const,
+  // Under `messages` so that whatever marks the list stale marks its count stale with it.
+  smartCount: (predicate: unknown) => ['messages', 'smartCount', predicate] as const,
   message: (id: number) => ['message', id] as const,
   thread: (threadId: number) => ['thread', threadId] as const,
   search: (text: string, mailboxIds: number[]) => ['search', text, mailboxIds] as const,
@@ -94,6 +105,16 @@ export function useMessages(mailboxIds: number[], unreadOnly: boolean) {
         cursor: pageParam,
         limit: PAGE_SIZE,
         unreadOnly,
+        // The open message stays in an unread-only list after it is read, as in Mail. Without
+        // this the refetch that follows marking it read dropped it, the selection followed the
+        // list to the next row, that one was read in turn, and the filter read the whole mailbox
+        // one message a second (H1, 2026-11-14 audit).
+        //
+        // Read when the page is fetched rather than put in the key. In the key, every change of
+        // selection would refetch every loaded page; here the list is only asked again when
+        // something has changed — which reading a message does — and the message read before
+        // the one now open is not kept, so it leaves then.
+        keepIds: unreadOnly ? useMailStore.getState().selectedMessageIds : [],
       }),
     getNextPageParam: (lastPage) => lastPage.nextCursor,
   })
@@ -121,6 +142,22 @@ export function useSmartMessages(predicate: Predicate | undefined) {
       lastPage.length < PAGE_SIZE ? undefined : allPages.length * PAGE_SIZE,
   })
 }
+
+/**
+ * How many messages a saved search matches, and how many are unread, for the list header.
+ *
+ * Asked of the core rather than counted from the rows: the list loads a page at a time, so the
+ * rows in hand are a count of what has been scrolled past, not of what the row holds.
+ */
+export function useSmartCount(predicate: Predicate | undefined) {
+  return useQuery({
+    queryKey: keys.smartCount(predicate ?? null),
+    enabled: predicate !== undefined,
+    queryFn: () => (predicate === undefined ? Promise.resolve(NO_MATCHES) : smartCount(predicate)),
+  })
+}
+
+const NO_MATCHES: MatchCounts = { total: 0, unread: 0 }
 
 /**
  * The saved searches in the sidebar, and the flag names under Flagged.

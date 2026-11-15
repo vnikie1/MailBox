@@ -75,7 +75,18 @@ pub fn run() {
     }
 
     with_updater(tauri::Builder::default())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Everything but visibility. The plugin restores a window the moment it is created,
+        // and restoring "visible" meant `show()`: the main window appeared before `setup` had
+        // put the backdrop and theme on it, which is the white flash on launch docs/02 §8 rules
+        // out (L36, 2026-11-14 audit). Every window is shown by the code that made it.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
         // Off unless the user asks. An app that added itself to startup without being told is
@@ -87,15 +98,11 @@ pub fn run() {
         // A second launch — from a mailto: link, or the Start menu — hands its arguments to the
         // running instance and exits. Without this, opening a mailto: link would start a whole
         // second copy of the app against the same database.
+        //
+        // `tray::show` rather than showing the window here, because it also makes the main
+        // window again when it was closed while another window kept the app running (M30).
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            use tauri::Manager;
-
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
-
+            platform::tray::show(app);
             platform::links::handle_arguments(app, &argv);
         }))
         .invoke_handler(tauri::generate_handler![
@@ -104,6 +111,7 @@ pub fn run() {
             ipc::window::display_preferences_set,
             ipc::window::badge_paint,
             ipc::window::settings_open,
+            ipc::window::handoff_take,
             ipc::transfer::import_sources,
             ipc::transfer::import_pick_files,
             ipc::transfer::import_run,
@@ -144,11 +152,13 @@ pub fn run() {
             ipc::accounts::account_test,
             ipc::accounts::account_add_password,
             ipc::accounts::account_add_oauth,
+            ipc::accounts::oauth_cancel,
             ipc::accounts::accounts_detail,
             ipc::accounts::account_update,
             ipc::accounts::accounts_reorder,
             ipc::accounts::account_remove,
             ipc::accounts::account_reauth,
+            ipc::accounts::account_set_password,
             ipc::accounts::account_credential_status,
             ipc::accounts::oauth_client_get,
             ipc::accounts::oauth_client_set,
@@ -179,6 +189,7 @@ pub fn run() {
             ipc::organise::smart_save,
             ipc::organise::smart_delete,
             ipc::organise::smart_messages,
+            ipc::organise::smart_count,
             ipc::organise::rules_list,
             ipc::organise::rule_save,
             ipc::organise::rule_delete,
@@ -209,6 +220,8 @@ pub fn run() {
             ipc::organise::undo_perform,
             ipc::organise::redo_perform,
             ipc::compose::compose_discard_draft,
+            ipc::compose::compose_open_draft,
+            ipc::compose::compose_load_draft,
             ipc::compose::contacts_suggest,
             ipc::search::search_run,
             ipc::search::search_suggest,
@@ -258,6 +271,8 @@ pub fn run() {
             // Behind an `Arc` because `Db::write` moves its closure to the writer thread, so
             // an undo command has to hand the stack across that boundary rather than borrow it.
             app.manage(std::sync::Arc::new(undo::Stack::new()));
+            // What Windows asks of the main window before it can hear it. See platform::handoff.
+            app.manage(platform::handoff::Handoff::new());
 
             // The outbox sender. Started here rather than on first send, because its first
             // job is to resolve whatever a previous run left in flight — a message that was
@@ -287,6 +302,10 @@ pub fn run() {
                 tauri::async_runtime::spawn(sync::upkeep::run(db, events));
             }
 
+            // One-off repairs of what earlier versions stored wrongly. Each records itself done,
+            // so after the first launch this is a single settings lookup.
+            tauri::async_runtime::spawn(sync::repair::run(app.state::<db::Db>().inner().clone()));
+
             // No `?`: the backdrop is a decoration, and a decoration must not be able to stop
             // the app from starting. See `platform::install` — this line, with its `?`, is
             // six of the nine crash reports in the diagnostics folder.
@@ -302,15 +321,19 @@ pub fn run() {
                 Ok(_) => {
                     let handle = app.handle().clone();
 
-                    // Refreshed on the same event the list invalidates on. The count is cheap
-                    // and the update is skipped when the number has not moved, which matters:
-                    // a sync raises this event once per mailbox.
-                    tauri::Listener::listen(app.handle(), "mailbox:changed", move |_| {
+                    // Refreshed on every event that can move the count, once per burst.
+                    //
+                    // It listened for `mailbox:changed` alone, which a local action raises and
+                    // a sync raises only for an expunge or a rebuild. Mail that arrived, or was
+                    // read on a phone, is announced as `messages:added` — so the badge and the
+                    // tooltip stayed where they were until the user did something here (H20,
+                    // 2026-11-14 audit). `mailboxes:changed` covers an account added or removed.
+                    for event in ["mailbox:changed", "messages:added", "mailboxes:changed"] {
                         let handle = handle.clone();
-                        tauri::async_runtime::spawn(async move {
-                            platform::tray::refresh(&handle).await;
+                        tauri::Listener::listen(app.handle(), event, move |_| {
+                            platform::tray::refresh_soon(&handle);
                         });
-                    });
+                    }
 
                     // Once at startup, or the badge stays blank until the first sync finishes —
                     // which on a cold start is exactly when someone wants to know.
@@ -361,17 +384,40 @@ pub fn run() {
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "window shown (core side of cold start; excludes WebView paint)"
             );
+            tracing::info!(
+                app_id = platform::toast::app_id(),
+                packaged = platform::package::is_packaged(),
+                "toasts are addressed to this app ID"
+            );
+
+            // What this process was started with: a `mailto:` link, a `.eml` file, a Jump List
+            // task. Only a second launch's arguments used to be read (H19, 2026-11-14 audit).
+            // After the window is shown, because acting on one shows it too.
+            let argv: Vec<String> = std::env::args().collect();
+            platform::links::handle_arguments(app.handle(), &argv);
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::ThemeChanged(_) = event {
+        // Every webview, as each page starts to load: the main window, compose, Settings, the
+        // .eml viewer, and a main window made again. See platform::browser_keys (M39).
+        .on_page_load(|webview, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                platform::browser_keys::turn_off(webview);
+            }
+        })
+        .on_window_event(|window, event| match event {
+            WindowEvent::ThemeChanged(_) => {
                 // Windows reports the theme flip here well before UISettings settles,
                 // so this is the fast path for light/dark; appearance::watch covers
                 // accent and transparency changes.
 
                 platform::appearance::push(window.app_handle());
             }
+            // Whatever Windows asks of the main window from now on waits for the next one.
+            WindowEvent::Destroyed if window.label() == "main" => {
+                window.state::<platform::handoff::Handoff>().window_closed();
+            }
+            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("failed to start Halcyon");
@@ -388,13 +434,8 @@ pub fn run() {
 fn init_tracing(diagnostics: &std::path::Path) {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_env("HALCYON_LOG").unwrap_or_else(|_| {
-        EnvFilter::new(if cfg!(debug_assertions) {
-            "halcyon_lib=debug,warn"
-        } else {
-            "halcyon_lib=info,warn"
-        })
-    });
+    let filter = EnvFilter::try_from_env("HALCYON_LOG")
+        .unwrap_or_else(|_| EnvFilter::new(default_log_filter()));
 
     let file = diagnostics::log_writer(diagnostics).map(|file| {
         fmt::layer()
@@ -411,6 +452,19 @@ fn init_tracing(diagnostics: &std::path::Path) {
         .init();
 }
 
+/// What is logged unless `HALCYON_LOG` says otherwise.
+///
+/// html5ever at `error` only. Its tree builder says "foster parenting not implemented" for every
+/// stray element inside a table, which marketing mail is full of: 129 lines of one session's log,
+/// about markup the sanitiser handles anyway, burying the lines that mattered (L45).
+fn default_log_filter() -> &'static str {
+    if cfg!(debug_assertions) {
+        "halcyon_lib=debug,html5ever=error,warn"
+    } else {
+        "halcyon_lib=info,html5ever=error,warn"
+    }
+}
+
 /// Adds the updater plugin, in builds that update themselves.
 ///
 /// A function rather than a `cfg` inside the chain because `Builder` is consumed and returned
@@ -425,4 +479,64 @@ fn with_updater<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder
 #[cfg(not(feature = "self-update"))]
 fn with_updater<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     builder
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::EnvFilter;
+
+    struct Count(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> Layer<S> for Count {
+        fn on_event(&self, _: &tracing::Event<'_>, _: Context<'_, S>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// How many of `emit`'s events the default filter lets through.
+    fn logged(emit: impl FnOnce()) -> usize {
+        let count = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(Count(Arc::clone(&count)))
+            .with(EnvFilter::new(super::default_log_filter()));
+
+        tracing::subscriber::with_default(subscriber, emit);
+        count.load(Ordering::SeqCst)
+    }
+
+    #[test]
+    fn html5evers_table_warnings_stay_out_of_the_log() {
+        assert_eq!(
+            logged(|| tracing::warn!(
+                target: "html5ever::tree_builder",
+                "foster parenting not implemented"
+            )),
+            0
+        );
+        assert_eq!(
+            logged(|| tracing::error!(target: "html5ever::tree_builder", "a real failure")),
+            1
+        );
+    }
+
+    #[test]
+    fn everything_else_is_logged_as_before() {
+        assert_eq!(
+            logged(|| tracing::warn!(target: "halcyon_lib::sync", "a warning of ours")),
+            1
+        );
+        assert_eq!(
+            logged(|| tracing::warn!(target: "rustls::conn", "a library's warning")),
+            1
+        );
+        assert_eq!(
+            logged(|| tracing::info!(target: "rustls::conn", "a library's chatter")),
+            0
+        );
+    }
 }

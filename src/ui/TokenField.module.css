@@ -141,6 +141,17 @@
   background: var(--fill-hover);
 }
 
+/* A chip that can be dragged to another field. Without `touch-action` a touch or pen press
+ * that starts to move is taken by the browser as a pan, and the drag is cancelled under it. */
+.movable {
+  touch-action: none;
+}
+
+/* The chip being dragged, still in its place until it is dropped somewhere else. */
+.dragging {
+  opacity: var(--chip-dragging-opacity);
+}
+
 /* While a chip is held over this field. A ring rather than a fill: the chips underneath stay
  * legible, and the user is deciding *where* to drop, not reading the field. */
 .dragOver {

@@ -1,10 +1,10 @@
-import { Search, X } from 'lucide-react'
+import { Search } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { cx } from '@/lib/cx'
 import type { Suggestion } from '@/lib/generated/Suggestion'
 import { rememberSearch, searchHistory, suggestSearch } from '@/lib/search'
-import { IconButton, TextField } from '@/ui'
+import { TextField } from '@/ui'
 
 import styles from './SearchField.module.css'
 
@@ -100,6 +100,14 @@ export function SearchField({ value, onChange, onCommit }: SearchFieldProps) {
     [onChange, onCommit],
   )
 
+  /** Leaves the search: no text, no results, and nothing added to the recent searches. */
+  const clear = () => {
+    onChange('')
+    onCommit('')
+    setOpen(false)
+    setHighlighted(-1)
+  }
+
   const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'ArrowDown') {
       event.preventDefault()
@@ -124,9 +132,24 @@ export function SearchField({ value, onChange, onCommit }: SearchFieldProps) {
       return
     }
 
+    // Escape closes the suggestions if they are up, and otherwise clears the search, as it
+    // does in Mail. It only closed them, so leaving a search took selecting the text and
+    // deleting it (L43, 2026-11-14 audit). Kept from the window once it has done either, so the
+    // same press does not go on to close or deselect anything else.
     if (event.key === 'Escape') {
-      setOpen(false)
-      setHighlighted(-1)
+      if (open && rows.length > 0) {
+        event.preventDefault()
+        event.stopPropagation()
+        setOpen(false)
+        setHighlighted(-1)
+        return
+      }
+
+      if (value !== '') {
+        event.preventDefault()
+        event.stopPropagation()
+        clear()
+      }
     }
   }
 
@@ -162,20 +185,12 @@ export function SearchField({ value, onChange, onCommit }: SearchFieldProps) {
           }, 120)
         }}
         onKeyDown={onKeyDown}
-        {...(value === ''
-          ? {}
-          : {
-              trailing: (
-                <IconButton
-                  icon={X}
-                  label="Clear search"
-                  size="sm"
-                  onClick={() => {
-                    commit('')
-                  }}
-                />
-              ),
-            })}
+        // The field's own clear button. This passed a `trailing` button, which `TextField` has
+        // no such prop for: it reached the input as an attribute, and there was no way to clear
+        // a search but to delete it. The button is laid out always and shown only with text in
+        // the field, so the field does not resize as the first letter is typed.
+        onClear={clear}
+        clearLabel="Clear search"
       />
 
       {open && rows.length > 0 && (

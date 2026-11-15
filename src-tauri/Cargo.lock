@@ -1958,6 +1958,7 @@ dependencies = [
  "parking_lot",
  "pdf-extract",
  "proptest",
+ "psl",
  "r2d2",
  "r2d2_sqlite",
  "rand 0.8.8",
@@ -1966,6 +1967,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -1982,6 +1984,7 @@ dependencies = [
  "tracing-subscriber",
  "ts-rs",
  "url",
+ "webview2-com",
  "windows",
  "zip 5.1.1",
 ]
@@ -2092,17 +2095,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
-]
-
-[[package]]
-name = "hostname"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
-dependencies = [
- "cfg-if",
- "libc",
- "windows-link 0.2.1",
 ]
 
 [[package]]
@@ -2715,7 +2707,6 @@ dependencies = [
  "fastrand",
  "futures-io",
  "futures-util",
- "hostname",
  "httpdate",
  "idna",
  "mime",
@@ -3900,6 +3891,21 @@ dependencies = [
  "tempfile",
  "unarray",
 ]
+
+[[package]]
+name = "psl"
+version = "2.1.254"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb958e602bc5c9e07a3bdb78ce240402a490cd08f01e51deacfe637ed903d743"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 
 [[package]]
 name = "pxfm"

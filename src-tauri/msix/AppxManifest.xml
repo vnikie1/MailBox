@@ -137,7 +137,9 @@
         <!--
           Start at sign-in, off until the user asks. `Enabled="false"` is what makes it off: the
           entry exists so Settings → Apps → Startup can list it, and the app enables it through
-          the autostart plugin when the setting is turned on.
+          the StartupTask API when the setting is turned on (src/platform/startup.rs, which a
+          test holds to this TaskId). Not through the autostart plugin: its Run key is redirected
+          into the package's private registry, which Windows never reads at sign-in (M31).
 
           An app that added itself to startup without being told is one people uninstall.
         -->

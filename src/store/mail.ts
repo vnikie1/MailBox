@@ -65,6 +65,15 @@ interface MailState {
    * cursor.
    */
   focusedInThread: number | null
+  /**
+   * Whether the user chose the current message selection, rather than the app: the list picking
+   * its first row when a mailbox opens, or moving on to the next row when the selected one leaves.
+   *
+   * The one-pane layout opens the reader only for a choice the user made. It used to open it for
+   * any new selection, so picking a mailbox jumped straight into its first message and marked it
+   * read (M38, 2026-11-14 audit).
+   */
+  selectionByUser: boolean
 
   selectMailbox: (selection: MailboxSelection) => void
   /**
@@ -75,8 +84,11 @@ interface MailState {
   retargetSelection: (nodeId: string, label: string) => void
   /** Called by the list when the selection or its rows change. */
   setSelectedAccountIds: (ids: number[]) => void
-  /** A plain click: replaces the selection and moves the anchor. */
-  selectMessage: (id: number) => void
+  /**
+   * A plain click: replaces the selection and moves the anchor. `'auto'` when the app chose it
+   * rather than the user; see `selectionByUser`.
+   */
+  selectMessage: (id: number, by?: 'user' | 'auto') => void
   /** Ctrl-click: adds or removes one, and moves the anchor to it. */
   toggleMessage: (id: number) => void
   /**
@@ -118,6 +130,7 @@ export const useMailStore = create<MailState>()((set, get) => ({
   selectedAccountIds: [],
   anchorMessageId: null,
   focusedInThread: null,
+  selectionByUser: false,
 
   selectMailbox: (selection) => {
     // The list decides what to select once its first page arrives; clearing here avoids a
@@ -128,6 +141,7 @@ export const useMailStore = create<MailState>()((set, get) => ({
       selectedAccountIds: [],
       anchorMessageId: null,
       focusedInThread: null,
+      selectionByUser: false,
     })
   },
 
@@ -150,8 +164,13 @@ export const useMailStore = create<MailState>()((set, get) => ({
     set({ selectedAccountIds: ids })
   },
 
-  selectMessage: (id) => {
-    set({ selectedMessageIds: [id], anchorMessageId: id, focusedInThread: null })
+  selectMessage: (id, by = 'user') => {
+    set({
+      selectedMessageIds: [id],
+      anchorMessageId: id,
+      focusedInThread: null,
+      selectionByUser: by === 'user',
+    })
   },
 
   toggleMessage: (id) => {
@@ -167,6 +186,7 @@ export const useMailStore = create<MailState>()((set, get) => ({
         ? selectedMessageIds.filter((entry) => entry !== id)
         : [...selectedMessageIds, id],
       anchorMessageId: id,
+      selectionByUser: true,
     })
   },
 
@@ -178,13 +198,13 @@ export const useMailStore = create<MailState>()((set, get) => ({
     if (targetIndex < 0) return
 
     if (anchorIndex < 0) {
-      set({ selectedMessageIds: [id], anchorMessageId: id })
+      set({ selectionByUser: true, selectedMessageIds: [id], anchorMessageId: id })
       return
     }
 
     const from = Math.min(anchorIndex, targetIndex)
     const to = Math.max(anchorIndex, targetIndex)
-    set({ selectedMessageIds: order.slice(from, to + 1) })
+    set({ selectionByUser: true, selectedMessageIds: order.slice(from, to + 1) })
   },
 
   moveSelection: (delta, order) => {
@@ -197,7 +217,12 @@ export const useMailStore = create<MailState>()((set, get) => ({
 
     const next = order[nextIndex]
     if (next === undefined) return
-    set({ selectedMessageIds: [next], anchorMessageId: next, focusedInThread: null })
+    set({
+      selectionByUser: true,
+      selectedMessageIds: [next],
+      anchorMessageId: next,
+      focusedInThread: null,
+    })
   },
 
   reconcileSelection: (order, wasAt) => {
@@ -212,13 +237,18 @@ export const useMailStore = create<MailState>()((set, get) => ({
     // Some of a multi-selection went. Keep the rest rather than jumping somewhere new: the
     // user still has a selection and moving it would lose their place.
     if (present.length > 0) {
-      set({ selectedMessageIds: present })
+      set({ selectionByUser: false, selectedMessageIds: present })
       return
     }
 
     // All of it has gone. Nothing left to show.
     if (order.length === 0) {
-      set({ selectedMessageIds: [], anchorMessageId: null, focusedInThread: null })
+      set({
+        selectionByUser: false,
+        selectedMessageIds: [],
+        anchorMessageId: null,
+        focusedInThread: null,
+      })
       return
     }
 
@@ -226,7 +256,12 @@ export const useMailStore = create<MailState>()((set, get) => ({
     const next = order[Math.min(Math.max(wasAt, 0), order.length - 1)]
     if (next === undefined) return
 
-    set({ selectedMessageIds: [next], anchorMessageId: next, focusedInThread: null })
+    set({
+      selectionByUser: false,
+      selectedMessageIds: [next],
+      anchorMessageId: next,
+      focusedInThread: null,
+    })
   },
 
   moveInThread: (delta, order) => {

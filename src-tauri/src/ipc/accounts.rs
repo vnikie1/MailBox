@@ -80,15 +80,10 @@ impl From<oauth::OAuthError> for AppError {
                  Settings → Accounts → Sign-in applications."
                     .to_string(),
             ),
+            oauth::OAuthError::Cancelled => ("cancelled", "The sign-in was cancelled.".to_string()),
             oauth::OAuthError::TimedOut => (
                 "timedOut",
                 "The browser sign-in was not completed. Starting again will reopen it.".to_string(),
-            ),
-            oauth::OAuthError::StateMismatch => (
-                "stateMismatch",
-                "The sign-in response did not match the request Halcyon started. Nothing was \
-                 saved. Please try again."
-                    .to_string(),
             ),
             oauth::OAuthError::Browser(_) => (
                 "browser",
@@ -189,15 +184,23 @@ async fn client_for_sign_in(db: &Db, provider: Provider) -> Result<oauth::Client
 ///
 /// One transaction, and one helper for both commands that sign in, so the two can never record
 /// different things. The tokens themselves have already gone to the Credential Manager.
-async fn store_sign_in(db: &Db, reference: &str, tokens: &oauth::Tokens) -> Result<(), AppError> {
+async fn store_sign_in(
+    db: &Db,
+    reference: &str,
+    tokens: &oauth::Tokens,
+    client_id: &str,
+) -> Result<(), AppError> {
     let reference = reference.to_string();
     let expires_at = tokens.expires_at;
     let issued = tokens.refresh.is_some().then(oauth::now_seconds);
+    let client_id = client_id.to_string();
 
     db.write(move |tx| {
         accounts::write_expiry(tx, &reference, expires_at)?;
         if let Some(at) = issued {
             accounts::write_signed_in(tx, &reference, at)?;
+            // Which client the new refresh token belongs to. See `accounts::write_issuer`.
+            accounts::write_issuer(tx, &reference, &client_id)?;
         }
         Ok(())
     })
@@ -319,16 +322,27 @@ impl ServerInput {
     }
 }
 
+/// The servers an account connects to.
+///
+/// A provider Halcyon knows uses its own, whatever arrives with the request. Only an Other
+/// account takes servers from the window: a lookup of a custom domain on iCloud or Yahoo found
+/// the domain's own mail host, and the password was sent there instead of to the provider (M26,
+/// 2026-11-14 audit). The assistant no longer offers them, and this is the boundary that makes
+/// sure.
 fn servers_for(
     provider: Provider,
     imap: Option<ServerInput>,
     smtp: Option<ServerInput>,
 ) -> Result<(ServerSettings, ServerSettings), AppError> {
+    if let Some(known) = provider.servers() {
+        return Ok(known);
+    }
+
     match (imap, smtp) {
         (Some(imap), Some(smtp)) => Ok((imap.into_settings(), smtp.into_settings())),
-        _ => provider
-            .servers()
-            .ok_or_else(|| bad_request("This account needs incoming and outgoing server details.")),
+        _ => Err(bad_request(
+            "This account needs incoming and outgoing server details.",
+        )),
     }
 }
 
@@ -492,6 +506,8 @@ pub async fn account_add_password(
 
     // The secret goes to the Credential Manager, and only the reference to SQLite.
     let reference = credentials::reference_for(&email);
+    // An address removed earlier in this session can be added back.
+    accounts::revive(&reference);
     credentials::store(&reference, Kind::Password, &secret).map_err(|error| {
         tracing::error!(%error, "could not store credential");
         AppError {
@@ -515,6 +531,12 @@ pub async fn account_add_password(
     };
 
     finish_add(&app, &db, account, report).await
+}
+
+/// Gives up on the browser sign-in under way: the Cancel the assistant shows while it waits.
+#[tauri::command]
+pub fn oauth_cancel() {
+    oauth::cancel_authorisation();
 }
 
 /// Adds an account by signing in through the system browser.
@@ -554,56 +576,85 @@ pub async fn account_add_oauth(
     let tokens = oauth::authorise(provider, &client, Some(&email), open_in_browser).await?;
 
     let reference = credentials::reference_for(&email);
-    accounts::save_tokens(&reference, &tokens).map_err(|error| {
-        tracing::error!(%error, "could not store tokens");
-        AppError {
-            code: "credentialStore".into(),
-            message: "Windows would not save the sign-in to Credential Manager.".into(),
+    // An address removed earlier in this session can be added back.
+    accounts::revive(&reference);
+    let outcome = async {
+        accounts::save_tokens(&reference, &tokens).map_err(|error| {
+            tracing::error!(%error, "could not store tokens");
+            AppError {
+                code: "credentialStore".into(),
+                message: "Windows would not save the sign-in to Credential Manager.".into(),
+            }
+        })?;
+
+        store_sign_in(&db, &reference, &tokens, &client.client_id).await?;
+
+        let (imap, smtp) = provider
+            .servers()
+            .ok_or_else(|| bad_request("This provider has no known servers."))?;
+
+        let report = verify::run(
+            &email,
+            provider,
+            &imap,
+            &smtp,
+            Attempt::OAuth {
+                access_token: tokens.access.clone(),
+            },
+        )
+        .await;
+
+        if !report.ok {
+            return Ok(AddedAccount {
+                id: 0,
+                email: email.clone(),
+                report,
+            });
         }
-    })?;
 
-    store_sign_in(&db, &reference, &tokens).await?;
+        let account = NewAccount {
+            display_name: if display_name.trim().is_empty() {
+                email.clone()
+            } else {
+                display_name.trim().to_string()
+            },
+            email: email.clone(),
+            provider,
+            imap,
+            smtp,
+            auth_kind: AuthKind::OAuth2,
+            color,
+        };
 
-    let (imap, smtp) = provider
-        .servers()
-        .ok_or_else(|| bad_request("This provider has no known servers."))?;
-
-    let report = verify::run(
-        &email,
-        provider,
-        &imap,
-        &smtp,
-        Attempt::OAuth {
-            access_token: tokens.access,
-        },
-    )
+        finish_add(&app, &db, account, report).await
+    }
     .await;
 
-    if !report.ok {
-        // The tokens are kept: the sign-in itself worked, and the failure is a mailbox or
-        // tenant problem the user can fix without going through the browser again.
-        return Ok(AddedAccount {
-            id: 0,
-            email,
-            report,
-        });
+    // A sign-in that did not become an account is taken back out. Its tokens were kept, on the
+    // reasoning that the user could fix the problem without the browser; but every attempt signs
+    // in again, so nothing ever read them, and a live refresh token for the mailbox stayed in
+    // Credential Manager under no account at all (L31).
+    if !matches!(&outcome, Ok(added) if added.id != 0) {
+        let forget = reference.clone();
+        let _ = db
+            .write(move |tx| {
+                abandon_sign_in(tx, &forget);
+                Ok(())
+            })
+            .await;
     }
 
-    let account = NewAccount {
-        display_name: if display_name.trim().is_empty() {
-            email.clone()
-        } else {
-            display_name.trim().to_string()
-        },
-        email: email.clone(),
-        provider,
-        imap,
-        smtp,
-        auth_kind: AuthKind::OAuth2,
-        color,
-    };
+    outcome
+}
 
-    finish_add(&app, &db, account, report).await
+/// Removes a sign-in's tokens from Credential Manager and its record from the settings.
+fn abandon_sign_in(conn: &rusqlite::Connection, reference: &str) {
+    if let Err(error) = credentials::purge(reference) {
+        tracing::warn!(%error, "could not remove the tokens of a sign-in that was not added");
+    }
+    if let Err(error) = accounts::forget_settings(conn, reference) {
+        tracing::warn!(%error, "could not forget a sign-in that was not added");
+    }
 }
 
 #[tauri::command]
@@ -684,7 +735,8 @@ pub async fn account_remove(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
     // Best-effort, and reported in the log rather than to the user: the account is already
     // gone from their point of view, and an error dialog about Credential Manager at this
     // point would be about something they cannot act on.
-    if let Err(error) = credentials::purge(&reference) {
+    // Retired rather than only purged, so a token refresh under way cannot write them back (L32).
+    if let Err(error) = accounts::retire(&reference) {
         tracing::error!(%error, "could not purge credentials for a removed account");
     }
 
@@ -716,6 +768,17 @@ pub async fn account_remove(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
         Err(error) => {
             tracing::warn!(%error, "a removed account's downloaded mail could not be set aside; it will be deleted file by file");
         }
+    }
+
+    // And its outbox. Its rows went with the account; the bytes of whatever it had not sent
+    // stayed on disk (M14, 2026-11-14 audit). The next launch's sweep gets anything this misses.
+    let outbox = db.folder().join("outbox").join(id.to_string());
+    if outbox.exists() {
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = std::fs::remove_dir_all(&outbox) {
+                tracing::warn!(%error, "a removed account's outbox was not deleted; the next launch's sweep will");
+            }
+        });
     }
 
     let _ = app.emit("accounts:changed", ());
@@ -834,9 +897,14 @@ pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
         }
     })?;
 
-    store_sign_in(&db, &reference, &tokens).await?;
+    store_sign_in(&db, &reference, &tokens, &client.client_id).await?;
 
     tracing::info!(account_id = id, "account re-authenticated");
+
+    // Its refusal is no longer true, so the engine may try it again. See `SyncEngine::refused`.
+    if let Some(engine) = app.try_state::<crate::sync::engine::SyncEngine>() {
+        engine.clear_refusal(id);
+    }
 
     let _ = app.emit("account:reauthenticated", id);
 
@@ -844,6 +912,93 @@ pub async fn account_reauth(app: AppHandle, db: State<'_, Db>, id: i64) -> Respo
         watchers.resume(id);
     }
 
+    let _ = app.emit("accounts:changed", ());
+    Ok(())
+}
+
+/// Replaces a password account's password. Change Password, in its account settings.
+///
+/// The way out the refusal banner has always pointed to — "Update it in its settings" — and
+/// which did not exist, so a password changed at the provider could not be fixed short of
+/// removing the account and downloading everything again (H16, 2026-11-14 audit).
+///
+/// Checked against the account's own incoming server before anything is stored, as adding an
+/// account is: a wrong password saved over the old one would only move the refusal along. Once
+/// it is in, the account is tried again — its refusal cleared, its watcher resumed — the same way
+/// `account_reauth` brings an OAuth account back.
+#[tauri::command]
+pub async fn account_set_password(
+    app: AppHandle,
+    db: State<'_, Db>,
+    id: i64,
+    password: String,
+) -> Response<()> {
+    let account = db
+        .read(move |conn| store::get(conn, id))
+        .await?
+        .ok_or_else(|| bad_request("That account no longer exists."))?;
+
+    if account.auth_kind != AuthKind::Password {
+        return Err(bad_request(
+            "This account signs in through its provider. Use Sign In instead.",
+        ));
+    }
+    if password.is_empty() {
+        return Err(bad_request("Enter the new password."));
+    }
+
+    let provider = resolve(&account.provider)?;
+    let (Some(imap), Some(smtp)) = (account.imap.clone(), account.smtp.clone()) else {
+        return Err(bad_request("This account has no servers configured."));
+    };
+
+    let secret = Secret::new(password);
+    let report = verify::run(
+        &account.email,
+        provider,
+        &imap,
+        &smtp,
+        Attempt::Password(secret.clone()),
+    )
+    .await;
+
+    match report.imap_sign_in() {
+        Some(true) => {}
+        Some(false) => {
+            return Err(bad_request(&format!(
+                "{} did not accept that password.",
+                imap.host
+            )));
+        }
+        None => {
+            return Err(AppError {
+                code: "network".into(),
+                message: format!(
+                    "Halcyon could not check that password, so it has not been saved. {}",
+                    report.summary
+                ),
+            });
+        }
+    }
+
+    let reference = credentials::reference_for(&account.email);
+    credentials::store(&reference, Kind::Password, &secret).map_err(|error| {
+        tracing::error!(%error, "could not store the new password");
+        AppError {
+            code: "credentialStore".into(),
+            message: "Windows would not save the password to Credential Manager.".into(),
+        }
+    })?;
+
+    tracing::info!(account_id = id, "password changed");
+
+    if let Some(engine) = app.try_state::<crate::sync::engine::SyncEngine>() {
+        engine.clear_refusal(id);
+    }
+    let _ = app.emit("account:reauthenticated", id);
+    if let Some(watchers) = app.try_state::<Watchers>() {
+        watchers.resume(id);
+    }
     let _ = app.emit("accounts:changed", ());
     Ok(())
 }
@@ -1063,7 +1218,6 @@ mod oauth_message_tests {
                 provider: "google".into(),
             }),
             AppError::from(oauth::OAuthError::TimedOut),
-            AppError::from(oauth::OAuthError::StateMismatch),
         ];
 
         for error in authored {
@@ -1091,6 +1245,39 @@ mod oauth_message_tests {
             description: None,
         });
         assert_eq!(bare.message, "The provider refused the sign-in.");
+    }
+}
+
+#[cfg(test)]
+mod abandoned_sign_in_tests {
+    use super::*;
+    use crate::accounts::credentials::{Kind, Scratch};
+
+    #[test]
+    fn a_sign_in_that_is_not_added_leaves_no_token_behind() {
+        // A failed add kept the tokens for a retry that signs in again anyway, so a live refresh
+        // token sat in Credential Manager under no account (L31).
+        let scratch = Scratch::new("abandoned");
+        let reference = scratch.reference();
+
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+
+        let tokens = oauth::Tokens {
+            access: Secret::new(String::from("access")),
+            refresh: Some(Secret::new(String::from("refresh"))),
+            expires_at: 1_900_000_000,
+        };
+        accounts::save_tokens(reference, &tokens).expect("save");
+        accounts::write_expiry(&conn, reference, tokens.expires_at).expect("expiry");
+        accounts::write_signed_in(&conn, reference, 1_800_000_000).expect("signed in");
+        assert!(credentials::exists(reference, Kind::RefreshToken));
+
+        abandon_sign_in(&conn, reference);
+
+        assert!(!credentials::exists(reference, Kind::RefreshToken));
+        assert!(!credentials::exists(reference, Kind::AccessToken));
+        assert_eq!(accounts::read_signed_in(&conn, reference), None);
     }
 }
 
@@ -1161,5 +1348,46 @@ mod color_change_tests {
         assert_eq!(from_value, Some(Some("green".into())));
 
         // There is deliberately no third case here. That is the point: there isn't one.
+    }
+}
+
+#[cfg(test)]
+mod server_tests {
+    use super::*;
+
+    fn input(host: &str) -> ServerInput {
+        ServerInput {
+            host: host.into(),
+            port: 993,
+            security: "tls".into(),
+        }
+    }
+
+    #[test]
+    fn a_known_provider_uses_its_own_servers_whatever_the_window_sends() {
+        // M26: a lookup of an iCloud custom domain found the domain's own mail host, and the
+        // password went there.
+        let (imap, smtp) = servers_for(
+            Provider::ICloud,
+            Some(input("mail.example.test")),
+            Some(input("mail.example.test")),
+        )
+        .expect("servers");
+
+        assert_eq!(imap.host, "imap.mail.me.com");
+        assert_ne!(smtp.host, "mail.example.test");
+    }
+
+    #[test]
+    fn only_an_other_account_takes_servers_from_the_window() {
+        let (imap, _) = servers_for(
+            Provider::Other,
+            Some(input("mail.example.test")),
+            Some(input("smtp.example.test")),
+        )
+        .expect("servers");
+        assert_eq!(imap.host, "mail.example.test");
+
+        assert!(servers_for(Provider::Other, None, None).is_err());
     }
 }

@@ -254,6 +254,15 @@ pub struct ListQuery {
     pub limit: u32,
     /// Unread only — the list's filter button.
     pub unread_only: bool,
+    /// Messages to keep in an unread-only list although they have been read: the selection.
+    ///
+    /// Kept, never added. A message that is no longer in these mailboxes is not returned, so a
+    /// deleted or moved message still leaves the list. Without this, reading the open message
+    /// dropped it from the list, the selection followed to the next row, that row was read, and
+    /// the list read itself one message a second (H1, 2026-11-14 audit).
+    #[serde(default)]
+    #[ts(type = "number[]")]
+    pub keep_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -292,6 +301,17 @@ pub struct SearchQuery {
 pub struct MailboxCounts {
     #[ts(type = "number")]
     pub mailbox_id: i64,
+    #[ts(type = "number")]
+    pub unread: i64,
+    #[ts(type = "number")]
+    pub total: i64,
+}
+
+/// What a smart mailbox holds, for its list header. `db::query::count_matching`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchCounts {
     #[ts(type = "number")]
     pub unread: i64,
     #[ts(type = "number")]

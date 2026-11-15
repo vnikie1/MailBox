@@ -16,7 +16,7 @@
 //! **Play sound** is absent for a duller reason: it belongs with notifications in Phase 10, and
 //! implementing it here would mean two sound paths.
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -238,7 +238,8 @@ fn subject_row(tx: &Transaction<'_>, message_id: i64) -> Result<Option<OwnedSubj
                     COALESCE(message.attachment_names, ''),
                     message.date_received, message.size,
                     message.has_attachment, message.flag_seen, message.flag_flagged,
-                    message.is_junk
+                    message.is_junk, message.body_state = 'full',
+                    COALESCE(message.flag_color, ''), COALESCE(message.from_addr, '')
                FROM message
                JOIN mailbox ON mailbox.id = message.mailbox_id
               WHERE message.id = ?1",
@@ -258,6 +259,9 @@ fn subject_row(tx: &Transaction<'_>, message_id: i64) -> Result<Option<OwnedSubj
                     is_unread: row.get::<_, i64>(10)? == 0,
                     is_flagged: row.get::<_, i64>(11)? != 0,
                     is_junk: row.get::<_, i64>(12)? != 0,
+                    body_stored: row.get::<_, i64>(13)? != 0,
+                    flag_color: row.get(14)?,
+                    from_addr: row.get(15)?,
                 })
             },
         )
@@ -282,6 +286,11 @@ struct OwnedSubject {
     is_unread: bool,
     is_flagged: bool,
     is_junk: bool,
+    /// Whether the body has been downloaded. Until it has, `body`, `attachment_names` and
+    /// `has_attachment` are empty because nothing is known, not because there is nothing.
+    body_stored: bool,
+    flag_color: String,
+    from_addr: String,
 }
 
 impl OwnedSubject {
@@ -300,11 +309,13 @@ impl OwnedSubject {
             is_unread: self.is_unread,
             is_flagged: self.is_flagged,
             is_junk: self.is_junk,
+            flag_color: &self.flag_color,
+            from_addr: &self.from_addr,
         }
     }
 }
 
-/// Queues the server side of a move, before the local row is rewritten.
+/// Moves one message, queueing the server side before the local row is rewritten.
 ///
 /// ## Why every action here needs one of these
 ///
@@ -322,57 +333,53 @@ impl OwnedSubject {
 /// never heard of it being in, so the next sync of that mailbox finds one more message locally
 /// than the server reports and `persist::remove_missing` deletes the row whose UID is not in the
 /// server's list. The copy on the server survives; the one the user could see does not.
-fn queue_move(tx: &Transaction<'_>, message_id: i64, destination: i64) -> Result<(), DbError> {
-    let Some(to) = crate::sync::ops::mailbox_path(tx, destination)? else {
-        return Ok(());
-    };
+fn move_message(tx: &Transaction<'_>, message_id: i64, destination: i64) -> Result<(), DbError> {
+    // Through the function every move uses, which decides what the server must be told —
+    // including cancelling a move still queued when this puts a message back where it was.
+    let homecoming = crate::sync::ops::queue_move(tx, &[message_id], destination)?;
+    crate::db::write::move_to(tx, &[message_id], destination)?;
+    crate::sync::ops::settle(tx, &homecoming)
+}
 
-    // Located before the write, never after: the move rewrites `mailbox_id`, so a lookup
-    // afterwards would ask the server to move the message out of where it had just arrived.
-    for group in crate::sync::ops::locate(tx, &[message_id])? {
-        if group.mailbox == to {
-            continue;
-        }
-
-        crate::sync::ops::enqueue(
-            tx,
-            group.account_id,
-            &crate::sync::ops::Op::Move {
-                from: group.mailbox,
-                to: to.clone(),
-                uids: group.uids,
-            },
-        )?;
-    }
-
+/// Marks one message read or unread, and its mailbox's unread count with it.
+fn set_seen(tx: &Transaction<'_>, message_id: i64, seen: bool) -> Result<(), DbError> {
+    crate::db::write::set_flags(
+        tx,
+        &[message_id],
+        crate::db::model::FlagPatch {
+            seen: Some(seen),
+            flagged: None,
+        },
+    )?;
     Ok(())
 }
 
-/// Queues the server side of a flag change. See `queue_move` for why this is not optional.
-fn queue_flags(
-    tx: &Transaction<'_>,
-    message_id: i64,
-    seen: Option<bool>,
-    flagged: Option<bool>,
-) -> Result<(), DbError> {
-    for group in crate::sync::ops::locate(tx, &[message_id])? {
-        crate::sync::ops::enqueue(
-            tx,
-            group.account_id,
-            &crate::sync::ops::Op::Flag {
-                mailbox: group.mailbox,
-                uids: group.uids,
-                seen,
-                flagged,
-            },
-        )?;
-    }
+/// Whether a folder belongs to the account a message is in.
+fn same_account(tx: &Transaction<'_>, message_id: i64, mailbox_id: i64) -> Result<bool, DbError> {
+    let same: Option<bool> = tx
+        .query_row(
+            "SELECT message.account_id = mailbox.account_id
+               FROM message, mailbox
+              WHERE message.id = ?1 AND mailbox.id = ?2",
+            params![message_id, mailbox_id],
+            |row| row.get(0),
+        )
+        .optional()?;
 
-    Ok(())
+    Ok(same.unwrap_or(false))
 }
 
 /// Applies one action to one message.
-fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), DbError> {
+///
+/// The server side of a flag change goes into `flags`, queued for the whole run at once; see
+/// `move_message` for why it is not optional, and `FlagBatch` for why it is batched (L4). It is
+/// queued before any move, which has to come after the flag changes made before it.
+fn apply(
+    tx: &Transaction<'_>,
+    message_id: i64,
+    action: &Action,
+    flags: &mut crate::sync::ops::FlagBatch,
+) -> Result<(), DbError> {
     match action {
         Action::MoveTo(mailbox_id) => {
             // A rule outlives its folder when the folder is deleted, here or on the server.
@@ -383,32 +390,43 @@ fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), D
                 return Ok(());
             }
 
-            queue_move(tx, message_id, *mailbox_id)?;
-            crate::db::write::move_to(tx, &[message_id], *mailbox_id)?;
+            // Rules run over every account's mail, and a folder belongs to one. Mail cannot move
+            // between accounts, and this moved it anyway: the row was filed under the other
+            // account's folder while the queued move asked this account's server for a folder it
+            // has never had, so the copy here became a ghost the next sync of either folder could
+            // not explain (M18, 2026-11-14 audit). Skipped, like a deleted folder, so the rule's
+            // other actions still apply.
+            if !same_account(tx, message_id, *mailbox_id)? {
+                tracing::debug!(
+                    message_id,
+                    mailbox_id,
+                    "rule names another account's folder; not moved"
+                );
+                return Ok(());
+            }
+
+            flags.queue(tx)?;
+            move_message(tx, message_id, *mailbox_id)?;
         }
+        // Through `set_flags`, which keeps the mailbox's cached unread count in step; a bare
+        // UPDATE left the sidebar's count wrong until the next sync recounted (M20).
         Action::MarkRead => {
-            queue_flags(tx, message_id, Some(true), None)?;
-            tx.execute(
-                "UPDATE message SET flag_seen = 1 WHERE id = ?1",
-                params![message_id],
-            )?;
+            flags.add(message_id, Some(true), None);
+            set_seen(tx, message_id, true)?;
         }
         Action::MarkUnread => {
-            queue_flags(tx, message_id, Some(false), None)?;
-            tx.execute(
-                "UPDATE message SET flag_seen = 0 WHERE id = ?1",
-                params![message_id],
-            )?;
+            flags.add(message_id, Some(false), None);
+            set_seen(tx, message_id, false)?;
         }
         Action::Flag => {
-            queue_flags(tx, message_id, None, Some(true))?;
+            flags.add(message_id, None, Some(true));
             tx.execute(
                 "UPDATE message SET flag_flagged = 1 WHERE id = ?1",
                 params![message_id],
             )?;
         }
         Action::Unflag => {
-            queue_flags(tx, message_id, None, Some(false))?;
+            flags.add(message_id, None, Some(false));
             tx.execute(
                 "UPDATE message SET flag_flagged = 0, flag_color = NULL WHERE id = ?1",
                 params![message_id],
@@ -423,7 +441,7 @@ fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), D
 
             // The colour is ours alone -- IMAP has no notion of one -- but this also sets
             // Flagged, and that half the server does need to be told about.
-            queue_flags(tx, message_id, None, Some(true))?;
+            flags.add(message_id, None, Some(true));
 
             tx.execute(
                 "UPDATE message SET flag_flagged = 1, flag_color = ?2 WHERE id = ?1",
@@ -450,8 +468,8 @@ fn apply(tx: &Transaction<'_>, message_id: i64, action: &Action) -> Result<(), D
                 .ok();
 
             if let Some(trash) = trash {
-                queue_move(tx, message_id, trash)?;
-                crate::db::write::move_to(tx, &[message_id], trash)?;
+                flags.queue(tx)?;
+                move_message(tx, message_id, trash)?;
             }
         }
         Action::StopEvaluating => {}
@@ -484,6 +502,7 @@ pub fn run_over(
     rules: &[Rule],
 ) -> Result<RunReport, DbError> {
     let mut report = RunReport::default();
+    let mut flags = crate::sync::ops::FlagBatch::default();
 
     for &message_id in message_ids {
         report.examined += 1;
@@ -507,6 +526,14 @@ pub fn run_over(
                 subject.clone()
             };
 
+            // Not judged on a body that has not been downloaded. It used to be, against empty
+            // strings, so "body contains" never matched new mail and "body does not contain"
+            // matched all of it (H9, 2026-11-14 audit). On arrival the Inbox fetches the bodies
+            // these rules need before running them; see `sync::engine::on_arrival`.
+            if !current.body_stored && rule.predicate.needs_body() {
+                continue;
+            }
+
             if !rule.predicate.matches(&current.borrow()) {
                 continue;
             }
@@ -514,7 +541,7 @@ pub fn run_over(
             matched_any = true;
 
             for action in &rule.actions {
-                apply(tx, message_id, action)?;
+                apply(tx, message_id, action, &mut flags)?;
                 report.actions_applied += 1;
 
                 if matches!(action, Action::StopEvaluating) {
@@ -536,6 +563,7 @@ pub fn run_over(
         }
     }
 
+    flags.queue(tx)?;
     Ok(report)
 }
 

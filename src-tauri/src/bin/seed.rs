@@ -507,6 +507,7 @@ fn report(conn: &Connection, path: &std::path::Path) -> Result<(), Box<dyn std::
         cursor: None,
         limit: 100,
         unread_only: false,
+        keep_ids: Vec::new(),
     };
     time(
         "messages_page (first)",
@@ -533,6 +534,7 @@ fn report(conn: &Connection, path: &std::path::Path) -> Result<(), Box<dyn std::
             cursor: Some(cursor),
             limit: 100,
             unread_only: false,
+            keep_ids: Vec::new(),
         };
         time(
             "messages_page (20k deep)",

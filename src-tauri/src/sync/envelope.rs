@@ -245,13 +245,13 @@ pub fn from_imap(envelope: &async_imap::imap_proto::Envelope<'_>) -> Envelope {
 /// message-id normalisation, the same subject-base stripping — so an imported message threads
 /// against a synced one. Two parsers that disagreed about what a subject base is would put the
 /// same conversation in two threads.
-pub fn from_headers(parsed: &mailparse::ParsedMail<'_>) -> Envelope {
+pub fn from_headers(headers: &[mailparse::MailHeader<'_>]) -> Envelope {
     use mailparse::MailHeaderMap;
 
-    let header = |name: &str| parsed.headers.get_first_value(name);
+    let header = |name: &str| headers.get_first_value(name);
 
     let addresses = |name: &str| -> Vec<Address> {
-        let Some(raw) = parsed.headers.get_first_value(name) else {
+        let Some(raw) = headers.get_first_value(name) else {
             return Vec::new();
         };
 

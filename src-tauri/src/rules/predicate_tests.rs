@@ -21,6 +21,9 @@ use super::predicate::{Condition, Field, Op, Predicate, Subject, Value};
 /// in production rather than a shape invented for the test.
 fn store_with(subject: &Subject<'_>) -> Connection {
     let mut conn = Connection::open_in_memory().expect("open");
+    // The Unicode `lower()` every connection of the real store has. Without it the SQL half
+    // folds A-Z only, which is the M16 bug rather than the code under test.
+    crate::db::unicode_lower(&conn).expect("lower");
     crate::db::migrate::run(&mut conn).expect("migrate");
 
     conn.execute(
@@ -41,8 +44,8 @@ fn store_with(subject: &Subject<'_>) -> Connection {
         "INSERT INTO message (
              id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
              from_all, to_all, cc_json, body_text, attachment_names,
-             has_attachment, flag_seen, flag_flagged, is_junk
-         ) VALUES (1, 1, 1, 1, ?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             has_attachment, flag_seen, flag_flagged, is_junk, flag_color, from_addr
+         ) VALUES (1, 1, 1, 1, ?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         rusqlite::params![
             subject.subject,
             subject.date_received,
@@ -57,6 +60,9 @@ fn store_with(subject: &Subject<'_>) -> Connection {
             i64::from(!subject.is_unread),
             i64::from(subject.is_flagged),
             i64::from(subject.is_junk),
+            // Stored as NULL when none was recorded, as the sync stores it.
+            (!subject.flag_color.is_empty()).then_some(subject.flag_color),
+            subject.from_addr,
         ],
     )
     .expect("message");
@@ -102,7 +108,7 @@ fn sample<'a>() -> Subject<'a> {
         to: "me@halcyon.test, Grace <grace@example.test>",
         cc: r#"[{"name":"Charles","email":"charles@example.test"}]"#,
         subject: "The quarterly figures",
-        body: "Attached are the numbers for Q3. Margin is up 100% on last year.",
+        body: "Attached are the numbers for Q3. Margin is up 100% on last year. Überweisung folgt.",
         mailbox: "Inbox",
         attachment_names: "figures.pdf",
         date_received: 1_700_000_000,
@@ -111,6 +117,8 @@ fn sample<'a>() -> Subject<'a> {
         is_unread: true,
         is_flagged: false,
         is_junk: false,
+        flag_color: "",
+        from_addr: "ada@example.test",
     }
 }
 
@@ -283,12 +291,13 @@ fn no_value_is_ever_spliced_into_the_statement() {
     let compiled = predicate.compile();
 
     assert!(
-        !compiled.sql.contains("DROP"),
+        !compiled.sql.to_lowercase().contains("drop"),
         "a value reached the statement: {}",
         compiled.sql
     );
+    // Case-blind, because text values are bound lowercased (M16).
     assert!(compiled.params.iter().any(|value| match value {
-        Value::Text(text) => text.contains("DROP"),
+        Value::Text(text) => text.to_lowercase().contains("drop table message"),
         Value::Number(_) => false,
     }));
 
@@ -296,6 +305,107 @@ fn no_value_is_ever_spliced_into_the_statement() {
     let subject = sample();
     let conn = store_with(&subject);
     assert!(!sql_matches(&conn, &predicate));
+}
+
+/* ------------------------------------------------------- flag colours and accented capitals */
+
+#[test]
+fn a_flag_colour_is_the_colour_not_a_word_in_the_text() {
+    // H11. Red listed flagged mail from Fred, and not mail flagged red.
+    let red = condition(Field::FlagColor, Op::Is, "red");
+
+    let fred = Subject {
+        from: "Fred <fred@example.test>",
+        is_flagged: true,
+        flag_color: "orange",
+        ..sample()
+    };
+    assert!(!red.matches(&fred));
+    assert!(!sql_matches(&store_with(&fred), &red));
+
+    let flagged_red = Subject {
+        is_flagged: true,
+        flag_color: "red",
+        ..sample()
+    };
+    assert!(red.matches(&flagged_red));
+    assert!(sql_matches(&store_with(&flagged_red), &red));
+}
+
+#[test]
+fn a_flag_with_no_colour_recorded_is_the_orange_the_list_draws() {
+    // A flag set on a phone arrives without a colour, and the list draws it orange.
+    let orange = condition(Field::FlagColor, Op::Is, super::predicate::UNCOLOURED_FLAG);
+    let uncoloured = Subject {
+        is_flagged: true,
+        flag_color: "",
+        ..sample()
+    };
+
+    assert!(orange.matches(&uncoloured));
+    assert!(sql_matches(&store_with(&uncoloured), &orange));
+}
+
+#[test]
+fn an_unflagged_message_has_no_flag_colour_whatever_is_stored() {
+    // A colour left behind by a flag since cleared elsewhere is not a flag.
+    let red = condition(Field::FlagColor, Op::Is, "red");
+    let cleared = Subject {
+        is_flagged: false,
+        flag_color: "red",
+        ..sample()
+    };
+
+    assert!(!red.matches(&cleared));
+    assert!(!sql_matches(&store_with(&cleared), &red));
+}
+
+#[test]
+fn the_uncoloured_default_is_the_same_in_sql_as_in_memory() {
+    // The SQL expression spells the default out, because a column list is static text.
+    let sql = condition(Field::FlagColor, Op::Is, "x").compile().sql;
+    assert!(
+        sql.contains(&format!("'{}'", super::predicate::UNCOLOURED_FLAG)),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_sender_address_is_matched_whole() {
+    // The VIPs row: "from ann@company.com" must not list joann@company.com.
+    let ann = condition(Field::FromAddress, Op::Is, "Ann@Company.com");
+
+    for (address, expected) in [
+        ("ann@company.com", true),
+        ("ANN@company.com", true),
+        ("joann@company.com", false),
+    ] {
+        let subject = Subject {
+            from: "Someone ann@company.com",
+            from_addr: address,
+            ..sample()
+        };
+        assert_eq!(ann.matches(&subject), expected, "{address} in memory");
+        assert_eq!(
+            sql_matches(&store_with(&subject), &ann),
+            expected,
+            "{address} in SQL"
+        );
+    }
+}
+
+#[test]
+fn an_accented_capital_matches_in_both_engines() {
+    // M16. SQLite's LIKE folds A-Z only, so "über" missed "Überweisung" in a smart mailbox
+    // while the same condition, run as a rule on arrival, matched it.
+    let subject = sample();
+    let conn = store_with(&subject);
+
+    for value in ["über", "ÜBERWEISUNG", "Überweisung"] {
+        let predicate = condition(Field::Body, Op::Contains, value);
+        assert!(predicate.matches(&subject), "{value} in memory");
+        assert!(sql_matches(&conn, &predicate), "{value} in SQL");
+    }
 }
 
 /* ------------------------------------------------------------------------- the property */
@@ -315,6 +425,8 @@ fn any_field() -> impl Strategy<Value = Field> {
         Just(Field::IsUnread),
         Just(Field::IsFlagged),
         Just(Field::IsJunk),
+        Just(Field::FlagColor),
+        Just(Field::FromAddress),
     ]
 }
 
@@ -349,6 +461,11 @@ fn any_value() -> impl Strategy<Value = String> {
         Just("4096".to_string()),
         Just("1024".to_string()),
         Just("nothing at all".to_string()),
+        Just("über".to_string()),
+        Just("ÜBER".to_string()),
+        Just("orange".to_string()),
+        Just("red".to_string()),
+        Just("ada@example.test".to_string()),
     ]
 }
 
@@ -374,8 +491,12 @@ proptest! {
     /// the same message. Every disagreement is a rule and a smart mailbox that would quietly
     /// contradict each other.
     #[test]
-    fn sql_and_memory_always_agree(predicate in any_predicate()) {
-        let subject = sample();
+    fn sql_and_memory_always_agree(
+        predicate in any_predicate(),
+        is_flagged in any::<bool>(),
+        flag_color in prop_oneof![Just(""), Just("red"), Just("orange")],
+    ) {
+        let subject = Subject { is_flagged, flag_color, ..sample() };
         let conn = store_with(&subject);
 
         prop_assert_eq!(

@@ -90,7 +90,9 @@ pub fn write_batch_as(
             )
             .ok();
 
-        if existing.is_none() && removed.contains(message.uid) {
+        if existing.is_none()
+            && removed.contains_message(message.uid, message.envelope.message_id.as_deref())
+        {
             continue;
         }
 
@@ -308,6 +310,14 @@ fn record_contacts(tx: &Transaction<'_>, inserted: &[i64]) -> Result<(), DbError
         return Ok(());
     }
 
+    // In pieces past SQLite's parameter limit (M7). See `db::write::CHUNK`.
+    if inserted.len() > crate::db::write::CHUNK {
+        for chunk in inserted.chunks(crate::db::write::CHUNK) {
+            record_contacts(tx, chunk)?;
+        }
+        return Ok(());
+    }
+
     let placeholders = (0..inserted.len())
         .map(|index| format!("?{}", index + 1))
         .collect::<Vec<_>>()
@@ -451,9 +461,12 @@ pub fn rethread(tx: &Transaction<'_>, account_id: i64, limit: usize) -> Result<u
         .query_map(params![account_id], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
 
+    // Only the rows whose thread changed. Writing every row examined, the same value back onto
+    // nearly all of them, rewrote up to the whole account on every pass, and each write also
+    // re-indexed that message's full text until migration 19 (M19, 2026-11-14 audit).
     for assignment in &assignments {
         tx.execute(
-            "UPDATE message SET thread_id = ?2 WHERE id = ?1",
+            "UPDATE message SET thread_id = ?2 WHERE id = ?1 AND thread_id IS NOT ?2",
             params![assignment.message_id, assignment.thread_key],
         )?;
     }
@@ -1043,6 +1056,54 @@ mod tests {
         tx.execute("DELETE FROM pending_op", []).expect("sent");
         let written = write_batch(&tx, 1, 1, &[fetched(4, "<d@x>", "four")]).expect("write");
         assert_eq!(written.inserted, 1);
+    }
+
+    /// The same, for a move back that can only name the message by its `Message-ID` — Undo after
+    /// an archive has reached the server (H7, 2026-11-14 audit). Until it runs, the Archive still
+    /// lists the message under a UID nothing here knows, and a sync wrote it back as a second
+    /// copy beside the one Undo had put in the Inbox.
+    #[test]
+    fn a_message_on_its_way_back_by_message_id_is_not_read_back_meanwhile() {
+        use crate::sync::ops::{enqueue, Op};
+
+        let mut conn = store();
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (2, 1, 'Archive', 'Archive', 'archive')",
+            [],
+        )
+        .expect("archive");
+        let tx = conn.transaction().expect("tx");
+
+        // Undone into the Inbox: parked there, the server's copy still in the Archive.
+        write_batch(&tx, 1, 1, &[fetched(5, "back@x", "back")]).expect("write");
+        tx.execute(
+            "UPDATE message SET uid = -1, origin_mailbox_id = 2, origin_uid = NULL WHERE uid = 5",
+            [],
+        )
+        .expect("park");
+        enqueue(
+            &tx,
+            1,
+            &Op::MoveByMessageId {
+                from: "Archive".into(),
+                to: "INBOX".into(),
+                message_id: "back@x".into(),
+            },
+        )
+        .expect("queue");
+
+        let written = write_batch(&tx, 1, 2, &[fetched(40, "back@x", "back")]).expect("write");
+        assert_eq!(
+            written.inserted, 0,
+            "written back into the Archive meanwhile"
+        );
+
+        // Once it has run, the Inbox's sync finds it under its new UID and adopts the row.
+        tx.execute("DELETE FROM pending_op", []).expect("sent");
+        let written = write_batch(&tx, 1, 1, &[fetched(77, "back@x", "back")]).expect("write");
+        assert_eq!((written.inserted, written.updated), (0, 1));
+        assert_eq!(inbox_uids(&tx), vec![77]);
     }
 
     #[test]

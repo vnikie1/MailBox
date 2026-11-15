@@ -56,6 +56,32 @@
   overflow-wrap: anywhere;
 }
 
+/* Several accounts failing: one line each, so each can be named and given its own way out (M42). */
+.accounts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: 0;
+  margin: var(--sp-2) 0 0;
+  list-style: none;
+}
+
+.account {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+}
+
+.name {
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-1);
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-leading);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .retry {
   flex: 0 0 auto;
   padding: var(--sp-1) var(--sp-2);

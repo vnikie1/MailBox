@@ -2,6 +2,7 @@ import { AlarmClock, BellOff, CalendarClock, Clock, Sunrise } from 'lucide-react
 
 import { snooze, unsnooze } from '@/lib/organise'
 import { Menu, MenuItem, MenuSeparator, useToast, type MenuProps } from '@/ui'
+import { reasonFor } from '@/lib/ipc'
 
 export interface RemindMenuProps {
   ids: number[]
@@ -82,7 +83,7 @@ export function RemindMenu({ ids, anySnoozed = false, trigger, icon }: RemindMen
       .catch((error: unknown) => {
         toast.show({
           title: 'The reminder could not be set',
-          description: error instanceof Error ? error.message : String(error),
+          description: reasonFor(error),
         })
       })
   }

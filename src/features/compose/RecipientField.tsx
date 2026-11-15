@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { contactsSuggest } from '@/lib/ipc'
 import { TokenField, type Suggestion, type Token } from '@/ui'
 
+import { readRecipient } from './address'
+
 /**
  * A `TokenField` that suggests people from the mailbox. docs/06 Phase 7.
  *
@@ -89,6 +91,7 @@ export function RecipientField({ label, tokens, onTokensChange, validate }: Reci
       }}
       suggestions={suggestions}
       onDraftChange={onDraftChange}
+      read={readRecipient}
       {...(validate === undefined ? {} : { validate })}
       // To, Cc and Bcc share one group, so a recipient can be moved between them by dragging
       // — which is how people fix "I meant to Cc them" without retyping the address.

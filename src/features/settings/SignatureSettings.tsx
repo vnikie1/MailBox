@@ -39,10 +39,28 @@ type Status = 'loading' | 'ready' | 'saving' | 'saved'
 export function SignatureSettings() {
   const { data: accounts = [] } = useAccounts()
   const [accountId, setAccountId] = useState<number | null>(null)
-  const [signature, setSignature] = useState<Signature | null>(null)
   const [status, setStatus] = useState<Status>('loading')
 
+  /**
+   * The signature as loaded, **with the account it belongs to**.
+   *
+   * It used to be a bare `Signature`, cleared by an effect when the account changed — and an
+   * effect runs after the render. That one render showed the new account's editor holding the
+   * previous account's signature; the editor reports what it loads as a change; and 800ms later
+   * the pane saved it to the new account, over whatever was there (H18, 2026-11-14 audit). Read
+   * through the account, a value loaded for another one is simply not there, in the same render.
+   */
+  const [loaded, setLoaded] = useState<{ accountId: number; value: Signature } | null>(null)
+  const signature = loaded !== null && loaded.accountId === accountId ? loaded.value : null
+  const setSignature = (update: (current: Signature) => Signature) => {
+    setLoaded((current) =>
+      current === null ? current : { ...current, value: update(current.value) },
+    )
+  }
+
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** The save the timer is waiting to make, with the account it belongs to. */
+  const pending = useRef<{ accountId: number; signature: Signature } | null>(null)
 
   /**
    * What is in the editor now.
@@ -68,12 +86,11 @@ export function SignatureSettings() {
     let live = true
 
     setStatus('loading')
-    setSignature(null)
 
     void signatureGet(accountId).then((value) => {
       if (!live) return
       html.current = value.html
-      setSignature(value)
+      setLoaded({ accountId, value })
       setStatus('ready')
     })
 
@@ -82,10 +99,24 @@ export function SignatureSettings() {
     }
   }, [accountId])
 
-  // Cleared on unmount, so a pending save cannot fire against an account the pane has left.
+  /**
+   * Made at once when the pane goes away, not dropped.
+   *
+   * The timer used to be cleared on unmount, so the last 0.8s of typing — the end of the
+   * signature, usually — was lost by switching to another pane before it fired (L24, 2026-11-14
+   * audit). The save carries the account it was typed for, so making it now cannot put it on
+   * another one: what H18 fixed was the pane loading one account's signature into another's
+   * editor, not a pending save.
+   */
   useEffect(
     () => () => {
       if (timer.current !== null) clearTimeout(timer.current)
+
+      const unsaved = pending.current
+      pending.current = null
+      if (unsaved !== null) {
+        void signatureSet(unsaved.accountId, unsaved.signature.html, unsaved.signature.placement)
+      }
     },
     [],
   )
@@ -96,14 +127,16 @@ export function SignatureSettings() {
     html.current = next.html
     // Only the placement is state: it is a control the user reads back, and unlike the body it
     // is never written by the editor.
-    setSignature((current) =>
-      current === null ? current : { ...current, placement: next.placement },
-    )
+    setSignature((current) => ({ ...current, placement: next.placement }))
     setStatus('saving')
+
+    const save = { accountId, signature: next }
+    pending.current = save
 
     if (timer.current !== null) clearTimeout(timer.current)
     timer.current = setTimeout(() => {
-      void signatureSet(accountId, next.html, next.placement).then(() => {
+      if (pending.current === save) pending.current = null
+      void signatureSet(save.accountId, next.html, next.placement).then(() => {
         setStatus('saved')
       })
     }, SAVE_AFTER_MS)
@@ -152,7 +185,13 @@ export function SignatureSettings() {
                 key={accountId ?? 'none'}
                 initialHtml={signature.html}
                 ariaLabel="Signature"
-                onChange={(next) => {
+                onChange={(next, _text, origin) => {
+                  // The signature as it loaded is what is already stored. Saving it back was
+                  // harmless only while loading was lossless, and it was not (M47).
+                  if (origin === 'load') {
+                    html.current = next
+                    return
+                  }
                   store({ ...signature, html: next })
                 }}
               />

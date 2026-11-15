@@ -218,6 +218,53 @@ async fn the_rig_is_up_and_offers_qresync() {
     let _ = imap_session.logout().await;
 }
 
+/// The plain-header fallback reads the same messages the server's `ENVELOPE` describes.
+///
+/// M2 in the 2026-11-14 audit: a mailbox whose answer the IMAP parser cannot read is read again
+/// from its header fields. That path only runs after something has gone wrong, so nothing would
+/// otherwise notice if it read a real server's answer badly.
+#[tokio::test]
+#[ignore = "needs the Dovecot rig in test/dovecot"]
+async fn the_plain_header_fallback_reads_what_the_envelope_does() {
+    let rig = Rig::open().await;
+    let (mut imap_session, caps) = rig.connect().await;
+    fetch::select(&mut imap_session, "INBOX", None, caps)
+        .await
+        .expect("select INBOX");
+
+    let set = "1:200";
+    let usual = fetch::envelopes(&mut imap_session, set, caps)
+        .await
+        .expect("envelopes");
+    let plain_caps = halcyon_lib::sync::session::Caps {
+        headers_only: true,
+        ..caps
+    };
+    let plain = fetch::envelopes(&mut imap_session, set, plain_caps)
+        .await
+        .expect("plain headers");
+    let _ = imap_session.logout().await;
+
+    assert_eq!(usual.len(), 200);
+    assert_eq!(plain.len(), usual.len());
+
+    for (a, b) in usual.iter().zip(&plain) {
+        assert_eq!(a.uid, b.uid);
+        assert_eq!(a.envelope.subject, b.envelope.subject, "uid {}", a.uid);
+        assert_eq!(
+            a.envelope.message_id, b.envelope.message_id,
+            "uid {}",
+            a.uid
+        );
+        assert_eq!(a.envelope.from, b.envelope.from, "uid {}", a.uid);
+        assert_eq!(a.envelope.to, b.envelope.to, "uid {}", a.uid);
+        assert_eq!(a.envelope.date_sent, b.envelope.date_sent, "uid {}", a.uid);
+        assert_eq!(a.flags, b.flags, "uid {}", a.uid);
+        assert_eq!(a.size, b.size, "uid {}", a.uid);
+        assert_eq!(a.internal_date, b.internal_date, "uid {}", a.uid);
+    }
+}
+
 /// Collects the events the engine emits, so the gate can assert on them.
 ///
 /// The engine used to require a `tauri::AppHandle` purely to call `emit`, which made it
@@ -580,6 +627,29 @@ async fn gate_4_a_uidvalidity_reset_is_recovered() {
 
     println!("  before the reset: stored={before} max uid={uid_before}");
 
+    // A change queued before the reset, by a UID from before it. M3 in the 2026-11-14 audit: the
+    // drain applied it to whatever had that number afterwards. It has to be dropped instead. A
+    // flag rather than a Delete, because the other gates need all 50,000 messages.
+    let queued_uid: u32 = 4242;
+    {
+        let account_id = rig.account_id;
+        rig.db
+            .write(move |tx| {
+                halcyon_lib::sync::ops::enqueue(
+                    tx,
+                    account_id,
+                    &halcyon_lib::sync::ops::Op::Flag {
+                        mailbox: "INBOX".into(),
+                        uids: vec![queued_uid],
+                        seen: None,
+                        flagged: Some(true),
+                    },
+                )
+            })
+            .await
+            .expect("queue a flag change");
+    }
+
     // Stop, remove the UID list and indexes, start. Dovecot rebuilds both, picks a new
     // UIDVALIDITY, and renumbers the same messages from 1 — exactly what a restore from backup
     // looks like to a client.
@@ -605,6 +675,23 @@ async fn gate_4_a_uidvalidity_reset_is_recovered() {
     let duplicates = duplicate_count(&rig.db, rig.account_id).await;
 
     println!("  after recovery: stored={after} duplicates={duplicates}");
+
+    // Read, then put back before asserting, so a failure here does not leave the fixture flagged.
+    let flags = on_host(&format!(
+        "export PATH=/usr/local/bin:$PATH; \
+         docker exec halcyon-dovecot doveadm fetch -u tester@halcyon.test 'flags' \
+         MAILBOX INBOX UID {queued_uid}"
+    ));
+    on_host(&format!(
+        "export PATH=/usr/local/bin:$PATH; \
+         docker exec halcyon-dovecot doveadm flags remove -u tester@halcyon.test \
+         '\\Flagged' MAILBOX INBOX UID {queued_uid}"
+    ));
+    println!("  uid {queued_uid} after the drain: {flags}");
+    assert!(
+        !flags.contains("Flagged"),
+        "a change queued under the old UIDVALIDITY reached the server after the reset"
+    );
 
     // The mailbox is whole, and holds each message exactly once. A client that kept the old
     // UIDs would show either double the mail or half of it.

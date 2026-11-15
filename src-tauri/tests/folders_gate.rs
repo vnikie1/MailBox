@@ -1281,3 +1281,70 @@ async fn a_folder_emptied_on_the_server_is_emptied_here() {
 
     rig.tidy().await;
 }
+
+/// A star on a message whose move has not reached the server yet lands on the message.
+///
+/// M4 in the 2026-11-14 audit. The star was queued against the mailbox and UID the message had
+/// before the move, and it runs after the move — so by then that UID named nothing, the server
+/// accepted a change to nothing, and the queue forgot the star as sent. It is now queued by the
+/// message's `Message-ID` in the mailbox it was moved to.
+#[tokio::test]
+#[ignore = "needs the Dovecot rig in test/dovecot"]
+async fn a_change_to_a_message_still_moving_follows_it() {
+    let rig = Rig::open().await;
+    let events = Recorder::default();
+    let (mut imap, caps) = rig.connect().await;
+    rig.sync_tree(&mut imap).await;
+
+    let from = rig.name("Moved From");
+    let to = rig.name("Moved To");
+    imap.create(&from).await.expect("CREATE");
+    imap.create(&to).await.expect("CREATE");
+    append_numbered(&mut imap, &from, 1, "moving").await;
+    rig.sync_tree(&mut imap).await;
+    let (from_id, _) = rig.local(&from).await.expect("row");
+    let (to_id, _) = rig.local(&to).await.expect("row");
+
+    let engine = halcyon_lib::sync::engine::SyncEngine::new();
+    engine
+        .sync_mailboxes(&events, &rig.db, rig.account_id, &[from_id, to_id])
+        .await
+        .expect("first pass");
+
+    // Moved and starred here, as the toolbar would, before either reaches the server.
+    let id: i64 = rig
+        .db
+        .read(move |conn| {
+            Ok(conn.query_row(
+                "SELECT id FROM message WHERE mailbox_id = ?1",
+                rusqlite::params![from_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .expect("the message");
+    rig.db
+        .write(move |tx| {
+            let homecoming = ops::queue_move(tx, &[id], to_id)?;
+            halcyon_lib::db::write::move_to(tx, &[id], to_id)?;
+            ops::settle(tx, &homecoming)?;
+            ops::queue_flags(tx, &[id], None, Some(true))
+        })
+        .await
+        .expect("move and star");
+
+    assert_eq!(rig.drain(&mut imap, caps, &events).await, 2);
+
+    imap.select(&to).await.expect("SELECT");
+    let here = imap.uid_search("ALL").await.expect("SEARCH");
+    let starred = imap.uid_search("FLAGGED").await.expect("SEARCH");
+    let _ = imap.logout().await;
+    rig.tidy().await;
+
+    assert_eq!(here.len(), 1, "the move did not reach the server");
+    assert_eq!(
+        starred.len(),
+        1,
+        "the star was sent to where the message used to be"
+    );
+}

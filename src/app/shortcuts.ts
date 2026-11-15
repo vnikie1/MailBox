@@ -74,8 +74,6 @@ export type ShortcutId =
   | 'previousMessage'
   | 'nextInThread'
   | 'previousInThread'
-  | 'expandThread'
-  | 'collapseThread'
   | 'previewAttachment'
   | 'jumpToMailbox'
   | 'moveFavourite'
@@ -189,12 +187,17 @@ export const SHORTCUTS: Shortcut[] = [
   { id: 'toggleSidebar', keys: 'Ctrl+Shift+S', label: 'Show or hide the sidebar', group: 'View' },
   { id: 'showShortcuts', keys: 'F1', label: 'Keyboard shortcuts', group: 'View' },
   { id: 'settings', keys: 'Ctrl+,', label: 'Settings', group: 'View' },
-  { id: 'expandThread', keys: '→', label: 'Expand thread', group: 'View', local: true },
-  { id: 'collapseThread', keys: '←', label: 'Collapse thread', group: 'View', local: true },
+  // Space on an attachment, which is a button and opens the previewer as any button opens what
+  // it names. Said so, because "Preview attachment" alone read as Space in the message list.
+  //
+  // → and ← for expanding and collapsing a thread (docs/01 §14) are not listed. The message list
+  // has no thread rows to expand, so nothing could handle them, and the Help sheet promised
+  // both for as long as it had them (L20, 2026-11-14 audit). They come back with conversation
+  // rows. The sidebar's → and ←, which open and close its sections, are the tree's own keys.
   {
     id: 'previewAttachment',
     keys: 'Space',
-    label: 'Preview attachment',
+    label: 'Preview the focused attachment',
     group: 'View',
     local: true,
   },

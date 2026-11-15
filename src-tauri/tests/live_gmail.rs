@@ -388,9 +388,9 @@ async fn render_probe() {
         let rendered = render::render(
             html.as_deref(),
             text.as_deref(),
-            &std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
             false,
-            &std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
         );
 
         println!(

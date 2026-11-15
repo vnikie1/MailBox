@@ -179,10 +179,14 @@ pub fn parse(input: &str, now: i64) -> Query {
         // A date phrase in free text — "last week", "in March" — becomes a date bound. Tried
         // before anything else, and only on unfielded words, so `subject:yesterday` still
         // searches for the word.
+        //
+        // Only on the run of plain words that starts here. The phrase reports how many words it
+        // used and they are skipped, so a filter in the middle (`last from:bob week`) would be
+        // skipped with them, dropped without a word (L16).
         if piece.field.is_none() && !piece.quoted {
             let rest: Vec<&str> = pieces[index..]
                 .iter()
-                .filter(|p| p.field.is_none() && !p.quoted)
+                .take_while(|p| p.field.is_none() && !p.quoted)
                 .map(|p| p.value.as_str())
                 .collect();
 

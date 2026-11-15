@@ -25,6 +25,9 @@ use super::mail::AppError;
 /// waiting on this body and returning without it would leave the pane empty for good.
 static BODY_FETCHES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+/// The longest one body fetch may hold its permit. See `bodies_ensure`.
+const BODY_FETCH_LIMIT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 /// Sends whatever the user just changed, shortly. See `SyncEngine::push_soon`.
 ///
 /// Called by the commands that queue work for a server, after their transaction has
@@ -123,10 +126,20 @@ pub async fn bodies_ensure(
             return;
         };
 
-        if let Err(error) =
-            crate::sync::engine::fetch_body(&app, &db, account_id, message_ids).await
+        // Bounded, so the permit above is always given back. A fetch that hung held its slot for
+        // the life of the app, and two of them stopped bodies loading for every account (H3,
+        // 2026-11-14 audit). The session's own read limit catches a silent server; this is the
+        // backstop for anything slower than that, ten minutes being room for 40 MB on a poor
+        // connection.
+        match tokio::time::timeout(
+            BODY_FETCH_LIMIT,
+            crate::sync::engine::fetch_body(&app, &db, account_id, message_ids),
+        )
+        .await
         {
-            tracing::warn!(account_id, %error, "body fetch failed");
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(account_id, %error, "body fetch failed"),
+            Err(_) => tracing::warn!(account_id, "body fetch took too long; given up"),
         }
     });
 

@@ -93,3 +93,57 @@ describe('the selection when a message leaves the list', () => {
     expect(useMailStore.getState().focusedInThread).toBeNull()
   })
 })
+
+/**
+ * Who chose the selection. M38 in the 2026-11-14 audit: the one-pane layout opened the reader
+ * for every new selection, including the list's own first-row pick when a mailbox opened, so
+ * choosing a mailbox jumped into its first message and marked it read.
+ */
+describe('who chose the selection', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      selectedMessageIds: [],
+      anchorMessageId: null,
+      focusedInThread: null,
+      selectionByUser: false,
+    })
+  })
+
+  it('is the app when a mailbox opens on its first row', () => {
+    const store = useMailStore.getState()
+    store.selectMailbox({ nodeId: 'inbox', label: 'Inbox', mailboxIds: [1] })
+    expect(useMailStore.getState().selectionByUser).toBe(false)
+
+    useMailStore.getState().selectMessage(10, 'auto')
+    expect(useMailStore.getState().selectionByUser).toBe(false)
+  })
+
+  it('is the user for a click, an arrow key, a ctrl-click or a shift-click', () => {
+    useMailStore.getState().selectMessage(10)
+    expect(useMailStore.getState().selectionByUser).toBe(true)
+
+    for (const act of [
+      () => {
+        useMailStore.getState().moveSelection(1, [10, 20, 30])
+      },
+      () => {
+        useMailStore.getState().toggleMessage(30)
+      },
+      () => {
+        useMailStore.getState().extendSelection(30, [10, 20, 30])
+      },
+    ]) {
+      useMailStore.setState({ selectionByUser: false })
+      act()
+      expect(useMailStore.getState().selectionByUser).toBe(true)
+    }
+  })
+
+  it('is the app when the list moves on after a message leaves it', () => {
+    useMailStore.getState().selectMessage(20)
+    useMailStore.getState().reconcileSelection([10, 30], 1)
+
+    expect(useMailStore.getState().selectedMessageIds).toEqual([30])
+    expect(useMailStore.getState().selectionByUser).toBe(false)
+  })
+})

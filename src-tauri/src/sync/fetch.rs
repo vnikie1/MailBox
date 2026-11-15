@@ -120,10 +120,15 @@ pub async fn select(
 /// the flags go to the server — and it is the single most destructive mistake available in
 /// this file.
 fn fetch_items(caps: Caps) -> String {
-    let mut items = String::from(
+    let mut items = String::from(if caps.headers_only {
+        // Everything `envelope::from_headers` reads, as one literal. See `Caps::headers_only`.
+        "UID FLAGS INTERNALDATE RFC822.SIZE \
+         BODY.PEEK[HEADER.FIELDS (DATE SUBJECT FROM SENDER REPLY-TO TO CC BCC \
+         IN-REPLY-TO MESSAGE-ID REFERENCES)]"
+    } else {
         "UID FLAGS INTERNALDATE RFC822.SIZE ENVELOPE \
-         BODY.PEEK[HEADER.FIELDS (REFERENCES)]",
-    );
+         BODY.PEEK[HEADER.FIELDS (REFERENCES)]"
+    });
 
     if caps.has_modseq() {
         items.push_str(" MODSEQ");
@@ -157,7 +162,7 @@ async fn uid_fetch(
 
         match response.parsed() {
             Response::Fetch(_, attributes) => {
-                if let Some(message) = from_attributes(attributes) {
+                if let Some(message) = from_attributes(attributes, caps.headers_only) {
                     fetched.push(message);
                 }
             }
@@ -279,7 +284,10 @@ pub fn arrivals_range(stored_uid_next: u32, uid_next: u32) -> Option<String> {
 ///
 /// `fetch_items` always asks for ENVELOPE, so its presence is exactly the difference between a
 /// reply to this command and an aside about something else.
-fn from_attributes(attributes: &[AttributeValue<'_>]) -> Option<Fetched> {
+///
+/// With `headers_only` it asks for the header fields instead, and they play the same part: the
+/// envelope is read from them, and a response without them is the aside.
+fn from_attributes(attributes: &[AttributeValue<'_>], headers_only: bool) -> Option<Fetched> {
     let mut uid = None;
     let mut envelope: Option<Envelope> = None;
     let mut flag_names: Vec<String> = Vec::new();
@@ -317,6 +325,15 @@ fn from_attributes(attributes: &[AttributeValue<'_>]) -> Option<Fetched> {
             } => {
                 let text = String::from_utf8_lossy(bytes);
                 references = extract_references(&text);
+
+                if headers_only {
+                    // A header block that will not parse still names a message the server has.
+                    // It is stored with what could be read, rather than lost. Standing rule 13.
+                    envelope = Some(match mailparse::parse_headers(bytes) {
+                        Ok((headers, _)) => envelope::from_headers(&headers),
+                        Err(_) => envelope::from_headers(&[]),
+                    });
+                }
             }
 
             _ => {}
@@ -395,6 +412,45 @@ pub fn newest_range(uid_next: u32, count: u32) -> String {
     format!("{lowest}:{highest}")
 }
 
+/// The arrivals the newest page did not reach: from the last sync's `uid_next` up to just below
+/// the page, as `(lowest, highest)`.
+///
+/// `None` when the page reached that far, or when there was no last sync to have missed anything
+/// since. On a server without CONDSTORE — and on any server while the Inbox's first download is
+/// unfinished — the newest page is the only way new mail is read, and anything that arrived below
+/// it was never asked for: more than 500 messages between two syncs, which a week away or a
+/// mailing list can deliver, and the older ones were skipped for good (M5, 2026-11-14 audit).
+pub fn missed_range(previous_uid_next: u32, uid_next: u32, page: u32) -> Option<(u32, u32)> {
+    if previous_uid_next == 0 {
+        return None;
+    }
+
+    let highest = uid_next.checked_sub(1).filter(|highest| *highest > 0)?;
+    let page_lowest = highest.saturating_sub(page.saturating_sub(1)).max(1);
+
+    (previous_uid_next < page_lowest).then(|| (previous_uid_next, page_lowest - 1))
+}
+
+/// The UIDs between `lowest` and `highest`, inclusive, newest first.
+pub async fn uids_between(
+    session: &mut ImapSession,
+    lowest: u32,
+    highest: u32,
+) -> Result<Vec<u32>, SyncError> {
+    let (lowest, highest) = (lowest.max(1), highest.max(1));
+
+    let mut uids: Vec<u32> = session
+        .uid_search(format!("UID {lowest}:{highest}"))
+        .await?
+        .into_iter()
+        // IMAP reads a range either way round and a server may be generous; only what was asked.
+        .filter(|uid| (lowest..=highest).contains(uid))
+        .collect();
+
+    uids.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(uids)
+}
+
 /// Every UID in the selected mailbox, newest first.
 ///
 /// One round trip, and it is what makes backfill proportional to the number of *messages*
@@ -411,6 +467,21 @@ pub async fn all_uids(session: &mut ImapSession) -> Result<Vec<u32>, SyncError> 
     let mut uids: Vec<u32> = session.uid_search("ALL").await?.into_iter().collect();
 
     // Newest first, so backfill continues in the direction the user reads.
+    uids.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(uids)
+}
+
+/// The UIDs from `lowest` up: the range a mailbox held in part has here.
+///
+/// `lowest:*` always includes the newest message, even when it is below `lowest` — IMAP reads the
+/// range either way round — so a non-empty mailbox never answers with nothing.
+pub async fn uids_from(session: &mut ImapSession, lowest: u32) -> Result<Vec<u32>, SyncError> {
+    let mut uids: Vec<u32> = session
+        .uid_search(format!("UID {}:*", lowest.max(1)))
+        .await?
+        .into_iter()
+        .collect();
+
     uids.sort_unstable_by(|a, b| b.cmp(a));
     Ok(uids)
 }
@@ -509,6 +580,25 @@ mod tests {
     }
 
     #[test]
+    fn a_mailbox_that_keeps_no_modseq_is_not_asked_for_one() {
+        // The server has CONDSTORE; this mailbox said NOMODSEQ and reported no HIGHESTMODSEQ.
+        // Asked for MODSEQ anyway, every fetch failed and the mailbox never synced (L2).
+        let server = Caps {
+            qresync: true,
+            ..caps(true, true)
+        };
+
+        let nomodseq = server.for_mailbox(None);
+        assert!(!nomodseq.has_modseq());
+        assert!(!fetch_items(nomodseq).contains("MODSEQ"));
+        assert!(nomodseq.gmail, "only the modseq capabilities are set aside");
+
+        let keeps_them = server.for_mailbox(Some(42));
+        assert_eq!(keeps_them, server);
+        assert!(fetch_items(keeps_them).contains("MODSEQ"));
+    }
+
+    #[test]
     fn the_fetch_asks_for_references_because_the_envelope_does_not_carry_them() {
         // IMAP's ENVELOPE has In-Reply-To but not References. JWZ needs both, and without
         // this header fetch every deep thread would break into pairs.
@@ -550,6 +640,86 @@ mod tests {
         // the last sync are the ones from the old `uid_next` up to one below the new.
         assert_eq!(arrivals_range(100, 104).as_deref(), Some("100:103"));
         assert_eq!(arrivals_range(100, 101).as_deref(), Some("100:100"));
+    }
+
+    #[test]
+    fn a_mailbox_read_from_plain_headers_asks_for_no_envelope() {
+        // M2: the fallback for a mailbox whose ENVELOPE could not be parsed.
+        let plain = Caps {
+            headers_only: true,
+            ..caps(true, true)
+        };
+        let items = fetch_items(plain);
+
+        assert!(!items.contains("ENVELOPE"), "{items}");
+        assert!(!items.contains("BODY["), "still a peek: {items}");
+        for field in [
+            "DATE",
+            "SUBJECT",
+            "FROM",
+            "TO",
+            "CC",
+            "MESSAGE-ID",
+            "IN-REPLY-TO",
+        ] {
+            assert!(items.contains(field), "{field} missing from {items}");
+        }
+        assert!(items.contains("MODSEQ") && items.contains("X-GM-THRID"));
+    }
+
+    #[test]
+    fn plain_headers_make_the_envelope_and_their_absence_is_an_aside() {
+        use std::borrow::Cow;
+
+        let headers = b"Date: Tue, 3 Nov 2026 10:00:00 +0000\r\n\
+            Subject: =?UTF-8?Q?Caf=C3=A9?= plans\r\n\
+            From: Ada <ada@example.test>\r\n\
+            To: bob@example.test\r\n\
+            Message-ID: <plain@example.test>\r\n\
+            References: <root@example.test>\r\n\r\n";
+
+        let attributes = vec![
+            AttributeValue::Uid(42),
+            AttributeValue::Rfc822Size(1234),
+            AttributeValue::BodySection {
+                section: None,
+                index: None,
+                data: Some(Cow::Borrowed(&headers[..])),
+            },
+        ];
+
+        let message = from_attributes(&attributes, true).expect("a message");
+        assert_eq!(message.uid, 42);
+        assert_eq!(message.envelope.subject, "Café plans");
+        assert_eq!(
+            message.envelope.message_id.as_deref(),
+            Some("plain@example.test")
+        );
+        assert_eq!(message.envelope.from[0].email, "ada@example.test");
+        assert!(message.envelope.date_sent > 0);
+        assert_eq!(message.references, vec!["root@example.test".to_string()]);
+
+        // Another client's flag change, arriving mid-fetch: UID and FLAGS only.
+        let aside = vec![AttributeValue::Uid(43), AttributeValue::Flags(Vec::new())];
+        assert!(from_attributes(&aside, true).is_none());
+        assert!(
+            from_attributes(&attributes, false).is_none(),
+            "without the fallback, only an ENVELOPE makes a message"
+        );
+    }
+
+    #[test]
+    fn arrivals_below_the_newest_page_are_the_ones_it_missed() {
+        // M5: 1,000 messages arrived between two syncs; the page reads the newest 500 of them.
+        assert_eq!(missed_range(1_000, 2_001, 500), Some((1_000, 1_500)));
+        // The page reaches below the last sync's `uid_next`: nothing missed.
+        assert_eq!(missed_range(1_800, 2_001, 500), None);
+        assert_eq!(missed_range(1_501, 2_001, 500), None, "exactly reached");
+        assert_eq!(missed_range(1_500, 2_001, 500), Some((1_500, 1_500)));
+        // No last sync, nothing new, or an empty mailbox.
+        assert_eq!(missed_range(0, 2_001, 500), None);
+        assert_eq!(missed_range(2_001, 2_001, 500), None);
+        assert_eq!(missed_range(5, 1, 500), None);
     }
 
     #[test]

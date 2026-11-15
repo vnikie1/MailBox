@@ -1,15 +1,15 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   AlertTriangle,
   ChevronDown,
   CornerUpRight,
   Forward,
   Download,
+  Flag,
   Mail,
   Paperclip,
   Reply,
   ReplyAll,
-  ShieldAlert,
 } from 'lucide-react'
 
 import type { AttachmentRow } from '@/lib/generated/AttachmentRow'
@@ -20,11 +20,13 @@ import { useThread } from '@/app/queries'
 
 import { AttachmentPreview } from './AttachmentPreview'
 import { AttachmentTile } from './AttachmentTile'
+import { DraftBanner } from './DraftBanner'
 import { JunkBanner } from './JunkBanner'
 import { MessageBody } from './MessageBody'
 import { useMarkRead } from './useMarkRead'
 import { useThreadBodies } from './useBodyPrefetch'
-import { attachmentSave, attachmentsSaveAll, composeOpen, storeNow } from '@/lib/ipc'
+import { attachmentSave, attachmentsSaveAll, composeOpen, reasonFor } from '@/lib/ipc'
+import { useToday } from '@/app/useToday'
 
 import { RedirectSheet } from './RedirectSheet'
 import { SelectionDeck } from './SelectionDeck'
@@ -204,7 +206,7 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
                       .catch((error: unknown) => {
                         toast.show({
                           title: 'Those attachments could not be saved',
-                          description: error instanceof Error ? error.message : String(error),
+                          description: reasonFor(error),
                         })
                       })
                   }}
@@ -305,6 +307,7 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
           {/* Above the body, not below it. The point of the banner is to be read *before* the
               message it is about — a warning underneath a phishing attempt has already lost. */}
           <JunkBanner message={message} />
+          <DraftBanner message={message} />
 
           {/* docs/03 §6. The body is rendered in a sandboxed frame from HTML the core has
               sanitised — never interpolated into this document, where it would inherit the
@@ -326,7 +329,7 @@ function MessageView({ message, now, expanded, onToggle, collapsible }: MessageV
                       // user looking in a folder for a file that was never written.
                       toast.show({
                         title: 'That attachment could not be saved',
-                        description: error instanceof Error ? error.message : String(error),
+                        description: reasonFor(error),
                       })
                     })
                   }}
@@ -381,7 +384,7 @@ export function Reader({ toolbar }: ReaderProps) {
   const selectedMessageIds = useMailStore((state) => state.selectedMessageIds)
   const [expandedIds, setExpandedIds] = useState<number[]>([])
 
-  const now = useMemo(storeNow, [])
+  const now = useToday()
   const only = selectedMessageIds.length === 1 ? selectedMessageIds[0] : undefined
 
   // Threading is populated by the sync engine in Phase 5; until then a thread is the one
@@ -441,7 +444,9 @@ export function Reader({ toolbar }: ReaderProps) {
             <div className={styles.sheet}>
               {messages.some((message) => message.flagged) && (
                 <div className={styles.banner} data-tone="flag">
-                  <ShieldAlert className={styles.bannerIcon} aria-hidden="true" strokeWidth={1.5} />
+                  {/* A flag, not the shield Junk uses: the banner said "flagged" in the one
+                      picture the app reserves for "this might be junk" (L42). */}
+                  <Flag className={styles.bannerIcon} aria-hidden="true" strokeWidth={1.5} />
                   <span>This conversation is flagged.</span>
                 </div>
               )}

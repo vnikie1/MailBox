@@ -3,4 +3,4 @@
 /**
  * What a predicate can look at. docs/01 §8.
  */
-export type Field = "from" | "to" | "cc" | "subject" | "body" | "anyText" | "mailbox" | "dateReceived" | "size" | "hasAttachment" | "isUnread" | "isFlagged" | "isJunk" | "attachmentName";
+export type Field = "from" | "to" | "cc" | "subject" | "body" | "anyText" | "mailbox" | "dateReceived" | "size" | "hasAttachment" | "isUnread" | "isFlagged" | "isJunk" | "attachmentName" | "flagColor" | "fromAddress";

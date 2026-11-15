@@ -141,6 +141,101 @@ fn a_rule_whose_folder_was_deleted_still_applies_its_other_actions() {
 }
 
 #[test]
+fn a_rule_never_files_mail_into_another_accounts_folder() {
+    // M18. Rules run over every account's mail; a folder belongs to one. The move used to go
+    // ahead, filing the row under the other account while its server was asked for a folder it
+    // does not have.
+    let mut conn = store();
+    conn.execute(
+        "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+         VALUES (2, 'Other', 'other@halcyon.test', 'other', 'password', 'halcyon:other')",
+        [],
+    )
+    .expect("account");
+    conn.execute(
+        "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+         VALUES (20, 2, 'Clients', 'Clients', NULL)",
+        [],
+    )
+    .expect("mailbox");
+    add_message(&conn, 1, "ada@example.test", "The quarterly figures");
+
+    let tx = conn.transaction().expect("tx");
+    run_over(
+        &tx,
+        &[1],
+        &[rule(
+            1,
+            0,
+            Field::From,
+            "ada",
+            vec![Action::MoveTo(20), Action::MarkRead],
+        )],
+    )
+    .expect("run");
+
+    assert_eq!(
+        mailbox_of(&tx, 1),
+        1,
+        "the message stays in its own account"
+    );
+    let queued: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM pending_op WHERE kind = 'move'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read");
+    assert_eq!(queued, 0, "and no server is asked to move it");
+
+    let seen: i64 = tx
+        .query_row("SELECT flag_seen FROM message WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("read");
+    assert_eq!(seen, 1, "while the rule's other action still happens");
+}
+
+#[test]
+fn a_rule_that_marks_mail_read_keeps_the_unread_count_right() {
+    // M20. The count the sidebar shows is cached on the mailbox, and the rule changed the
+    // message without it, so the count stayed one too high until the next sync.
+    let mut conn = store();
+    add_message(&conn, 1, "ada@example.test", "The quarterly figures");
+    add_message(&conn, 2, "grace@example.test", "Lunch");
+    conn.execute("UPDATE mailbox SET unread_count = 2 WHERE id = 1", [])
+        .expect("count");
+
+    let tx = conn.transaction().expect("tx");
+    run_over(
+        &tx,
+        &[1, 2],
+        &[rule(1, 0, Field::From, "ada", vec![Action::MarkRead])],
+    )
+    .expect("run");
+
+    let unread: i64 = tx
+        .query_row("SELECT unread_count FROM mailbox WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("read");
+    assert_eq!(unread, 1);
+
+    run_over(
+        &tx,
+        &[1],
+        &[rule(2, 0, Field::From, "ada", vec![Action::MarkUnread])],
+    )
+    .expect("run");
+    let unread: i64 = tx
+        .query_row("SELECT unread_count FROM mailbox WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("read");
+    assert_eq!(unread, 2);
+}
+
+#[test]
 fn a_rule_that_does_not_match_changes_nothing() {
     let mut conn = store();
     add_message(&conn, 1, "ada@example.test", "The quarterly figures");
@@ -498,4 +593,180 @@ mod server_side {
             rows - parsed
         );
     }
+}
+
+/* ------------------------------------------- conditions on a body that is not here yet */
+
+/// A rule over the body, the attachment names or "has attachment", with one condition.
+fn body_rule(field: Field, op: Op, value: &str) -> Rule {
+    Rule {
+        id: 1,
+        name: "body rule".into(),
+        enabled: true,
+        predicate: Predicate::Is(Condition {
+            field,
+            op,
+            value: value.into(),
+        }),
+        actions: vec![Action::Flag],
+        sort_order: 0,
+    }
+}
+
+fn flagged(conn: &Connection, id: i64) -> bool {
+    conn.query_row(
+        "SELECT flag_flagged FROM message WHERE id = ?1",
+        rusqlite::params![id],
+        |row| row.get::<_, i64>(0),
+    )
+    .expect("flag")
+        != 0
+}
+
+/// H9 in the 2026-11-14 audit: body conditions were judged against a body that was not there.
+///
+/// Bodies download after the envelope, so on arrival every message had an empty body, no
+/// attachment names and no attachment. A rule asking whether the body *contains* something never
+/// matched new mail, and one asking whether it does *not* contain something matched all of it.
+#[test]
+fn a_body_condition_is_not_judged_before_the_body_is_here() {
+    let mut conn = store();
+    add_message(&conn, 1, "ada@example.test", "Hello");
+
+    for (field, op, value) in [
+        (Field::Body, Op::NotContains, "unsubscribe"),
+        (Field::AttachmentName, Op::NotContains, ".exe"),
+        (Field::HasAttachment, Op::IsFalse, ""),
+        (Field::AnyText, Op::NotContains, "lottery"),
+    ] {
+        let tx = conn.transaction().expect("tx");
+        let report = run_over(&tx, &[1], &[body_rule(field, op, value)]).expect("run");
+        tx.commit().expect("commit");
+
+        assert_eq!(
+            report.matched, 0,
+            "{field:?} {op:?} matched a body not yet downloaded"
+        );
+        assert!(!flagged(&conn, 1));
+    }
+}
+
+#[test]
+fn a_body_condition_is_judged_once_the_body_is_stored() {
+    let mut conn = store();
+    add_message(&conn, 1, "ada@example.test", "Hello");
+    conn.execute(
+        "UPDATE message SET body_state = 'full', body_text = 'your invoice is attached'
+          WHERE id = 1",
+        [],
+    )
+    .expect("body");
+
+    let tx = conn.transaction().expect("tx");
+    let report = run_over(
+        &tx,
+        &[1],
+        &[body_rule(Field::Body, Op::Contains, "invoice")],
+    )
+    .expect("run");
+    tx.commit().expect("commit");
+
+    assert_eq!(report.matched, 1);
+    assert!(flagged(&conn, 1));
+}
+
+#[test]
+fn a_header_condition_still_runs_without_a_body() {
+    // The guard is for body conditions only. A rule on the sender must not start waiting for
+    // a download it has no use for.
+    let mut conn = store();
+    add_message(&conn, 1, "ada@example.test", "Hello");
+
+    let tx = conn.transaction().expect("tx");
+    let report = run_over(&tx, &[1], &[body_rule(Field::From, Op::Contains, "ada")]).expect("run");
+    tx.commit().expect("commit");
+
+    assert_eq!(report.matched, 1);
+}
+
+#[test]
+fn whether_a_predicate_needs_the_body_is_known_before_running_it() {
+    let header = Predicate::Is(Condition {
+        field: Field::Subject,
+        op: Op::Contains,
+        value: "x".into(),
+    });
+    let nested_body = Predicate::All(vec![
+        header.clone(),
+        Predicate::Not(Box::new(Predicate::Is(Condition {
+            field: Field::HasAttachment,
+            op: Op::IsTrue,
+            value: String::new(),
+        }))),
+    ]);
+
+    assert!(!header.needs_body());
+    assert!(nested_body.needs_body());
+}
+
+/// The kinds of the operations queued for the server, oldest first.
+fn queued_kinds(tx: &rusqlite::Transaction<'_>) -> Vec<String> {
+    tx.prepare("SELECT kind FROM pending_op ORDER BY id")
+        .expect("prepare")
+        .query_map([], |row| row.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows")
+}
+
+#[test]
+fn a_rule_over_many_messages_queues_one_flag_change_per_mailbox() {
+    // One per message used to be queued, and sent as a STORE each (L4).
+    let mut conn = store();
+    for id in 1..=5 {
+        add_message(&conn, id, "list@example.test", "Digest");
+    }
+
+    let tx = conn.transaction().expect("tx");
+    run_over(
+        &tx,
+        &[1, 2, 3, 4, 5],
+        &[rule(
+            1,
+            0,
+            Field::From,
+            "list@",
+            vec![Action::MarkRead, Action::Flag],
+        )],
+    )
+    .expect("run");
+
+    assert_eq!(
+        queued_kinds(&tx),
+        ["flag", "flag"],
+        "read once, flagged once"
+    );
+}
+
+#[test]
+fn a_flag_change_is_queued_before_the_move_that_follows_it() {
+    // Queued after the move, it would name a UID the Inbox no longer has.
+    let mut conn = store();
+    add_message(&conn, 1, "ada@example.test", "Hello");
+
+    let tx = conn.transaction().expect("tx");
+    run_over(
+        &tx,
+        &[1],
+        &[rule(
+            1,
+            0,
+            Field::From,
+            "ada",
+            vec![Action::MarkRead, Action::MoveTo(2)],
+        )],
+    )
+    .expect("run");
+
+    assert_eq!(queued_kinds(&tx), ["flag", "move"]);
 }

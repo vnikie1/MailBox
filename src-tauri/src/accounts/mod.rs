@@ -306,9 +306,52 @@ pub async fn access_token(
     let tokens = oauth::refresh(provider, client, &refresh_token).await?;
     let expires_at = tokens.expires_at;
 
-    let _ = save_tokens(reference, &tokens);
+    if !save_refreshed(reference, &tokens) {
+        return Err(OAuthError::Refused {
+            provider: provider.id().to_string(),
+            error: "invalid_grant".into(),
+            description: Some("the account was removed while it was signing in".into()),
+        });
+    }
 
     Ok((tokens.access, Some(expires_at)))
+}
+
+/// Accounts removed while the app has been running, by credential reference.
+///
+/// Also the lock that puts removing an account's secrets and writing refreshed ones in order. A
+/// refresh takes a second or two on the network, and an account removed during one had its
+/// secrets purged and then written straight back by the refresh as it finished: a live refresh
+/// token for the mailbox, in Credential Manager under no account (L32).
+static RETIRED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn retired() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<String>> {
+    RETIRED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Removes a removed account's secrets, so that a refresh already under way cannot put them back.
+pub fn retire(reference: &str) -> Result<(), credentials::CredentialError> {
+    let mut retired = retired();
+    retired.insert(reference.to_string());
+    credentials::purge(reference)
+}
+
+/// Lets secrets be written under `reference` again: an account added back under its address.
+pub fn revive(reference: &str) {
+    retired().remove(reference);
+}
+
+/// Writes refreshed tokens, unless the account was removed while they were being fetched.
+fn save_refreshed(reference: &str, tokens: &Tokens) -> bool {
+    let retired = retired();
+    if retired.contains(reference) {
+        return false;
+    }
+    let _ = save_tokens(reference, tokens);
+    true
 }
 
 fn expiry_key(reference: &str) -> String {
@@ -371,9 +414,53 @@ pub fn read_signed_in(conn: &Connection, reference: &str) -> Option<i64> {
     .and_then(|value| value.parse().ok())
 }
 
+fn issuer_key(reference: &str) -> String {
+    format!("oauth.issuer.{reference}")
+}
+
+/// Which sign-in application — which OAuth client id — issued the account's refresh token.
+///
+/// A refresh token works only with the client it was issued to. Switching between Halcyon's
+/// own application and one of the user's left every account holding a token the new client
+/// could not refresh; the provider called that `unauthorized_client`, which the app reads as a
+/// broken registration, and the account was stopped with a message saying signing in again
+/// would not help — when signing in again, with the new client, is exactly the cure (M28,
+/// 2026-11-14 audit). See [`client_changed`].
+pub fn write_issuer(conn: &Connection, reference: &str, client_id: &str) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO setting (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![issuer_key(reference), client_id],
+    )?;
+
+    Ok(())
+}
+
+/// See [`write_issuer`]. `None` for a sign-in from before this was recorded.
+pub fn read_issuer(conn: &Connection, reference: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM setting WHERE key = ?1",
+        params![issuer_key(reference)],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Whether the account's token was issued to a different client from the one now configured.
+///
+/// Unknown is not a change: a sign-in from before the issuer was recorded is refreshed as it
+/// always was, and records its issuer once a refresh succeeds.
+pub fn client_changed(issuer: Option<&str>, current: &str) -> bool {
+    issuer.is_some_and(|issuer| issuer != current)
+}
+
 /// Clears the settings rows an account leaves behind. Called alongside `credentials::purge`.
 pub fn forget_settings(conn: &Connection, reference: &str) -> Result<(), DbError> {
-    for key in [expiry_key(reference), signed_in_key(reference)] {
+    for key in [
+        expiry_key(reference),
+        signed_in_key(reference),
+        issuer_key(reference),
+    ] {
         conn.execute("DELETE FROM setting WHERE key = ?1", params![key])?;
     }
 
@@ -389,6 +476,63 @@ mod tests {
         let mut conn = Connection::open_in_memory().expect("open");
         migrate::run(&mut conn).expect("migrate");
         conn
+    }
+
+    #[test]
+    fn a_refresh_that_finishes_after_the_account_is_removed_writes_nothing_back() {
+        // The account was removed while its token was being refreshed; the refresh finished
+        // after the purge and wrote a live refresh token back under no account (L32).
+        let scratch = credentials::Scratch::new("retired");
+        let reference = scratch.reference();
+        let tokens = Tokens {
+            access: Secret::new(String::from("access")),
+            refresh: Some(Secret::new(String::from("refresh"))),
+            expires_at: 1_900_000_000,
+        };
+        save_tokens(reference, &tokens).expect("signed in");
+
+        retire(reference).expect("removed");
+        assert!(!save_refreshed(reference, &tokens), "written back");
+        assert!(!credentials::exists(reference, Kind::RefreshToken));
+        assert!(!credentials::exists(reference, Kind::AccessToken));
+
+        // Added back under the same address, it signs in as before.
+        revive(reference);
+        assert!(save_refreshed(reference, &tokens));
+        assert!(credentials::exists(reference, Kind::RefreshToken));
+
+        credentials::purge(reference).expect("tidy");
+    }
+
+    #[test]
+    fn a_token_from_another_sign_in_application_is_known_for_what_it_is() {
+        // M28. Switching between Halcyon's application and the user's own left every account
+        // with a token the new client could not refresh, reported as a broken registration.
+        let conn = store();
+        let reference = "halcyon:ada@example.test";
+
+        assert_eq!(read_issuer(&conn, reference), None);
+        write_issuer(&conn, reference, "builtin.apps.googleusercontent.com").expect("write");
+        assert_eq!(
+            read_issuer(&conn, reference).as_deref(),
+            Some("builtin.apps.googleusercontent.com")
+        );
+
+        let issuer = read_issuer(&conn, reference);
+        assert!(client_changed(
+            issuer.as_deref(),
+            "mine.apps.googleusercontent.com"
+        ));
+        assert!(!client_changed(
+            issuer.as_deref(),
+            "builtin.apps.googleusercontent.com"
+        ));
+        // Signed in before this was recorded: refreshed as before.
+        assert!(!client_changed(None, "mine.apps.googleusercontent.com"));
+
+        // And it leaves with the account.
+        forget_settings(&conn, reference).expect("forget");
+        assert_eq!(read_issuer(&conn, reference), None);
     }
 
     #[test]

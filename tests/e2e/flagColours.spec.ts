@@ -28,6 +28,18 @@ test.describe('flag colours', () => {
     await ready(page)
   })
 
+  test('a flagged conversation is marked with a flag, not the junk shield', async ({ page }) => {
+    // L42 in the 2026-11-14 audit: "This conversation is flagged" was drawn with the shield the
+    // app keeps for "this might be junk".
+    await page.getByRole('option').nth(1).click()
+    await page.getByRole('button', { name: 'Flag', exact: true }).click()
+    await page.getByRole('menuitemcheckbox', { name: 'Red' }).click()
+
+    const banner = page.getByText('This conversation is flagged.').locator('..')
+    await expect(banner.locator('svg')).toHaveClass(/lucide-flag/)
+    await expect(banner.locator('svg')).not.toHaveClass(/shield/)
+  })
+
   test('the toolbar flag button offers all seven colours', async ({ page }) => {
     await page.getByRole('option').first().click()
     await page.getByRole('button', { name: 'Flag', exact: true }).click()

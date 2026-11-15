@@ -6,7 +6,7 @@ import { formatRowDate } from '@/lib/date'
 import { cx } from '@/lib/cx'
 import { Avatar } from '@/ui'
 
-import { receivedAt, senderLabel, subjectLabel } from './rows'
+import { receivedAt, rowElementId, senderLabel, subjectLabel } from './rows'
 import { useSwipe } from './useSwipe'
 
 import styles from './MessageRow.module.css'
@@ -133,7 +133,12 @@ export const MessageRow = memo(function MessageRow({
           // Read by the list's context menu, which is mounted once around every row rather
           // than once per row, and so has only the event target to work out what was clicked.
           data-message-id={message.id}
-          tabIndex={-1}
+          // Named so the list can point at it with aria-activedescendant. Not focusable: a row
+          // that took focus on click lost it when arrowing scrolled the row out of the
+          // virtualised window and unmounted it, and the keys then reached nothing, so holding
+          // ArrowDown stopped after about twenty rows (M40, 2026-11-14 audit). A click now
+          // focuses the list itself, which is never unmounted.
+          id={rowElementId(message.id)}
           className={cx(
             styles.row,
             selected && styles.selected,

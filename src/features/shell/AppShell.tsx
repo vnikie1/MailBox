@@ -1,5 +1,5 @@
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronLeft } from 'lucide-react'
+import { AlertTriangle, ChevronLeft } from 'lucide-react'
 
 import { cx } from '@/lib/cx'
 import { LIST_MAX, LIST_MIN, SIDEBAR_MAX, SIDEBAR_MIN, useLayoutStore } from '@/store/layout'
@@ -22,7 +22,7 @@ import { MessageContextMenu } from '@/features/messageList/MessageContextMenu'
 import { useMailboxMenu } from '@/features/sidebar/useMailboxMenu'
 import { blockSender, flagSet, muteThread, unblockSender } from '@/lib/organise'
 import { useMailStore } from '@/store/mail'
-import { Button, useToast } from '@/ui'
+import { Button, EmptyState, ErrorBoundary, useToast } from '@/ui'
 import { MessageList } from '@/features/messageList/MessageList'
 import { Reader } from '@/features/reader/Reader'
 import { RedirectSheet } from '@/features/reader/RedirectSheet'
@@ -34,7 +34,14 @@ import { ShortcutSheet } from '@/features/help/ShortcutSheet'
 import { ScopeBar, useSearch } from '@/features/search'
 import { SaveSearchSheet } from '@/features/search/SaveSearchSheet'
 import { junkMark, rulesRun } from '@/lib/organise'
-import { composeOpen, onJumpListTask, settingsOpen, syncAll } from '@/lib/ipc'
+import {
+  composeOpen,
+  handoffTake,
+  onJumpListTask,
+  reasonFor,
+  settingsOpen,
+  syncAll,
+} from '@/lib/ipc'
 import type { FavouriteRow } from '@/lib/generated/FavouriteRow'
 
 import { PaneDivider } from './PaneDivider'
@@ -64,6 +71,22 @@ const NO_FAVOURITES: FavouriteRow[] = []
  */
 export function AppShell() {
   const breakpoint = useBreakpoint()
+
+  // Which pane the one-pane layout shows. Up here because the message actions need it: see
+  // `leaveReaderIfRemoving`.
+  const [level, setLevel] = useState<Level>('list')
+
+  /**
+   * One pane, on the reader, and the message is going: back to the list.
+   *
+   * The list follows a message that leaves it by selecting the next row, but in one pane the list
+   * is not mounted while the reader is up, so nothing moved on: the reader went on showing the
+   * deleted message from the Trash (M38, 2026-11-14 audit). Back on the list, it moves on as it
+   * does in every other layout, and because that selection is the app's, it does not open.
+   */
+  const leaveReaderIfRemoving = useCallback(() => {
+    if (breakpoint === 'one' && level === 'reader') setLevel('list')
+  }, [breakpoint, level])
 
   /**
    * Settings is a window of its own since Phase 11, so opening it is an IPC call rather than
@@ -128,7 +151,7 @@ export function AppShell() {
     (title: string) => (error: unknown) => {
       toast.show({
         title,
-        description: error instanceof Error ? error.message : String(error),
+        description: reasonFor(error),
       })
     },
     [toast],
@@ -150,11 +173,18 @@ export function AppShell() {
 
   // The taskbar Jump List. New Message is handled in Rust — it opens a real window — so only
   // the two that are places in this UI arrive here.
+  //
+  // Not until the mailboxes have loaded. A task that started the app is held by the core until
+  // this asks for it (H19), and taken before the list arrived, Inbox would select All Inboxes
+  // with no inboxes in it.
+  const mailboxesLoaded = mailboxesQuery.isSuccess
   useEffect(() => {
+    if (!mailboxesLoaded) return
+
     let cancelled = false
     let off: (() => void) | undefined
 
-    void onJumpListTask((task) => {
+    const onTask = (task: string) => {
       if (task === '--inbox') {
         // The unified row, matching what the sidebar builds. Selecting one account's inbox
         // would be a guess about which account the user meant.
@@ -166,16 +196,27 @@ export function AppShell() {
             .map((mailbox) => mailbox.id),
         })
       } else if (task === '--search') focusSearch()
-    }).then((unlisten) => {
-      if (cancelled) unlisten()
-      else off = unlisten
+    }
+
+    void onJumpListTask(onTask).then((unlisten) => {
+      if (cancelled) {
+        unlisten()
+        return
+      }
+      off = unlisten
+
+      // Then whatever was picked before this could hear it. Asked for only once the listener
+      // is in place, so nothing falls between the two.
+      void handoffTake<string>('jumplist:task').then((held) => {
+        held.forEach(onTask)
+      })
     })
 
     return () => {
       cancelled = true
       off?.()
     }
-  }, [focusSearch, selectMailbox, mailboxes])
+  }, [focusSearch, selectMailbox, mailboxes, mailboxesLoaded])
 
   // One dispatcher for the whole application. See `app/shortcuts.ts` for why they are not
   // registered where they are used.
@@ -243,15 +284,18 @@ export function AppShell() {
     // means a selection routinely spans two accounts, and there is no single archive.
     archive: useCallback(() => {
       archive.mutate(selectedMessageIds)
-    }, [selectedMessageIds, archive]),
+      leaveReaderIfRemoving()
+    }, [selectedMessageIds, archive, leaveReaderIfRemoving]),
 
     delete: useCallback(() => {
       remove.mutate({ ids: selectedMessageIds, permanent: false })
-    }, [selectedMessageIds, remove]),
+      leaveReaderIfRemoving()
+    }, [selectedMessageIds, remove, leaveReaderIfRemoving]),
 
     deletePermanently: useCallback(() => {
       remove.mutate({ ids: selectedMessageIds, permanent: true })
-    }, [selectedMessageIds, remove]),
+      leaveReaderIfRemoving()
+    }, [selectedMessageIds, remove, leaveReaderIfRemoving]),
 
     // The core decides the direction from the stored rows, so the window keeps no second copy
     // of what is read — which would be stale the moment another client changed it.
@@ -265,7 +309,8 @@ export function AppShell() {
 
     markJunk: useCallback(() => {
       void junkMark(selectedMessageIds, true).catch(failed('That could not be marked as junk'))
-    }, [selectedMessageIds, failed]),
+      leaveReaderIfRemoving()
+    }, [selectedMessageIds, failed, leaveReaderIfRemoving]),
 
     moveTo: useCallback(() => {
       setMovingTo(true)
@@ -327,10 +372,10 @@ export function AppShell() {
           .then(() => {
             // Said out loud because blocking is retroactive: the core files everything already
             // here from that address as junk, and a silent menu click would leave the user
-            // wondering where their mail went.
+            // wondering where their mail went. New mail from it arrives as junk too.
             toast.show({
               title: `Blocked ${address}`,
-              description: 'Mail already here from this address has been marked as junk.',
+              description: 'Mail from this address, already here and still to come, is junk.',
             })
           })
           .catch(failed('That sender could not be blocked'))
@@ -496,8 +541,6 @@ export function AppShell() {
     retargetSelection,
   ])
 
-  const [level, setLevel] = useState<Level>('list')
-
   /**
    * Push navigation in the one-pane layout. docs/01 §1.
    *
@@ -510,13 +553,28 @@ export function AppShell() {
   const lastThread = useRef(selectedMessageIds[0])
   const lastMailbox = useRef(selectedNodeId)
 
+  // Only a selection the user made opens the reader. The list's own choices -- its first row when
+  // a mailbox opens, the next row when one leaves -- used to open it too (M38).
+  const selectionByUser = useMailStore((state) => state.selectionByUser)
+  const lastByUser = useRef(selectionByUser)
   useEffect(() => {
     const current = selectedMessageIds[0]
     const changed = current !== lastThread.current
+    // The user clicking the very row the app had picked: the selection does not move, but it is
+    // now theirs, and that is a request to open it.
+    const takenOver = selectionByUser && !lastByUser.current
     lastThread.current = current
+    lastByUser.current = selectionByUser
 
-    if (changed && breakpoint === 'one' && selectedMessageIds.length === 1) setLevel('reader')
-  }, [breakpoint, selectedMessageIds])
+    if (
+      (changed || takenOver) &&
+      breakpoint === 'one' &&
+      selectedMessageIds.length === 1 &&
+      selectionByUser
+    ) {
+      setLevel('reader')
+    }
+  }, [breakpoint, selectedMessageIds, selectionByUser])
 
   useEffect(() => {
     const changed = selectedNodeId !== lastMailbox.current
@@ -591,6 +649,8 @@ export function AppShell() {
                 />
               )}
               searchRows={searching ? search.visible.map((hit) => hit.row) : undefined}
+              searchRunning={search.running}
+              searchFailed={search.failed}
               scopeBar={
                 searching ? (
                   <ScopeBar
@@ -622,24 +682,52 @@ export function AppShell() {
 
         {showReader && (
           <div className={styles.readerPane}>
-            <Reader
-              toolbar={{
-                search: search.text,
-                onSearchChange: search.setText,
-                onSearchCommit: search.commit,
-                actions,
-                // Only meaningful for one message: with several selected there is no single
-                // colour to tick, and the menu says so by ticking nothing.
-                flagColor: selectedMessage?.flagColor,
-              }}
-            />
+            {/* The catch-all. The message frame has its own boundary, so this is for anything
+                else in the reader; without one, an error there unmounted the whole window. */}
+            <ErrorBoundary
+              label="reader"
+              resetKey={selectedMessageIds.join(',')}
+              fallback={
+                <EmptyState
+                  variant="hero"
+                  tone="error"
+                  icon={AlertTriangle}
+                  title="This message could not be shown"
+                  description="Choose another message to carry on."
+                />
+              }
+            >
+              <Reader
+                toolbar={{
+                  search: search.text,
+                  onSearchChange: search.setText,
+                  onSearchCommit: search.commit,
+                  actions,
+                  // Only meaningful for one message: with several selected there is no single
+                  // colour to tick, and the menu says so by ticking nothing.
+                  flagColor: selectedMessage?.flagColor,
+                }}
+              />
+            </ErrorBoundary>
           </div>
         )}
       </div>
 
       <ShortcutSheet open={showingShortcuts} onOpenChange={setShowingShortcuts} />
 
-      <SaveSearchSheet open={savingSearch} onOpenChange={setSavingSearch} text={search.text} />
+      <SaveSearchSheet
+        open={savingSearch}
+        onOpenChange={setSavingSearch}
+        text={search.text}
+        state={search.state}
+        mailboxNames={
+          search.place === 'mailbox'
+            ? mailboxes
+                .filter((mailbox) => selectionMailboxIds.includes(mailbox.id))
+                .map((mailbox) => mailbox.displayName)
+            : []
+        }
+      />
 
       {only !== undefined && (
         <RedirectSheet
@@ -669,6 +757,7 @@ export function AppShell() {
         }
         onChoose={(mailboxId) => {
           move.mutate({ ids: selectedMessageIds, mailboxId })
+          leaveReaderIfRemoving()
         }}
       />
     </div>

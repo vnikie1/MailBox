@@ -42,7 +42,26 @@ pub enum Field {
     IsFlagged,
     IsJunk,
     AttachmentName,
+    /// The colour the flag shows: `red`, `orange` and so on, or nothing for a message that is
+    /// not flagged. The colour, never its name, so renaming a colour does not change what this
+    /// matches.
+    ///
+    /// The sidebar's Red, Orange, ... rows under Flagged used "flagged, and the text mentions the
+    /// word", so Red listed flagged mail from Fred or about credit, and not mail flagged red
+    /// (H11, 2026-11-14 audit).
+    FlagColor,
+    /// The sender's address alone, without their name: what "from this person" means.
+    ///
+    /// `From` is the name and address run together, so the only test it allows is "contains",
+    /// and the VIPs row asking "contains ann@company.com" listed joann@company.com's mail too.
+    FromAddress,
 }
+
+/// The colour a flag with none recorded is drawn in. A flag set on a phone arrives without one.
+///
+/// The message list draws it this colour (`MessageRow.tsx`), so the Orange row lists it too:
+/// a row that left out flags the list shows as orange would contradict the list.
+pub const UNCOLOURED_FLAG: &str = "orange";
 
 impl Field {
     /// Whether the field holds text, a number, or a yes/no.
@@ -80,6 +99,11 @@ impl Field {
             Field::IsFlagged => &["message.flag_flagged"],
             Field::IsJunk => &["message.is_junk"],
             Field::AttachmentName => &["message.attachment_names"],
+            // An expression rather than a column, so the uncoloured default lives in the SQL
+            // as well as in `Subject::flag_colour` and the two halves cannot disagree about it.
+            Field::FromAddress => &["TRIM(message.from_addr)"],
+            Field::FlagColor => &["CASE WHEN message.flag_flagged = 1 \
+                                   THEN COALESCE(message.flag_color, 'orange') END"],
         }
     }
 }
@@ -154,6 +178,21 @@ pub struct Subject<'a> {
     pub is_unread: bool,
     pub is_flagged: bool,
     pub is_junk: bool,
+    /// `message.flag_color` as stored: empty when none was recorded.
+    pub flag_color: &'a str,
+    /// `message.from_addr`: the sender's address alone.
+    pub from_addr: &'a str,
+}
+
+impl Subject<'_> {
+    /// The colour the flag shows, as `Field::FlagColor` reads it.
+    fn flag_colour(&self) -> &str {
+        match (self.is_flagged, self.flag_color) {
+            (false, _) => "",
+            (true, "") => UNCOLOURED_FLAG,
+            (true, colour) => colour,
+        }
+    }
 }
 
 /// A compiled predicate: a SQL fragment and the values to bind to it.
@@ -230,20 +269,26 @@ impl Condition {
             }
 
             Kind::Text => {
+                // Lowered here and with `lower()` in the statement, both by Rust's
+                // `to_lowercase` (the store replaces SQLite's `lower`, which folds A-Z only; see
+                // `db::unicode_lower`). This relied on LIKE's own case folding, which is also
+                // A-Z only, so "über" missed "Überweisung" here while the in-memory half, and so
+                // the same rule on arrival, matched it (M16, 2026-11-14 audit).
+                let value = self.value.to_lowercase();
                 let (pattern, negate) = match self.op {
-                    Op::Contains => (format!("%{}%", escape_like(&self.value)), false),
-                    Op::NotContains => (format!("%{}%", escape_like(&self.value)), true),
-                    Op::BeginsWith => (format!("{}%", escape_like(&self.value)), false),
-                    Op::EndsWith => (format!("%{}", escape_like(&self.value)), false),
-                    Op::IsNot => (escape_like(&self.value), true),
+                    Op::Contains => (format!("%{}%", escape_like(&value)), false),
+                    Op::NotContains => (format!("%{}%", escape_like(&value)), true),
+                    Op::BeginsWith => (format!("{}%", escape_like(&value)), false),
+                    Op::EndsWith => (format!("%{}", escape_like(&value)), false),
+                    Op::IsNot => (escape_like(&value), true),
                     // `Is` and anything numeric applied to text.
-                    _ => (escape_like(&self.value), false),
+                    _ => (escape_like(&value), false),
                 };
 
                 // Every column ORed together, so `AnyText` is one condition rather than four.
                 let clause = columns
                     .iter()
-                    .map(|column| format!("COALESCE({column}, '') LIKE ? ESCAPE '\\'"))
+                    .map(|column| format!("lower(COALESCE({column}, '')) LIKE ? ESCAPE '\\'"))
                     .collect::<Vec<_>>()
                     .join(" OR ");
 
@@ -307,12 +352,14 @@ impl Condition {
                     Field::Mailbox => vec![subject.mailbox],
                     Field::AttachmentName => vec![subject.attachment_names],
                     Field::AnyText => vec![subject.from, subject.to, subject.subject, subject.body],
+                    Field::FlagColor => vec![subject.flag_colour()],
+                    Field::FromAddress => vec![subject.from_addr.trim()],
                     _ => vec![""],
                 };
 
-                // SQLite's LIKE is case-insensitive for ASCII by default, and the SQL side
-                // relies on that. Matching case-sensitively here would make the two halves
-                // disagree on every capital letter.
+                // Lowered on both sides, by the same `to_lowercase` the SQL half calls through
+                // `lower()`. Matching case-sensitively here would make the two halves disagree
+                // on every capital letter.
                 let needle = self.value.to_lowercase();
                 let any = |test: &dyn Fn(&str) -> bool| {
                     haystacks.iter().any(|hay| test(&hay.to_lowercase()))
@@ -394,6 +441,26 @@ impl Predicate {
             Predicate::Not(inner) => !inner.matches(subject),
             Predicate::All(parts) => parts.iter().all(|part| part.matches(subject)),
             Predicate::Any(parts) => parts.iter().any(|part| part.matches(subject)),
+        }
+    }
+
+    /// Whether any condition reads something that exists only once the body is downloaded: the
+    /// body text, the attachment names, whether there is an attachment — or `AnyText`, which
+    /// includes the body.
+    ///
+    /// Bodies download after the envelope, so a message can be in the store with all of these
+    /// empty. Judging a condition on them then is not a cautious answer but a wrong one, in both
+    /// directions: "contains" is false and "does not contain" is true for every message.
+    pub fn needs_body(&self) -> bool {
+        match self {
+            Predicate::Is(condition) => matches!(
+                condition.field,
+                Field::Body | Field::AnyText | Field::AttachmentName | Field::HasAttachment
+            ),
+            Predicate::Not(inner) => inner.needs_body(),
+            Predicate::All(parts) | Predicate::Any(parts) => {
+                parts.iter().any(Predicate::needs_body)
+            }
         }
     }
 

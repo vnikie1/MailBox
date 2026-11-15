@@ -391,6 +391,15 @@ export async function accountAddOauth(input: AccountInput): Promise<AddedAccount
   return invoke<AddedAccount>('account_add_oauth', { input })
 }
 
+/**
+ * Gives up on the browser sign-in under way. The pending `accountAddOauth` then fails with the
+ * code `cancelled`. L30 in the 2026-11-14 audit: the wait was five minutes with nothing to end it.
+ */
+export async function oauthCancel(): Promise<void> {
+  if (!runningInTauri) return
+  return invoke<undefined>('oauth_cancel')
+}
+
 export async function accountsDetail(): Promise<AccountDetail[]> {
   if (!runningInTauri) return browser.accountsDetail()
   return invoke<AccountDetail[]>('accounts_detail')
@@ -834,6 +843,7 @@ import type { OutboxRow } from './generated/OutboxRow'
 import type { ReplyDraft } from './generated/ReplyDraft'
 import type { Contact } from './generated/Contact'
 import type { DraftState } from './generated/DraftState'
+import type { LoadedDraft } from './generated/LoadedDraft'
 import type { Signature } from './generated/Signature'
 
 /**
@@ -951,9 +961,13 @@ export async function composeReply(messageId: number, kind: string): Promise<Rep
  * transmitted. The window can close immediately without risking the message, and for the length
  * of the undo hold nothing has been sent.
  */
-export async function composeSend(message: OutgoingMessage): Promise<number> {
+export async function composeSend(
+  message: OutgoingMessage,
+  draftMessageId: string | null = null,
+): Promise<number> {
   if (!runningInTauri) throw new Error('Sending is only available in the app.')
-  return invoke<number>('compose_send', { message })
+  // The draft it was written as, which the core lets go of once the message has actually gone.
+  return invoke<number>('compose_send', { message, draftMessageId })
 }
 
 /**
@@ -1125,10 +1139,22 @@ export async function composeSaveDraft(
   return invoke<DraftState>('compose_save_draft', { message, messageId })
 }
 
-/** Removes a draft once its message has been sent or thrown away. */
-export async function composeDiscardDraft(id: number): Promise<void> {
+/** Throws a draft away, here and on the server. Delete in the close sheet. */
+export async function composeDiscardDraft(messageId: string): Promise<void> {
   if (!runningInTauri) return
-  await invoke('compose_discard_draft', { id })
+  await invoke('compose_discard_draft', { messageId })
+}
+
+/** Opens a compose window on a draft from a Drafts mailbox. Edit Draft. */
+export async function composeOpenDraft(messageId: number): Promise<string> {
+  if (!runningInTauri) return ''
+  return invoke<string>('compose_open_draft', { messageId })
+}
+
+/** What a compose window opened on a draft starts with. */
+export async function composeLoadDraft(messageId: number): Promise<LoadedDraft> {
+  if (!runningInTauri) throw new Error('Drafts are only available in the app.')
+  return invoke<LoadedDraft>('compose_load_draft', { messageId })
 }
 
 /**
@@ -1250,6 +1276,19 @@ export async function onJumpListTask(handler: (task: string) => void): Promise<U
 }
 
 /**
+ * What Windows asked of this window before it was listening, for one event. Call it once the
+ * listener for that event is subscribed: the core holds the event until then, and lets later
+ * ones straight through afterwards.
+ *
+ * A Jump List task that started the app, or a toast pressed while the main window was being
+ * made again, arrives before the page has loaded (H19, M30). See platform/handoff.rs.
+ */
+export async function handoffTake<T>(event: 'jumplist:task' | 'notification:action'): Promise<T[]> {
+  if (!runningInTauri) return []
+  return invoke<T[]>('handoff_take', { event })
+}
+
+/**
  * Plays the sent sound, if this account has sounds turned on.
  *
  * The preference is checked in Rust rather than here, so both sounds — this one and the toast's
@@ -1283,6 +1322,16 @@ export type SettingsPane =
  * are no OS windows at all, so this opens a tab instead, which is what the Playwright run and
  * the component gallery need it to do.
  */
+/**
+ * Replaces a password account's password, after checking it with the account's server.
+ *
+ * Rejects with the server's verdict when it does not sign in, and stores nothing then.
+ */
+export async function accountSetPassword(id: number, password: string): Promise<void> {
+  if (!runningInTauri) throw new Error('Accounts are only available in the app.')
+  await invoke('account_set_password', { id, password })
+}
+
 export async function settingsOpen(
   pane: SettingsPane = 'general',
   accountId?: number,

@@ -15,6 +15,26 @@
  * whole token — which is what this did — meant the display name's space failed the whitespace
  * check, and **every recipient picked from the autocomplete rendered as an invalid red chip**.
  */
+/**
+ * A recipient as its chip shows it, and as two chips are compared.
+ *
+ * `Ada Lovelace <ada@example.test>` shows as "Ada Lovelace", `"Smith, John" <john@example.test>`
+ * as "Smith, John" — the quotes are how mail writes a name with a comma in it, not part of the
+ * name — and a bare address as itself. Two recipients are the same one when their addresses are,
+ * whatever either is called. The value itself is unchanged; this only reads it.
+ */
+export function readRecipient(value: string): { label: string; key: string } {
+  const match = /^(.*?)<([^>]+)>\s*$/.exec(value.trim())
+  const address = (match ? (match[2] ?? '') : value).trim()
+  const name = (match?.[1] ?? '')
+    .trim()
+    .replace(/^"(.*)"$/, '$1')
+    .replace(/\\(.)/g, '$1')
+    .trim()
+
+  return { label: name === '' ? address : name, key: address.toLowerCase() }
+}
+
 export function looksLikeAddress(value: string): boolean {
   const match = /^(.*?)<([^>]+)>\s*$/.exec(value)
   const email = (match ? match[2] : value)?.trim() ?? ''

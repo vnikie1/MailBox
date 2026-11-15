@@ -84,14 +84,20 @@ export function receivedAt(row: MessageRow): Date {
 export function buildListItems({ rows, now, selected, grouped }: BuildOptions): ListItem[] {
   const items: ListItem[] = []
   let lastSectionKey: string | null = null
+  // Every key used, so a section that comes round again cannot repeat one. Rows in date order
+  // never do, but a list that is not quite in it would, and two items with one key are two
+  // headers React cannot tell apart: it drew stale ones over the rows (M34).
+  const used = new Set<string>()
 
   rows.forEach((message, index) => {
     if (grouped) {
       const key = sectionKeyForDate(receivedAt(message), now)
       if (key !== lastSectionKey) {
+        const itemKey = used.has(`header-${key}`) ? `header-${key}-${index}` : `header-${key}`
+        used.add(itemKey)
         items.push({
           kind: 'header',
-          key: `header-${key}`,
+          key: itemKey,
           label: sectionForDate(receivedAt(message), now),
         })
         lastSectionKey = key
@@ -121,4 +127,9 @@ export function buildListItems({ rows, now, selected, grouped }: BuildOptions): 
   })
 
   return items
+}
+
+/** The element id of a message's row, for the list's `aria-activedescendant`. */
+export function rowElementId(messageId: number): string {
+  return `message-row-${String(messageId)}`
 }

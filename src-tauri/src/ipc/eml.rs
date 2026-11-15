@@ -71,19 +71,21 @@ fn bodies(part: &mailparse::ParsedMail<'_>, html: &mut Option<String>, plain: &m
     }
 }
 
-/// Collects `cid:` parts, so an embedded image shows without touching the network.
+/// Collects `cid:` image parts, so an embedded image shows without touching the network.
+///
+/// Images only, through the builder that checks the type. This took any part with a Content-ID
+/// and pasted its declared type into the data URI unchecked.
 fn inline_images(part: &mailparse::ParsedMail<'_>, into: &mut HashMap<String, String>) {
-    use base64::Engine;
-
     if part.subparts.is_empty() {
         let id = part
             .headers
             .get_first_value("Content-ID")
-            .map(|value| value.trim_matches(['<', '>']).to_string());
+            .map(|value| value.trim().trim_matches(['<', '>']).to_string());
 
         if let (Some(id), Ok(bytes)) = (id, part.get_body_raw()) {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            into.insert(id, format!("data:{};base64,{encoded}", part.ctype.mimetype));
+            if let Some(data_uri) = render::image_data_uri(&part.ctype.mimetype, &bytes) {
+                into.insert(id, data_uri);
+            }
         }
 
         return;
@@ -145,22 +147,39 @@ pub async fn eml_read(path: String) -> Result<EmlMessage, AppError> {
         message: error.to_string(),
     })?;
 
-    let parsed = mailparse::parse_mail(&raw).map_err(|error| AppError {
-        code: "parse-failed".into(),
-        message: error.to_string(),
-    })?;
+    read_message(&raw)
+}
 
+/// Everything `eml_read` shows, from the file's bytes.
+fn read_message(raw: &[u8]) -> Result<EmlMessage, AppError> {
     let mut html = None;
     let mut plain = None;
-    bodies(&parsed, &mut html, &mut plain);
-
     let mut inline = HashMap::new();
-    inline_images(&parsed, &mut inline);
-
     let mut attachments = Vec::new();
-    attachment_names(&parsed, &mut attachments);
 
-    let header = |name: &str| parsed.headers.get_first_value(name);
+    let headers = match crate::mail::mime::parse(raw) {
+        Ok(parsed) => {
+            bodies(&parsed, &mut html, &mut plain);
+            inline_images(&parsed, &mut inline);
+            attachment_names(&parsed, &mut attachments);
+            parsed.headers
+        }
+        // A file nested too deep to parse safely is still shown, as the text it is, rather than
+        // refused. It is far more likely to be a curiosity than anything the user needs, but an
+        // error would read as Halcyon failing.
+        Err(crate::mail::mime::Unparsed::TooDeep { headers, body }) => {
+            plain = Some(String::from_utf8_lossy(body).into_owned());
+            headers
+        }
+        Err(crate::mail::mime::Unparsed::Malformed(error)) => {
+            return Err(AppError {
+                code: "parse-failed".into(),
+                message: error.to_string(),
+            });
+        }
+    };
+
+    let header = |name: &str| headers.get_first_value(name);
 
     Ok(EmlMessage {
         subject: header("Subject").unwrap_or_else(|| "(no subject)".into()),
@@ -174,9 +193,9 @@ pub async fn eml_read(path: String) -> Result<EmlMessage, AppError> {
         body: render::render(
             html.as_deref(),
             plain.as_deref(),
-            &inline,
+            inline,
             false,
-            &HashMap::new(),
+            HashMap::new(),
         ),
         attachments,
     })
@@ -299,6 +318,43 @@ Hello there.\r\n";
         attachment_names(&mail, &mut names);
 
         assert_eq!(names, vec!["report.pdf"]);
+    }
+
+    #[test]
+    fn an_inline_part_with_a_hostile_type_is_not_inlined() {
+        // H12, in the viewer's copy of the inline-image collector. The declared type was pasted
+        // into the data URI as written.
+        let raw = "Content-Type: multipart/related; boundary=r\r\n\r\n\
+--r\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:x\">\r\n\
+--r\r\nContent-Type: image/png\" style=\"background:url(https://evil.test/p)\r\nContent-ID: <x>\r\n\r\nPNG\r\n\
+--r\r\nContent-Type: text/html\r\nContent-ID: <page>\r\n\r\n<p>not an image</p>\r\n--r--\r\n";
+
+        let mut inline = HashMap::new();
+        inline_images(&parse(raw), &mut inline);
+
+        assert!(inline.is_empty(), "{inline:?}");
+    }
+
+    #[test]
+    fn a_file_nested_too_deep_opens_as_text_instead_of_crashing() {
+        // The viewer was one of four places the deep-nesting crash reached: double-clicking the
+        // file took the whole app down with it.
+        let mut raw = String::from("Subject: nest\r\nFrom: a@example.test\r\n");
+        for level in 0..20_000 {
+            raw.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"b{level:05}\"\r\n\r\n--b{level:05}\r\n"
+            ));
+        }
+
+        let handle = std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || read_message(raw.as_bytes()).map(|m| (m.subject, m.body.html)))
+            .expect("thread");
+
+        let (subject, html) = handle.join().expect("returned").expect("shown");
+
+        assert_eq!(subject, "nest");
+        assert!(html.contains("multipart/mixed"), "shown as text");
     }
 
     #[tokio::test]

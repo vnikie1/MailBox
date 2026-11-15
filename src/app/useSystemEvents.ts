@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react'
 
-import { composeOpen, onNotificationAction, onNotificationShow, type ToastAction } from '@/lib/ipc'
-import { useArchiveMessages, useToggleRead } from '@/app/queries'
+import {
+  composeOpen,
+  handoffTake,
+  onNotificationAction,
+  onNotificationShow,
+  type ToastAction,
+} from '@/lib/ipc'
+import { useArchiveMessages, useSetFlags } from '@/app/queries'
 import { useMailStore } from '@/store/mail'
 
 /**
@@ -29,14 +35,14 @@ import { useMailStore } from '@/store/mail'
  */
 export function useSystemEvents() {
   const archive = useArchiveMessages()
-  const toggleRead = useToggleRead()
+  const setFlags = useSetFlags()
   const selectMessage = useMailStore((state) => state.selectMessage)
 
   // The handlers are held in a ref so the effect below can subscribe once. Written as
   // dependencies instead, every mutation object identity change would tear down and rebuild
   // three OS listeners — and a toast pressed during that gap would do nothing at all.
-  const handlers = useRef({ archive, toggleRead, selectMessage })
-  handlers.current = { archive, toggleRead, selectMessage }
+  const handlers = useRef({ archive, setFlags, selectMessage })
+  handlers.current = { archive, setFlags, selectMessage }
 
   useEffect(() => {
     let cancelled = false
@@ -50,11 +56,7 @@ export function useSystemEvents() {
     }
 
     const onAction = (event: ToastAction) => {
-      const {
-        archive: doArchive,
-        toggleRead: doToggleRead,
-        selectMessage: select,
-      } = handlers.current
+      const { archive: doArchive, setFlags: doSetFlags, selectMessage: select } = handlers.current
 
       switch (event.action) {
         case 'archive':
@@ -62,10 +64,11 @@ export function useSystemEvents() {
           break
 
         case 'read':
-          // Deliberately the toggle rather than a "mark read" of its own. The button only
-          // appears on a toast for mail that just arrived, so the message is unread by
-          // construction and the toggle can only move it one way.
-          doToggleRead.mutate([event.messageId])
+          // Set, never toggled. This was the toggle, on the reasoning that a toast is only for
+          // mail that has just arrived and so is unread. A toast outlives that — it sits in the
+          // Action Center for hours, and the message is read on a phone meanwhile — and pressing
+          // Mark as Read then marked it *unread*, everywhere (M33, 2026-11-14 audit).
+          doSetFlags.mutate({ ids: [event.messageId], patch: { seen: true, flagged: null } })
           break
 
         case 'reply':
@@ -80,7 +83,21 @@ export function useSystemEvents() {
       }
     }
 
-    track(onNotificationAction(onAction))
+    // Then whatever was pressed before this window could hear it: the toast that brought a
+    // closed main window back is one (M30). Taken only once the listener is in place, so
+    // nothing falls between the two. Not taken by a subscription already cancelled (Strict
+    // Mode's first pass), and acted on once taken: the core has handed them over and will not
+    // hand them over again.
+    track(
+      onNotificationAction(onAction).then((off) => {
+        if (!cancelled) {
+          void handoffTake<ToastAction>('notification:action').then((held) => {
+            held.forEach(onAction)
+          })
+        }
+        return off
+      }),
+    )
 
     // The summary toast has no action of its own: Rust brings the window forward on activation
     // and there is nothing further to do here. Subscribed anyway so that the day it grows one,

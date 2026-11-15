@@ -15,7 +15,7 @@ use halcyon_lib::mail::render::render;
 const REPORT: &str = include_str!("fixtures/stylesheet-report.html");
 
 fn rendered() -> halcyon_lib::mail::render::Rendered {
-    render(Some(REPORT), None, &HashMap::new(), false, &HashMap::new())
+    render(Some(REPORT), None, HashMap::new(), false, HashMap::new())
 }
 
 #[test]

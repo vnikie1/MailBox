@@ -116,6 +116,32 @@ pub fn recipients(envelope: &Envelope, kind: Kind, mine: &[String]) -> Recipient
     let mut result = Recipients::default();
     let mut seen: Vec<String> = Vec::new();
 
+    // A reply to the user's own message — from Sent, or their half of a thread — goes to the
+    // people it went to, as Mail does. Addressed to the sender, it was addressed to the user,
+    // who was then taken off as their own address, and the reply opened with an empty To (L5).
+    let from_me = !envelope.from.is_empty()
+        && envelope
+            .from
+            .iter()
+            .all(|sender| mine.iter().any(|own| same(own, &sender.email)));
+    if from_me {
+        for address in &envelope.to {
+            push_unique(&mut result.to, address, mine, &mut seen);
+        }
+        if kind == Kind::ReplyAll {
+            for address in &envelope.cc {
+                if !is_unreplyable(&address.email) {
+                    push_unique(&mut result.cc, address, mine, &mut seen);
+                }
+            }
+        }
+        // A note the user sent only to themselves: the reply goes back to them, not nowhere.
+        if result.to.is_empty() {
+            result.to = envelope.from.clone();
+        }
+        return result;
+    }
+
     // `Reply-To` wins over `From` when the sender set one. That is the header's entire
     // purpose — a list, a ticketing system, or a person sending from an address they do not
     // read.
@@ -280,6 +306,41 @@ mod tests {
 
         assert_eq!(emails(&result.to), ["ada@example.test"]);
         assert!(result.cc.is_empty(), "a plain reply must not copy anyone");
+    }
+
+    #[test]
+    fn a_reply_to_my_own_message_goes_to_the_people_it_went_to() {
+        // From Sent, or my half of a thread. It went to me as the sender and I was taken off as
+        // my own address, so the To was empty (L5).
+        let mut sent = envelope();
+        sent.from = vec![address(Some("Me"), "ME@halcyon.test")];
+        sent.to = vec![
+            address(Some("Ada Lovelace"), "ada@example.test"),
+            address(Some("Grace Hopper"), "grace@example.test"),
+        ];
+
+        let reply = recipients(&sent, Kind::Reply, &mine());
+        assert_eq!(
+            emails(&reply.to),
+            ["ada@example.test", "grace@example.test"]
+        );
+        assert!(reply.cc.is_empty());
+
+        let all = recipients(&sent, Kind::ReplyAll, &mine());
+        assert_eq!(emails(&all.to), ["ada@example.test", "grace@example.test"]);
+        assert_eq!(emails(&all.cc), ["charles@example.test"]);
+        assert!(!format!("{all:?}").contains("secret@example.test"));
+    }
+
+    #[test]
+    fn a_reply_to_a_note_i_sent_myself_comes_back_to_me() {
+        let mut note = envelope();
+        note.from = vec![address(Some("Me"), "me@halcyon.test")];
+        note.to = vec![address(Some("Me"), "me@halcyon.test")];
+        note.cc.clear();
+
+        let reply = recipients(&note, Kind::Reply, &mine());
+        assert_eq!(emails(&reply.to), ["me@halcyon.test"]);
     }
 
     #[test]

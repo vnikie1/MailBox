@@ -35,7 +35,21 @@ export const FIELD_LABELS: Record<Field, string> = {
   isFlagged: 'Is flagged',
   isJunk: 'Is junk',
   attachmentName: 'Attachment name',
+  flagColor: 'Flag colour',
+  fromAddress: 'Sender address',
 }
+
+/**
+ * The fields the editor offers: all but the two the sidebar builds its own rows from.
+ *
+ * The flag colour holds a colour's key (`red`), and someone writing a condition would type the
+ * name they gave the colour ("Urgent") and match nothing; offering it needs a colour picker, not
+ * a text box. The sender address is what From already offers, more narrowly, and two fields for
+ * one question is a choice nobody should have to make.
+ */
+export const EDITOR_FIELDS: readonly Field[] = (Object.keys(FIELD_LABELS) as Field[]).filter(
+  (field) => field !== 'flagColor' && field !== 'fromAddress',
+)
 
 export const OP_LABELS: Record<Op, string> = {
   contains: 'contains',

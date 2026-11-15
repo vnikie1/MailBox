@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { Available } from '@/lib/generated/Available'
 import { onChanged, performRedo, performUndo, undoAvailable } from '@/lib/organise'
 import { useToast } from '@/ui'
+import { reasonFor } from '@/lib/ipc'
 
 /**
  * Ctrl+Z and Ctrl+Shift+Z. docs/01 §14.
@@ -50,7 +51,7 @@ export function useUndo(): {
         .catch((error: unknown) => {
           toast.show({
             title: `Nothing could be ${verb.toLowerCase()}`,
-            description: error instanceof Error ? error.message : String(error),
+            description: reasonFor(error),
           })
         })
     },

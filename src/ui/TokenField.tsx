@@ -1,10 +1,11 @@
 import {
+  useEffect,
   useId,
   useRef,
   useState,
   type ClipboardEvent,
-  type DragEvent,
   type KeyboardEvent,
+  type PointerEvent,
 } from 'react'
 
 import { cx } from '@/lib/cx'
@@ -33,6 +34,16 @@ export interface Suggestion {
   detail?: string
 }
 
+/** A value as the field shows and compares it. See `TokenFieldProps.read`. */
+export interface TokenReading {
+  label: string
+  key: string
+}
+
+function readAsIs(value: string): TokenReading {
+  return { label: value, key: value.trim().toLowerCase() }
+}
+
 export interface TokenFieldProps {
   /** The row label, "To:" or "Cc:". docs/02 §6.7 — fixed 60 wide, right-aligned. */
   label: string
@@ -41,6 +52,15 @@ export interface TokenFieldProps {
   placeholder?: string
   /** Decides whether a committed value is usable. Anything else renders as invalid. */
   validate?: (value: string) => boolean
+  /**
+   * What a committed value's chip shows, and what makes two values the same one.
+   *
+   * Defaults to the value itself, compared without regard to case. The compose window reads a
+   * recipient for its display name and its address: `Ada <ada@example.test>` shows as "Ada",
+   * and is the same recipient as `ada@example.test`. A value already in the field is not added
+   * a second time.
+   */
+  read?: (value: string) => TokenReading
   /**
    * Suggestions for what is being typed, newest query first.
    *
@@ -62,7 +82,8 @@ export interface TokenFieldProps {
    * field elsewhere in the app is not, and dropping an address into it would be nonsense the
    * user has to undo.
    *
-   * Omitted, the field behaves exactly as before and its chips do not drag.
+   * Omitted, the field behaves exactly as before and its chips do not drag. See `dropTargets`
+   * for how a drag works, and why it is not HTML5 drag and drop.
    */
   dragGroup?: string
   disabled?: boolean
@@ -77,43 +98,60 @@ export interface TokenFieldProps {
 const SEPARATORS = new Set([',', ';'])
 
 /**
- * The drag payload's MIME type, scoped to the group.
+ * Where a separator is not one: inside double quotes or angle brackets.
  *
- * A custom type rather than `text/plain`, and scoped rather than shared: it means `dragover`
- * can ask "is this one of mine?" before offering to accept, so dragging a file or a line of
- * text from another window never lights up a recipient field as a drop target.
+ * `"Smith, John" <john@example.com>` is one recipient whose name has a comma in it, and quoting
+ * the name is how mail says so. Splitting there turned it into two broken chips, a red
+ * `"Smith` and a `John" <john@example.com>` (M44, 2026-11-14 audit). A backslash inside quotes
+ * escapes the next character, as it does in a header.
  */
-function mimeFor(group: string): string {
-  return `application/x-halcyon-token+${group.toLowerCase()}`
+function scan(text: string, onSeparator?: (at: number) => void): { open: boolean } {
+  let quoted = false
+  let bracketed = false
+  let escaped = false
+
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text.charAt(at)
+
+    if (escaped) {
+      escaped = false
+    } else if (quoted && char === '\\') {
+      escaped = true
+    } else if (char === '"' && !bracketed) {
+      quoted = !quoted
+    } else if (char === '<' && !quoted) {
+      bracketed = true
+    } else if (char === '>' && !quoted) {
+      bracketed = false
+    } else if (!quoted && !bracketed && /[,;\n\r]/.test(char)) {
+      onSeparator?.(at)
+    }
+  }
+
+  return { open: quoted || bracketed }
 }
 
-/** Reads a dragged chip back, tolerating anything that is not one. */
-function parseDragged(raw: string): Token | null {
-  try {
-    const parsed: unknown = JSON.parse(raw)
+/** Pasted text, cut at the separators that are not inside quotes or brackets. */
+function splitTokens(text: string): string[] {
+  const parts: string[] = []
+  let from = 0
 
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      typeof (parsed as { value?: unknown }).value !== 'string' ||
-      typeof (parsed as { label?: unknown }).label !== 'string'
-    ) {
-      return null
-    }
+  scan(text, (at) => {
+    parts.push(text.slice(from, at))
+    from = at + 1
+  })
+  parts.push(text.slice(from))
 
-    const { value, label } = parsed as { value: string; label: string }
-
-    // A fresh id: the chip is being added to *this* field's list, and reusing the source's id
-    // would collide the moment the same address exists in two fields at once.
-    return { id: `${label}-${value}-${String(Math.random()).slice(2, 8)}`, value, label }
-  } catch {
-    return null
-  }
+  return parts
 }
 
 let nextTokenId = 0
 
-function createToken(raw: string, validate?: (value: string) => boolean): Token | null {
+function createToken(
+  raw: string,
+  read: (value: string) => TokenReading,
+  validate?: (value: string) => boolean,
+): Token | null {
   const value = raw
     .trim()
     .replace(/[,;]+$/, '')
@@ -123,10 +161,61 @@ function createToken(raw: string, validate?: (value: string) => boolean): Token 
   nextTokenId += 1
   return {
     id: `token-${nextTokenId}`,
-    label: value,
+    // The name, where there is one. The chip used to show the whole value, so a suggestion
+    // committed as `Ada Lovelace <ada@example.test>` showed exactly that, and its avatar took
+    // its initials from "Ada" and "<ada@example.test>" (M44).
+    label: read(value).label,
     value,
     invalid: validate ? !validate(value) : false,
   }
+}
+
+/**
+ * Moving a chip to another field of its group, with the pointer.
+ *
+ * **Pointer events, not HTML5 drag and drop.** The compose window keeps Tauri's native drop
+ * handler on, on purpose: a file dragged in from Explorer reaches the attachment code with its
+ * path only through that handler, and attachments are sent by path. The handler also takes every
+ * HTML5 drag inside the page, so `dragstart` never fired and no chip could be moved in the app at
+ * all — while the browser tests, which have no Tauri, passed (M48, 2026-11-14 audit). The same
+ * drag dropped back on its own field was worse: the field accepted it, ignored it as a duplicate,
+ * and the source, told the move had happened, deleted the chip.
+ *
+ * So a press on a chip that travels past `DRAG_THRESHOLD_PX` becomes a drag, captured on the
+ * field it started in; the field under the pointer is found by `elementFromPoint` and its
+ * `data-token-field`; and on release the chip is handed to that field, through this registry, and
+ * taken out of its own. Released over its own field, or anywhere else, it stays where it was.
+ */
+interface DropTarget {
+  group: string
+  /** Adds a chip from another field, unless this field has its address already. */
+  receive: (token: Token) => void
+  /** Lights the field while a chip is held over it. */
+  highlight: (on: boolean) => void
+}
+
+/** Every field that takes chips, by id. The source and the target share nothing else. */
+const dropTargets = new Map<string, DropTarget>()
+
+/** How far a press must travel to become a drag, so a click on a chip is still a click. */
+const DRAG_THRESHOLD_PX = 4
+
+/** The field of `group` under a point, by id. */
+function fieldAt(x: number, y: number, group: string): string | null {
+  const field = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-token-field]')
+  if (field?.dataset.tokenGroup !== group) return null
+  return field.dataset.tokenField ?? null
+}
+
+/** A chip being pressed, and once it has moved far enough, dragged. */
+interface Held {
+  pointerId: number
+  x: number
+  y: number
+  token: Token
+  dragging: boolean
+  /** The other field it is over, if any. */
+  over: string | null
 }
 
 /**
@@ -147,6 +236,7 @@ export function TokenField({
   onTokensChange,
   placeholder,
   validate,
+  read = readAsIs,
   suggestions = [],
   onDraftChange,
   showAvatars = false,
@@ -169,15 +259,148 @@ export function TokenField({
 
   const selectedIndex = tokens.findIndex((token) => token.id === selectedId)
 
-  const commit = (raw: string) => {
-    const token = createToken(raw, validate)
-    if (!token) return false
+  const fieldId = useId()
 
-    onTokensChange([...tokens, token])
+  /** Whether a value is one the list already holds, by `read`'s key. */
+  const holds = (list: Token[], value: string) => {
+    const key = read(value).key
+    return list.some((token) => read(token.value).key === key)
+  }
+
+  const commit = (raw: string) => {
+    // Cut where a paste is cut. Typing a separator commits as it goes, so typed text reaches here
+    // with none; but text put in whole — dropped in, dictated, set by an input method — keeps
+    // its commas, and was committed as one chip holding every address (found driving the
+    // release build after batch 8). A comma inside quotes is still part of the name.
+    const created: Token[] = []
+    let repeated: Token | null = null
+    for (const part of splitTokens(raw)) {
+      const token = createToken(part, read, validate)
+      if (token === null) continue
+      // Already there: the typing is taken, and nothing is added. Two chips for one address
+      // sent the message to it twice (L21).
+      if (holds([...tokens, ...created], token.value)) repeated = token
+      else created.push(token)
+    }
+
+    const first = created[0]
+    if (first === undefined && repeated === null) return false
+
     setDraft('')
     setSelectedId(null)
-    setAnnouncement(`${token.label} added`)
+
+    if (first === undefined) {
+      if (repeated !== null) setAnnouncement(`${repeated.label} is already in ${label}`)
+      return true
+    }
+
+    onTokensChange([...tokens, ...created])
+    setAnnouncement(
+      created.length === 1 ? `${first.label} added` : `${String(created.length)} recipients added`,
+    )
     return true
+  }
+
+  /* ------------------------------------------------- moving chips between fields */
+
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const held = useRef<Held | null>(null)
+
+  /**
+   * Takes a chip dragged here from another field. Through a ref, because the registry keeps one
+   * function for the life of the field and the list it adds to changes with every render.
+   */
+  const receive = useRef<(token: Token) => void>(() => undefined)
+  useEffect(() => {
+    receive.current = (dropped) => {
+      setAnnouncement(`${dropped.label} moved to ${label}`)
+      if (holds(tokens, dropped.value)) return
+
+      // A fresh id: this is now this field's chip, and the address may be in two fields at once.
+      nextTokenId += 1
+      onTokensChange([...tokens, { ...dropped, id: `token-${String(nextTokenId)}` }])
+    }
+  })
+
+  useEffect(() => {
+    if (dragGroup === undefined || disabled) return
+
+    dropTargets.set(fieldId, {
+      group: dragGroup,
+      receive: (token) => {
+        receive.current(token)
+      },
+      highlight: setDragOver,
+    })
+    return () => {
+      dropTargets.delete(fieldId)
+    }
+  }, [fieldId, dragGroup, disabled])
+
+  const pressChip = (event: PointerEvent<HTMLElement>, token: Token) => {
+    // The primary button, and not on the chip's remove button, which stays a button.
+    if (event.button !== 0) return
+    if (event.target instanceof Element && event.target.closest('button') !== null) return
+
+    held.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      token,
+      dragging: false,
+      over: null,
+    }
+  }
+
+  const lightOnly = (over: string | null) => {
+    const current = held.current
+    if (current === null || current.over === over) return
+    if (current.over !== null) dropTargets.get(current.over)?.highlight(false)
+    if (over !== null) dropTargets.get(over)?.highlight(true)
+    current.over = over
+  }
+
+  /** The other field of this group under the pointer, if any. Never this one. */
+  const otherFieldAt = (event: PointerEvent<HTMLElement>) => {
+    if (dragGroup === undefined) return null
+    const over = fieldAt(event.clientX, event.clientY, dragGroup)
+    return over === fieldId ? null : over
+  }
+
+  const movePointer = (event: PointerEvent<HTMLDivElement>) => {
+    const current = held.current
+    if (current?.pointerId !== event.pointerId) return
+
+    if (!current.dragging) {
+      const travelled = Math.hypot(event.clientX - current.x, event.clientY - current.y)
+      if (travelled < DRAG_THRESHOLD_PX) return
+
+      current.dragging = true
+      // On the field, which has a box — a chip's <li> is `display: contents` and has none — so
+      // the release arrives here wherever in the window it happens.
+      event.currentTarget.setPointerCapture(event.pointerId)
+      setDraggingId(current.token.id)
+    }
+
+    lightOnly(otherFieldAt(event))
+  }
+
+  const releasePointer = (event: PointerEvent<HTMLDivElement>, dropped: boolean) => {
+    const current = held.current
+    if (current?.pointerId !== event.pointerId) return
+
+    const target = dropped && current.dragging ? otherFieldAt(event) : null
+    lightOnly(null)
+    held.current = null
+    if (!current.dragging) return
+
+    setDraggingId(null)
+
+    // Over its own field, or over nothing that takes it: the chip stays where it was.
+    if (target === null) return
+
+    dropTargets.get(target)?.receive(current.token)
+    onTokensChange(tokens.filter((token) => token.id !== current.token.id))
   }
 
   const removeAt = (index: number) => {
@@ -232,7 +455,9 @@ export function TokenField({
       return
     }
 
-    if (event.key === 'Enter' || SEPARATORS.has(event.key)) {
+    // A comma inside a quoted name is part of the name. Enter still commits: it is how the
+    // user says the address is finished, quotes or not.
+    if (event.key === 'Enter' || (SEPARATORS.has(event.key) && !scan(draft).open)) {
       // A highlighted suggestion wins over the typed text; nothing highlighted means the user
       // is typing an address the mailbox has never seen, which must still work.
       const chosen = open && highlighted >= 0 ? suggestions[highlighted] : undefined
@@ -295,13 +520,15 @@ export function TokenField({
    */
   const handlePaste = (event: ClipboardEvent<HTMLInputElement>) => {
     const text = event.clipboardData.getData('text')
-    if (!/[,;\n]/.test(text)) return
+    const parts = splitTokens(text)
+    if (parts.length < 2) return
 
     event.preventDefault()
-    const created = text
-      .split(/[,;\n]+/)
-      .map((part) => createToken(part, validate))
-      .filter((token): token is Token => token !== null)
+    const created: Token[] = []
+    for (const part of parts) {
+      const token = createToken(part, read, validate)
+      if (token !== null && !holds([...tokens, ...created], token.value)) created.push(token)
+    }
 
     if (created.length === 0) return
 
@@ -325,35 +552,15 @@ export function TokenField({
         {...(dragGroup === undefined || disabled
           ? {}
           : {
-              onDragOver: (event: DragEvent<HTMLDivElement>) => {
-                if (!event.dataTransfer.types.includes(mimeFor(dragGroup))) return
-                // Both calls are required. Without `preventDefault` the browser refuses the
-                // drop entirely, and without `dropEffect` the source field cannot tell a
-                // completed move from an abandoned one.
-                event.preventDefault()
-                event.dataTransfer.dropEffect = 'move'
-                setDragOver(true)
+              // Found under the pointer by `fieldAt`. See `dropTargets`.
+              'data-token-field': fieldId,
+              'data-token-group': dragGroup,
+              onPointerMove: movePointer,
+              onPointerUp: (event: PointerEvent<HTMLDivElement>) => {
+                releasePointer(event, true)
               },
-              onDragLeave: (event: DragEvent<HTMLDivElement>) => {
-                // Ignore the events fired as the pointer crosses a child. Without this the
-                // highlight flickers off and on over every chip the pointer passes.
-                if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
-                setDragOver(false)
-              },
-              onDrop: (event: DragEvent<HTMLDivElement>) => {
-                event.preventDefault()
-                setDragOver(false)
-
-                const raw = event.dataTransfer.getData(mimeFor(dragGroup))
-                if (raw === '') return
-
-                const dropped = parseDragged(raw)
-                if (dropped === null) return
-
-                // A chip dropped back where it started is a no-op rather than a duplicate.
-                if (tokens.some((token) => token.value === dropped.value)) return
-
-                onTokensChange([...tokens, dropped])
+              onPointerCancel: (event: PointerEvent<HTMLDivElement>) => {
+                releasePointer(event, false)
               },
             })}
         onMouseDown={(event) => {
@@ -373,26 +580,17 @@ export function TokenField({
               {...(dragGroup === undefined || disabled
                 ? {}
                 : {
-                    draggable: true,
-                    onDragStart: (event: DragEvent<HTMLLIElement>) => {
-                      event.dataTransfer.effectAllowed = 'move'
-                      event.dataTransfer.setData(
-                        mimeFor(dragGroup),
-                        JSON.stringify({ value: token.value, label: token.label }),
-                      )
-                    },
-                    onDragEnd: (event: DragEvent<HTMLLIElement>) => {
-                      // Removed here rather than in the drop handler, because the drop lands in
-                      // a *different* component that has no way to reach back into this one.
-                      // `dropEffect` is the only signal that the drag was accepted somewhere;
-                      // a drag abandoned over the desktop reports `none` and the chip stays.
-                      if (event.dataTransfer.dropEffect !== 'move') return
-                      onTokensChange(tokens.filter((other) => other.id !== token.id))
+                    onPointerDown: (event: PointerEvent<HTMLLIElement>) => {
+                      pressChip(event, token)
                     },
                   })}
             >
               <Chip
                 label={token.label}
+                className={cx(
+                  dragGroup !== undefined && !disabled && styles.movable,
+                  token.id === draggingId && styles.dragging,
+                )}
                 tone={token.invalid === true ? 'invalid' : 'neutral'}
                 selected={token.id === selectedId}
                 aria-current={token.id === selectedId}

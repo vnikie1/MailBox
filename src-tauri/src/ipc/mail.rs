@@ -149,6 +149,16 @@ pub fn any_unflagged(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, D
         return Ok(false);
     }
 
+    // In pieces past SQLite's parameter limit (M7). See `db::write::CHUNK`.
+    if ids.len() > write::CHUNK {
+        for chunk in ids.chunks(write::CHUNK) {
+            if any_unflagged(conn, chunk)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+
     let list = (0..ids.len())
         .map(|index| format!("?{}", index + 1))
         .collect::<Vec<_>>()
@@ -168,6 +178,16 @@ pub fn any_unflagged(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, D
 /// `State`. The rule itself is the interesting part: **a mixed selection becomes read.**
 pub fn any_unread(conn: &rusqlite::Connection, ids: &[i64]) -> Result<bool, DbError> {
     if ids.is_empty() {
+        return Ok(false);
+    }
+
+    // In pieces past SQLite's parameter limit (M7). See `db::write::CHUNK`.
+    if ids.len() > write::CHUNK {
+        for chunk in ids.chunks(write::CHUNK) {
+            if any_unread(conn, chunk)? {
+                return Ok(true);
+            }
+        }
         return Ok(false);
     }
 
@@ -230,18 +250,7 @@ pub async fn msg_toggle_flag(
                 &[crate::undo::Field::Flagged],
             )?;
 
-            for group in ops::locate(tx, &affected)? {
-                ops::enqueue(
-                    tx,
-                    group.account_id,
-                    &ops::Op::Flag {
-                        mailbox: group.mailbox,
-                        uids: group.uids,
-                        seen: None,
-                        flagged: Some(now_flagged),
-                    },
-                )?;
-            }
+            ops::queue_flags(tx, &affected, None, Some(now_flagged))?;
 
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
@@ -342,29 +351,10 @@ pub async fn msg_archive(
                     continue;
                 }
 
-                for group in ops::locate(tx, &[*id])? {
-                    let destination: Option<String> = tx
-                        .query_row(
-                            "SELECT remote_path FROM mailbox WHERE id = ?1",
-                            rusqlite::params![archive],
-                            |row| row.get(0),
-                        )
-                        .ok();
-
-                    if let Some(to) = destination {
-                        ops::enqueue(
-                            tx,
-                            group.account_id,
-                            &ops::Op::Move {
-                                from: group.mailbox,
-                                to,
-                                uids: group.uids,
-                            },
-                        )?;
-                    }
-                }
-
+                // See `ops::queue_move`: one function decides the server side of every move.
+                let homecoming = ops::queue_move(tx, &[*id], archive)?;
                 moved += write::move_to(tx, &[*id], archive)?;
+                ops::settle(tx, &homecoming)?;
             }
 
             let mailboxes = write::mailboxes_of(tx, &affected)?;
@@ -423,18 +413,7 @@ pub async fn msg_toggle_read(
 
             // Queued inside the same transaction as the local write, so closing the lid between
             // them cannot lose the change. Same contract as `msg_set_flags`.
-            for group in ops::locate(tx, &affected)? {
-                ops::enqueue(
-                    tx,
-                    group.account_id,
-                    &ops::Op::Flag {
-                        mailbox: group.mailbox,
-                        uids: group.uids,
-                        seen: Some(now_seen),
-                        flagged: None,
-                    },
-                )?;
-            }
+            ops::queue_flags(tx, &affected, Some(now_seen), None)?;
 
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
@@ -475,18 +454,7 @@ pub async fn msg_set_flags(
             // Located before the write and queued inside the same transaction: the local
             // change and the obligation to tell the server are one unit, so closing the lid
             // between them cannot lose the change. See `sync::ops`.
-            for group in ops::locate(tx, &affected)? {
-                ops::enqueue(
-                    tx,
-                    group.account_id,
-                    &ops::Op::Flag {
-                        mailbox: group.mailbox,
-                        uids: group.uids,
-                        seen: patch.seen,
-                        flagged: patch.flagged,
-                    },
-                )?;
-            }
+            ops::queue_flags(tx, &affected, patch.seen, patch.flagged)?;
 
             let changed = write::set_flags(tx, &affected, patch)?;
             let mailboxes = write::mailboxes_of(tx, &affected)?;
@@ -535,18 +503,7 @@ pub async fn mailbox_mark_read(
             let step =
                 crate::undo::capture(tx, "Mark All as Read", &ids, &[crate::undo::Field::Seen])?;
 
-            for group in ops::locate(tx, &ids)? {
-                ops::enqueue(
-                    tx,
-                    group.account_id,
-                    &ops::Op::Flag {
-                        mailbox: group.mailbox,
-                        uids: group.uids,
-                        seen: Some(true),
-                        flagged: None,
-                    },
-                )?;
-            }
+            ops::queue_flags(tx, &ids, Some(true), None)?;
 
             let patch = FlagPatch {
                 seen: Some(true),
@@ -654,25 +611,12 @@ pub async fn msg_move(
             // Same reason, and the stronger one: after the move every row names the
             // destination, so a queued operation built afterwards would ask the server to
             // move messages out of the mailbox they had already been moved into.
-            if let Some(destination) = ops::mailbox_path(tx, mailbox_id)? {
-                for group in ops::locate(tx, &affected)? {
-                    if group.mailbox == destination {
-                        continue;
-                    }
-
-                    ops::enqueue(
-                        tx,
-                        group.account_id,
-                        &ops::Op::Move {
-                            from: group.mailbox,
-                            to: destination.clone(),
-                            uids: group.uids,
-                        },
-                    )?;
-                }
-            }
-
+            //
+            // Dragging a message straight back used to skip it here, as "already there", and
+            // leave the first move queued to run anyway. `queue_move` cancels it (H7).
+            let homecoming = ops::queue_move(tx, &affected, mailbox_id)?;
             let changed = write::move_to(tx, &affected, mailbox_id)?;
+            ops::settle(tx, &homecoming)?;
             if !mailboxes.contains(&mailbox_id) {
                 mailboxes.push(mailbox_id);
             }
@@ -700,81 +644,7 @@ pub async fn msg_delete(
     let affected = ids.clone();
 
     let (changed, mailboxes, step) = db
-        .write(move |tx| {
-            // Only a move to Trash is recorded. A permanent delete has nothing to restore —
-            // the row is gone and the server has been told to expunge it — and an undo entry
-            // that silently fails to bring mail back is worse than no entry at all, because
-            // the user stops checking.
-            let step = if permanent {
-                None
-            } else {
-                Some(crate::undo::capture(
-                    tx,
-                    "Delete",
-                    &affected,
-                    &[crate::undo::Field::Mailbox],
-                )?)
-            };
-
-            let mut mailboxes = write::mailboxes_of(tx, &affected)?;
-            let mut changed = 0usize;
-
-            // One account at a time, because "which mailbox is Trash" has a different answer
-            // for each of them.
-            //
-            // This used to resolve a single Trash for the whole selection, and `trash_for`
-            // returned None as soon as the selection spanned two accounts. Everything below
-            // then declined: the op loop hit its `None => continue`, and `write::delete`
-            // refuses without a Trash. So Delete did nothing at all, reported nothing, and
-            // left the messages where they were — in All Inboxes, the default view, where a
-            // selection spanning two accounts is the ordinary case rather than the odd one.
-            //
-            // `trash_for`'s own comment deferred this: "Phase 5 splits such a selection per
-            // account; until there is a sync engine to do that against, refusing is the
-            // honest behaviour." The sync engine arrived in Phase 5 and this never followed.
-            // `msg_archive` has resolved its destination per message since it was written.
-            for (account_id, ids_here) in accounts_of(tx, &affected)? {
-                let trash = trash_of_account(tx, account_id)?;
-
-                if let Some(trash_id) = trash {
-                    if !mailboxes.contains(&trash_id) {
-                        mailboxes.push(trash_id);
-                    }
-                }
-
-                // A non-permanent delete is a move to Trash, and is queued as one — the server
-                // must not be told to expunge mail the user expects to be recoverable.
-                let destination = match trash {
-                    Some(trash_id) if !permanent => ops::mailbox_path(tx, trash_id)?,
-                    _ => None,
-                };
-
-                for group in ops::locate(tx, &ids_here)? {
-                    let op = match &destination {
-                        Some(to) if group.mailbox != *to => ops::Op::Move {
-                            from: group.mailbox,
-                            to: to.clone(),
-                            uids: group.uids,
-                        },
-                        Some(_) => continue,
-                        None if permanent => ops::Op::Delete {
-                            mailbox: group.mailbox,
-                            uids: group.uids,
-                        },
-                        // No Trash and not permanent: `write::delete` refuses too, so there is
-                        // nothing local to mirror. This is now per account, so one account
-                        // without a Trash mailbox no longer silences the others.
-                        None => continue,
-                    };
-
-                    ops::enqueue(tx, group.account_id, &op)?;
-                }
-
-                changed += write::delete(tx, &ids_here, permanent, trash)?;
-            }
-
-            Ok((changed, mailboxes, step))
-        })
+        .write(move |tx| delete_messages(tx, &affected, permanent))
         .await?;
 
     if let Some(step) = step {
@@ -783,6 +653,138 @@ pub async fn msg_delete(
 
     announce(&app, &db, mailboxes, &ids);
     Ok(changed)
+}
+
+/// The store's half of Delete: what it changed, the mailboxes it touched, and the undo step.
+///
+/// ## Delete in the Bin
+///
+/// Mail already in the Bin is deleted for good, as Mail does. A delete is otherwise a move to the
+/// Bin, and for these that was a move from the Bin to the Bin: nothing on screen changed, an Undo
+/// step was recorded for nothing, and the rows were parked as moved, so once the server purged
+/// the Bin they were ghosts nothing could explain (M22, 2026-11-14 audit). They get no undo step,
+/// because there is nothing to restore; the rest of the selection still moves, and can be undone.
+fn delete_messages(
+    tx: &rusqlite::Transaction<'_>,
+    affected: &[i64],
+    permanent: bool,
+) -> Result<(usize, Vec<i64>, Option<crate::undo::Step>), DbError> {
+    let binned = if permanent {
+        std::collections::HashSet::new()
+    } else {
+        already_in_trash(tx, affected)?
+    };
+    let moving: Vec<i64> = affected
+        .iter()
+        .copied()
+        .filter(|id| !binned.contains(id))
+        .collect();
+
+    // Only a move to Trash is recorded. A permanent delete has nothing to restore —
+    // the row is gone and the server has been told to expunge it — and an undo entry
+    // that silently fails to bring mail back is worse than no entry at all, because
+    // the user stops checking.
+    let step = if permanent || moving.is_empty() {
+        None
+    } else {
+        Some(crate::undo::capture(
+            tx,
+            "Delete",
+            &moving,
+            &[crate::undo::Field::Mailbox],
+        )?)
+    };
+
+    let mut mailboxes = write::mailboxes_of(tx, affected)?;
+    let mut changed = 0usize;
+
+    // One account at a time, because "which mailbox is Trash" has a different answer
+    // for each of them.
+    //
+    // This used to resolve a single Trash for the whole selection, and `trash_for`
+    // returned None as soon as the selection spanned two accounts. Everything below
+    // then declined: the op loop hit its `None => continue`, and `write::delete`
+    // refuses without a Trash. So Delete did nothing at all, reported nothing, and
+    // left the messages where they were — in All Inboxes, the default view, where a
+    // selection spanning two accounts is the ordinary case rather than the odd one.
+    //
+    // `trash_for`'s own comment deferred this: "Phase 5 splits such a selection per
+    // account; until there is a sync engine to do that against, refusing is the
+    // honest behaviour." The sync engine arrived in Phase 5 and this never followed.
+    // `msg_archive` has resolved its destination per message since it was written.
+    for (account_id, ids_here) in accounts_of(tx, affected)? {
+        let trash = trash_of_account(tx, account_id)?;
+
+        // What is already in the Bin goes for good. See the note above.
+        let (erase, ids_here): (Vec<i64>, Vec<i64>) =
+            ids_here.into_iter().partition(|id| binned.contains(id));
+        if !erase.is_empty() {
+            ops::queue_delete(tx, &erase)?;
+            changed += write::delete(tx, &erase, true, trash)?;
+        }
+        if ids_here.is_empty() {
+            continue;
+        }
+
+        if let Some(trash_id) = trash {
+            if !mailboxes.contains(&trash_id) {
+                mailboxes.push(trash_id);
+            }
+        }
+
+        // A non-permanent delete is a move to Trash, and is queued as one — the server
+        // must not be told to expunge mail the user expects to be recoverable. Through
+        // `queue_move` like every other move. No Trash and not permanent: `write::delete`
+        // refuses too, so there is nothing local to mirror; this is per account, so one
+        // account without a Trash mailbox does not silence the others.
+        let homecoming = match trash {
+            Some(trash_id) if !permanent => Some(ops::queue_move(tx, &ids_here, trash_id)?),
+            _ => None,
+        };
+
+        if permanent {
+            ops::queue_delete(tx, &ids_here)?;
+        }
+
+        changed += write::delete(tx, &ids_here, permanent, trash)?;
+
+        if let Some(homecoming) = homecoming {
+            ops::settle(tx, &homecoming)?;
+        }
+    }
+
+    Ok((changed, mailboxes, step))
+}
+
+/// Which of these messages are in their account's Bin.
+fn already_in_trash(
+    tx: &rusqlite::Transaction<'_>,
+    ids: &[i64],
+) -> Result<std::collections::HashSet<i64>, DbError> {
+    let mut found = std::collections::HashSet::new();
+
+    // In pieces past SQLite's parameter limit (M7).
+    for chunk in ids.chunks(write::CHUNK) {
+        let list = (1..=chunk.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT message.id FROM message
+               JOIN mailbox ON mailbox.id = message.mailbox_id
+              WHERE mailbox.role = 'trash' AND message.id IN ({list})"
+        );
+        let params: Vec<&dyn rusqlite::ToSql> =
+            chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+
+        let mut statement = tx.prepare(&sql)?;
+        let rows = statement.query_map(params.as_slice(), |row| row.get::<_, i64>(0))?;
+        for id in rows {
+            found.insert(id?);
+        }
+    }
+
+    Ok(found)
 }
 
 /// The given messages grouped by the account that owns them, each group in the input order.
@@ -799,6 +801,21 @@ fn accounts_of(
 ) -> Result<Vec<(i64, Vec<i64>)>, DbError> {
     if ids.is_empty() {
         return Ok(Vec::new());
+    }
+
+    // In pieces past SQLite's parameter limit (M7), merged so each account is still one group,
+    // in the order its messages were given.
+    if ids.len() > write::CHUNK {
+        let mut merged: Vec<(i64, Vec<i64>)> = Vec::new();
+        for chunk in ids.chunks(write::CHUNK) {
+            for (account, members) in accounts_of(tx, chunk)? {
+                match merged.iter_mut().find(|(known, _)| *known == account) {
+                    Some((_, known)) => known.extend(members),
+                    None => merged.push((account, members)),
+                }
+            }
+        }
+        return Ok(merged);
     }
 
     let placeholders = (0..ids.len())
@@ -1059,6 +1076,65 @@ mod tests {
             vec![(1, vec![1, 2]), (2, vec![50])],
             "a mixed selection must split per account, in the order it was given"
         );
+    }
+
+    #[test]
+    fn deleting_what_is_already_in_the_bin_deletes_it_for_good() {
+        // M22. Delete in the Bin was a move from the Bin to the Bin: nothing changed on screen,
+        // an Undo step was recorded for nothing, and the rows were parked as moved.
+        let mut conn = store();
+        add_mailbox(&conn, 3, "Trash", "trash");
+        add(&conn, 1, true);
+        add(&conn, 2, true);
+        conn.execute("UPDATE message SET mailbox_id = 3 WHERE id = 1", [])
+            .expect("bin");
+
+        let tx = conn.transaction().expect("tx");
+        let (changed, _, step) = delete_messages(&tx, &[1, 2], false).expect("delete");
+        assert_eq!(changed, 2);
+
+        let left: Vec<(i64, i64, i64)> = tx
+            .prepare("SELECT id, mailbox_id, uid FROM message ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(left.len(), 1, "the one in the Bin is gone: {left:?}");
+        assert_eq!((left[0].0, left[0].1), (2, 3), "the other moved to the Bin");
+
+        // The server is told to delete the one and move the other, and nothing else.
+        let kinds: Vec<String> = tx
+            .prepare("SELECT kind FROM pending_op ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert!(
+            kinds.iter().any(|kind| kind.starts_with("delete")),
+            "{kinds:?}"
+        );
+        assert!(kinds.iter().any(|kind| kind == "move"), "{kinds:?}");
+
+        // Undo covers what can be restored: the message that moved.
+        let step = step.expect("an undo step for the move");
+        assert_eq!(step.message_ids(), vec![2]);
+    }
+
+    #[test]
+    fn deleting_only_what_is_in_the_bin_offers_no_undo() {
+        let mut conn = store();
+        add_mailbox(&conn, 3, "Trash", "trash");
+        add(&conn, 1, true);
+        conn.execute("UPDATE message SET mailbox_id = 3 WHERE id = 1", [])
+            .expect("bin");
+
+        let tx = conn.transaction().expect("tx");
+        let (changed, _, step) = delete_messages(&tx, &[1], false).expect("delete");
+
+        assert_eq!(changed, 1);
+        assert!(step.is_none(), "an Undo that could bring nothing back");
     }
 
     #[test]

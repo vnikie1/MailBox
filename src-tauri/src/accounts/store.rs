@@ -238,7 +238,10 @@ pub fn update(
     color: Option<Option<&str>>,
     sync_enabled: Option<bool>,
 ) -> Result<(), DbError> {
-    if let Some(name) = display_name {
+    // Never blank. The description is the account's heading in the sidebar and its name in From,
+    // and an empty one left both empty (L26). Settings puts the old name back; this is the
+    // backstop for anything else that asks.
+    if let Some(name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
         tx.execute(
             "UPDATE account SET display_name = ?2 WHERE id = ?1",
             params![id, name],
@@ -363,6 +366,27 @@ mod tests {
             auth_kind: AuthKind::Password,
             color: Some("blue".into()),
         }
+    }
+
+    #[test]
+    fn a_description_cannot_be_saved_blank() {
+        // It is the sidebar heading and the name in From; blank, both were empty (L26).
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+        let id = insert(&tx, &sample("ada@example.test")).expect("insert");
+
+        update(&tx, id, Some("   "), None, None).expect("update");
+        update(&tx, id, Some(""), None, None).expect("update");
+        let kept: String = tx
+            .query_row("SELECT display_name FROM account", [], |row| row.get(0))
+            .expect("name");
+        assert_eq!(kept, "Ada Lovelace");
+
+        update(&tx, id, Some("  Work  "), None, None).expect("update");
+        let renamed: String = tx
+            .query_row("SELECT display_name FROM account", [], |row| row.get(0))
+            .expect("name");
+        assert_eq!(renamed, "Work");
     }
 
     #[test]

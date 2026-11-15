@@ -8933,3 +8933,1157 @@ microsoft so please check that too"_.
 - `npm run verify`, clean: format, lint, stylelint, types, 35 unit files, **167 e2e**, `cargo fmt`,
   clippy with `-D warnings`, **962 library tests** (eleven new) and every integration suite.
 - The Store configuration under clippy with `-D warnings`, clean.
+
+---
+
+## 2026-11-14 — A full-app audit (118 bugs), and batches 1 to 5 of its fixes
+
+Asked first: _"analyze the app for code bugs and ui bugs … test run the whole app too. and make a
+report for all the bug found and a plan to fix them"_. The audit changed no code. The report is the
+Claude doc **Halcyon — Bug Audit and Fix Plan**
+(<https://claude.ai/artifact/FB4J7EekXj1ksWL6qW3eiX>): 118 findings, 3 critical, 22 high, 48 medium
+and 45 low, each with a location and how it was confirmed, and an eight-batch fix plan.
+
+Then: _"start with fixing the issues"_. Batch 1 of the plan, crashes and wrong content — C1, C2,
+H12, M21 and M23 — is below. Every fix began as a test that failed on the old code.
+
+Then: _"start batch 2"_ — the app changing mail by itself: H1, H7, H8, H9, H10, H18, H21 and M33.
+Also below, with the same rule, and the exceptions to it named under Notes.
+
+Then: _"start batch 3"_ — drafts and sending: C3, H4, H5, H6, H17, M10 to M15, L6 and L7.
+
+Then: _"start batch 4 , and start the dovecot test server on my macstudio"_ — sync robustness.
+The rig is back up on the Mac Studio with its renewed certificate. H2, H3, H16, M1, M7, M8 and M27
+came first.
+
+Then: _"send the CA trusted again"_, and _"continue with the rest of batch 4"_ — M2 to M6 and M9.
+All thirteen of batch 4 are fixed, and M1, M2, M3 and M4 are also shown working against the rig.
+
+Then: _"start batch 5"_ — security and files: H13, H14, H15, M26, L29 and L33 to L35. With them,
+M24, M25, M28 and M29: four sign-in bugs the plan had left out of every batch, added here as
+suggested before the batch began. All twelve are fixed.
+
+### Added
+
+- **`mail::mime::parse`**, the one way the crate now parses a message body. It measures the
+  multipart nesting before `mailparse` recurses and refuses anything deeper than 64 levels. The
+  measurement walks the structure iteratively the way `parse_mail_recursive` in mailparse 0.16
+  does, so it is exact: a test holds it to mailparse's real tree depth on seven awkward shapes
+  (boundaries mid-line, no close delimiter, one boundary a prefix of another, the deep branch
+  second). Counting `boundary=` parameters would have been simpler and wrong — a digest of a
+  hundred sibling multiparts has a hundred boundaries and a depth of two.
+- **`sync::repair`**: one-off repairs, run once per install in the background at launch and
+  recorded in `setting`. The first clears bodies stored under the wrong message by C2 (below).
+- **`ErrorBoundary`** in `src/ui`, around every message frame (reader, selection stack, `.eml`
+  window) and around the reader as a whole. A render error now says "This message could not be
+  shown" in its own pane, and the next selection gets a fresh attempt.
+- **`ops::queue_move` and `ops::settle`**, the one place a move decides what the server must do.
+  Move, Archive, Delete to Trash, rules, Undo and Redo each worked it out alone before (H7, below).
+- **`Op::MoveByMessageId`**, a queued `UID MOVE` that finds the message with
+  `UID SEARCH HEADER Message-ID` first. It's for a message the app moved whose new UID the sync
+  hasn't learned yet. The drain moves the newest copy it finds. While one is queued, the sync of the
+  mailbox it leaves does not write that message back (`UnsentRemovals::message_ids`), as it already
+  did for UID moves.
+- **`ListQuery::keep_ids`**: messages an unread-only list keeps after they are read (H1).
+- **`Predicate::needs_body`** and **`vip::mark_blocked_arrivals`** (H9, H10).
+- **A draft lifecycle** (batch 3):
+  - `outgoing::build_draft`: a draft needs no recipient and keeps its Bcc.
+  - `compose_open_draft` and `compose_load_draft`, and an **Edit Draft** banner on any message in a
+    Drafts mailbox.
+  - `sync::drafts::discard`, which lets a draft go everywhere: its row, its file, its synced copy and
+    every server copy.
+  - `Op::DeleteDraft`, which finds the copies by Message-ID.
+  - Migration 16: `draft.attachments_json` and `outbox.draft_message_id`.
+- **`outbox::sweep_leftover_files`**, run once at launch (M14).
+- **`outgoing::restamp_date`** and **`outgoing::without_headers`** (M12, M15).
+- **Sync building blocks** (batch 4):
+  - Migration 17, `mailbox.server_exists` (H2), and migration 18, `pending_op.uid_validity` (M3).
+  - `Op::FlagByMessageId` and `Op::DeleteByMessageId`, with `ops::resolve`, `ops::queue_flags` and
+    `ops::queue_delete`. Every flag change and permanent delete now goes through the last two
+    (M4).
+  - `Caps::headers_only` and `SyncError::unparseable` (M2).
+  - `fetch::missed_range` and `fetch::uids_between` (M5), and `fetch::uids_from` (H2).
+  - `session::Watchdog` (H3) and `idle::StopSignal` (M9).
+  - `account_set_password` and the **Change Password…** sheet (H16).
+- **Three rig tests**: `the_plain_header_fallback_reads_what_the_envelope_does` (M2),
+  `a_change_to_a_message_still_moving_follows_it` (M4), and gate 4 now queues a change before it
+  resets the Inbox (M3).
+- **Batch 5's building blocks:**
+  - `platform::files::mark_from_internet` and `platform::files::write_new` (H13, H14).
+  - `LinkCheck`, the confirmation sheet the frame shows for a link whose text names another site
+    (H15).
+  - The `psl` crate, for the Public Suffix List, compiled in (H15).
+  - `PublicOnly`, a resolver that answers only with public addresses, for remote images (L35).
+  - `accounts::write_issuer` / `read_issuer`: which OAuth client issued each account's token
+    (M28).
+  - Secrets longer than one Credential Manager entry are kept in parts (M29).
+
+### Fixed
+
+- **C1: one email could crash the app, and kept crashing it.** `mailparse` recurses once per level
+  of nesting, and a ~300 KB message nested 5,000 deep overflowed a 2 MiB stack — an abort, not a
+  panic, so nothing caught it. The body was never marked downloaded, so it crashed again on every
+  reopen, prefetch, Rebuild and `.eml` open. The existing depth cap of 32 protected nothing: it
+  bounded _our_ walk, which runs after mailparse has already recursed. All four call sites go
+  through `mail::mime::parse` now; a message too deep is stored and shown as its text, so it is
+  marked downloaded and never parsed again. The importer, which did a second full parse only to
+  read headers, reads headers only. The new test nests 50,000 levels on a 2 MiB thread and failed
+  with `STATUS_STACK_OVERFLOW` before the fix.
+- **C2: a message could be given another account's message as its body.** The list prefetch sent
+  the selected row and the next three under the _selected row's_ account; in All Inboxes, a smart
+  mailbox or search the next rows are often another account's, and the core fetched each by its
+  own UID and folder path from the wrong server. `INBOX` exists everywhere and UIDs are small, so
+  that usually found _somebody's_ message, which the reader showed, Reply quoted and Forward as
+  Attachment sent. Fixed on both sides: the prefetch groups by each row's account, and
+  `fetch_body` skips (and logs) any id that is not the account's. The repair compares each cached
+  source's Message-ID with its row's and sets mismatches back to "not downloaded", so the right
+  body is fetched on next view; only stores with two or more accounts are scanned.
+- **H12: a sender could put markup past the sanitiser through an image's type.** The inline-image
+  data URI was `format!`ed from the sender's `Content-Type`, and `image/png" style="…` passes a
+  `starts_with("image/")` check. The test injected a `style` attribute and a
+  `<link rel=preconnect>`. Every data URI is now built by `render::image_data_uri`, which accepts
+  only `image/[a-z0-9.+-]+`, in the reader, in remote-image fetches (the server's `Content-Type`
+  was the same hole), and in the `.eml` viewer — which also inlined non-image parts.
+- **The attachment previewer had the same bug, a fifth place the audit missed.** It wrote the core's
+  data URI into the frame's markup as `<img src="${dataUrl}">` under a comment saying it "cannot
+  carry a quote". Its type was the sender's. The core now refuses a malformed image type there,
+  gives non-image previews a fixed type, and the frame escapes the attribute anyway.
+- **M21: attributes could be smuggled past the image rewrite.** The rewrite was a string scan of
+  the sanitised output for `src="`, which also matches an `alt` value ending in `src=`; the quotes
+  then fell out of step and a `title` became a bare `style` the CSS filter never saw. The rewrite
+  now runs as ammonia's attribute filter, so its result is a value html5ever serialises and
+  escapes, and there is no post-sanitise splicing left. Remote URLs are collected by the same
+  filter, so text that merely shows `<img src=…>` is still never fetched.
+- **M23: a long enough table blanked the whole window.** `repairTables` took the column count with
+  `Math.max(...widths)`, one argument per row, and V8 refuses calls past about 120,000 arguments.
+  It ran during render with no boundary, so React unmounted everything. Now a loop, and the
+  boundaries above contain anything else of the kind.
+- **H1: Show Unread Only read the mailbox by itself.** Opening a message read it after 700 ms; the
+  refetch dropped it from the list; the selection followed to the row that took its place; that
+  one was read 700 ms later; and so on, about one a second, every one synced. The list now asks the
+  core to keep the current selection in an unread-only list once it is read, as Mail does. It is
+  kept, never added: a message deleted or moved while open still leaves. A Playwright test
+  reproduces the old walk (four messages in four seconds) and now holds the selection.
+- **H8: rules, junk scoring and toasts ran for arrivals in every mailbox.**
+  - A message deleted on a phone arrived in Trash and went through the rules, so a rule that moves
+    a sender's mail pulled it back out.
+  - The classifier scored Sent.
+  - Gmail's Spam raised toasts.
+
+  Arrival handling now runs for the Inbox only.
+
+- **H9: rules on the body or attachments never matched new mail**, because bodies download after
+  the envelope. "Contains" was false and "does not contain" was true for every message. Fixed in
+  two parts:
+  - The rules engine no longer judges a body condition on a message whose body isn't stored
+    (`AnyText` counts, since it includes the body).
+  - On Inbox arrival, the bodies are fetched first when an enabled rule or a ready classifier will
+    read them.
+- **H10: Block Sender did nothing to future mail.** `is_blocked` had no callers. Inbox arrivals from
+  a blocked address are now marked junk before the rules run, matched exactly on the address
+  rather than by the substring the retroactive half uses. The confirmation toast now says that
+  blocking covers mail still to come.
+- **H7: Undo of Move, Archive or Delete was reversed by the next sync**, in both states the
+  original move can be in:
+  - **Still queued.** Undo saw the message was "already" back home, queued nothing, and left the
+    archive queued to run. Moving a message back now cancels the queued move and restores its
+    UID. Dragging it straight back was the same bug and is fixed the same way.
+  - **Already run.** The queue is pushed 2 s after a change, so this is the usual case. Undo named
+    the UID the message used to have in the Inbox, which no longer existed. Whether a move has run
+    is now read from the queue, and a message without a known UID is moved back by Message-ID.
+
+  Tests cover undo before the push, undo after it, redo of that, drag-back, a batch staying one
+  command, and the sync not re-adding a message that's on its way back.
+
+- **H18: switching account in Settings → Signatures could save the previous account's signature
+  into the new one.** The cause:
+  - For one render after a switch, the pane still held the previous account's signature (it was
+    cleared in an effect).
+  - The editor keyed to the new account mounted with it and reported it as a change.
+  - When the new account had no signature, nothing reset the save timer, so the old signature was
+    stored there 800 ms later.
+
+  The loaded signature now carries its account, so a stale one is never shown.
+
+- **H21: VIP-only notifications never fired for a sender with a display name, and every toast was
+  titled with name and address.** Both read `from_all`, the search column. They now use
+  `from_addr` for the VIP check and `from_name`, or the address, for the title.
+- **M33: a toast's Mark as Read toggled.** On a toast left in the Action Center after the message
+  was read elsewhere, it marked the message unread everywhere. It now sets it read.
+- **C3: a saved draft could not be opened again anywhere**, and three other things went wrong
+  with drafts:
+  - A draft with nobody in To yet — the usual way a message starts — couldn't be built, so it was
+    kept only as a local row nothing read. Save as Draft lost it.
+  - No draft kept its attachments.
+  - Save as Draft closed the window before the save had finished.
+
+  Now:
+  - Every draft is filed on the server, recipients or not, with its files and its Bcc.
+  - A message in a Drafts mailbox shows **Edit Draft**. It opens from this machine's own copy, or
+    else from the message's source, downloaded if need be, with its files written out to attach
+    again.
+  - A reopened draft is remembered with the UID of the copy it came from, so the next save
+    replaces that copy instead of filing a second one beside it.
+  - Save as Draft waits for the save, and stays open if it failed.
+
+- **H4: sending or deleting never removed the draft**, here or on the server, so sent mail kept
+  coming back in Drafts on every device and could be sent twice.
+  - Delete in the close sheet discards the draft everywhere.
+  - Send records which draft the message was written as, and the sender discards it once the
+    server has accepted the message — not at Send, because Undo Send deletes the outbox copy and the
+    draft is then all that's left of the message.
+  - The sync doesn't write a draft back while its deletion is queued.
+- **H5: autosaves queued between pushes each appended a new copy.** Each carried the `replaces` UID
+  known when it was queued, which was none until the first had run, so Drafts filled with
+  duplicates that were then taken for another device's edits. A newer save now replaces any queued
+  one, and the drain reads `replaces` from the draft's row when the append runs.
+- **H6: changing From after an autosave** left the first account's copy orphaned, and the next
+  save named its UID in the new account's Drafts, deleting whatever unrelated draft had that
+  number. A draft that changes account is now discarded in the old one and starts again.
+- **L7: two new windows saving in the same second shared one draft**, because a draft with no
+  recipients was named `draft-<seconds>`. Every draft's identity is random now.
+- **H17: Send Later's "Later…" lost the race with the hold.** The 10 s Undo Send hold kept
+  counting under the sheet, so the message had usually gone by the time Schedule was pressed — and
+  the core's "too late" answer was thrown away, so Schedule appeared to work.
+  - The hold is now paused before the sheet opens, and put back if the sheet is cancelled.
+  - Tonight, Tomorrow and Schedule say "Too late to send later" when they are.
+  - A reschedule wakes the sender at the new time instead of up to 30 s after it.
+- **M10: every message told its recipients the sender's computer name.** lettre greeted the server
+  with it, and Gmail copies the greeting into `Received`. It now greets as `[127.0.0.1]`, as the
+  account check always did, and lettre's `hostname` feature is off.
+- **M11: a crash between the server accepting a message and filing its Sent copy re-sent it** on
+  restart, for every provider that doesn't file sent mail itself. The message is now recorded as
+  sent the moment the server accepts it.
+- **M12: Send Later sent the Date the message was written.** The sender restamps `Date` as the
+  message leaves — or `Resent-Date` for a redirect, whose `Date` is the original's — and files the
+  same bytes in Sent.
+- **M13: a send interrupted while offline stayed invisible and unsent until the next restart.**
+  Recovery asked the server once, at launch. It now runs on every pass of the sender loop.
+- **M14: files were never deleted**: every sent `.eml`, every draft file, every Forward as
+  Attachment copy, and removed accounts' outboxes. The sender deletes each file once its message
+  is filed, removing an account deletes its outbox, and a launch-time sweep clears whatever was
+  missed.
+- **M15: Redirect passed the original's `Bcc:` on.** A redirected Sent copy told its new recipient
+  everyone the user had blind-copied. `Bcc` and `Resent-Bcc` are now stripped from the header
+  block, folded lines included; the body is untouched.
+- **L6: Forward as Attachment quoted the original in the body as well, and named the file
+  `halcyon-fwd-<id>-<subject>.eml`.** The body is now empty, and the file is written into a folder
+  of its own so it can carry the subject alone.
+- **H2: mail deleted elsewhere stayed as blank ghosts in any folder held in part.** That is every
+  folder but the Inbox past its newest 200, such as Gmail's Sent Mail at 225 of 518 in the user's
+  log. The only test was "more messages here than on the server", which such a folder never
+  passes.
+  - Those folders are now asked about the range they hold (`UID SEARCH UID <lowest>:*`), but only
+    when the server's count or `UIDNEXT` has moved since the last look.
+  - Each folder's count is recorded (migration 17). It starts empty, so every folder is checked
+    once after the upgrade, which clears the ghosts already there.
+  - The decision is a pure function, `expunge_check`, with tests.
+- **H3: no IMAP command had a timeout once signed in, and there was no TCP keepalive.** A
+  connection that died while the machine slept held the account's sync lock until restart, and
+  two hung body downloads stopped bodies loading for every account.
+  - Every session's stream is now wrapped in a `Watchdog`: a read that hears nothing fails after
+    120 s, or after 31 minutes for an IDLE session, which is silent by design for up to 29.
+  - The socket gets keepalive: 60 s, then probes every 10 s.
+  - Each body fetch is bounded at 10 minutes, so its slot is always released.
+- **M1: one dropped connection failed every remaining folder in the pass at once** — 29 of 31
+  Yahoo folders in 4 ms in the user's log. A connection-level error (`SyncError::connection_lost`)
+  now reconnects once and retries the folder; a second drop ends the pass.
+- **M7: id lists went into one SQL statement whole**, so Mark All as Read on more than 32,766
+  unread messages failed, as would a batch of arrivals that large. Every builder over a selection
+  or an arrival list now works in pieces of 500 inside the same transaction: the four in
+  `db::write`, `ops::locate`, the toggles, `accounts_of`, contact recording, arrivals,
+  notifications, blocked senders and junk scoring.
+- **M8: a message over the 40 MB cap was downloaded in full on every open, then refused**, and the
+  reader said "downloading" for ever. It is now refused by the size the server reported, before
+  connecting. A sentence saying why is stored in its place, so it is never asked for again.
+- **M27: a 500, 503 or 429 from a token endpoint counted as a dead sign-in**, stopping the account
+  and failing any message being sent. Only `invalid_grant` means sign in again now; anything else
+  is retried.
+- **H16: a password account whose password changed could not be fixed, and the refused password
+  was tried every 5 minutes**, which is how providers lock accounts.
+  - The engine now remembers a refusal and doesn't try again until the sign-in changes.
+  - `account_set_password` checks a new password with the account's server before storing it,
+    then clears the refusal and resumes the watcher.
+  - Settings → Accounts has **Change Password…** for password accounts, and the sidebar strip
+    sends a refused password account there instead of to a browser sign-in it can't use.
+- **M2: one message the IMAP parser couldn't read stalled its mailbox on every pass, and in the
+  Inbox it stalled the whole account.** async-imap keeps bytes it can't parse at the front of its
+  buffer, so nothing more can be read on that session, and M1's reconnect would only have asked the
+  same question again.
+  - A parse failure is now told apart from a dropped connection.
+  - The mailbox is read again on a new connection from its plain header fields. They arrive as a
+    literal the parser never looks inside, and are read by the code that reads an imported `.eml`.
+    On the rig, the fallback read 200 Inbox messages exactly as the normal fetch did.
+  - The Inbox is synced in the same loop as every other folder, so its failure no longer ends the
+    pass.
+- **M3: a change queued before a server reset a mailbox's UIDVALIDITY was applied to whichever
+  message had the number afterwards.** A queued Delete expunged the wrong mail.
+  - Each change that names UIDs records the UIDVALIDITY it was queued under (migration 18). The
+    drain drops it if SELECT reports a different one.
+  - Body downloads check the mailbox's stored value the same way, so a body is no longer stored
+    under the wrong message.
+  - Gate 4 now queues a flag change, resets the rig's Inbox, and checks the change never reaches
+    the server.
+- **M4: a change to a message with a move queued went to its old mailbox and UID.** It runs after
+  the move, when that UID names nothing, so the server accepted it and the queue forgot it as sent.
+  On Gmail, a star or read mark on freshly archived mail never arrived. Such changes are now queued
+  by Message-ID in the mailbox the message was moved to. A new rig test moves a message and stars it
+  before either reaches the server; it passes, and fails on the old code.
+- **M5: Inbox arrivals beyond the newest 500 were skipped for good**, on servers without CONDSTORE
+  or while the Inbox's first download was unfinished. The missed range is now fetched after the
+  newest page. The last sync's UIDNEXT stays recorded until it's in, so an interrupted pass asks
+  again.
+- **M6: interrupting the first download of a big Inbox lost flag changes made elsewhere to older
+  messages.** Each interrupted pass recorded the server's newest MODSEQ. It's now held at the first
+  page's value until the download reaches the bottom, so the first incremental pass asks about
+  everything since.
+- **M9: Stop didn't always stop an IDLE watcher.** The stop was a `Notify`, whose `notify_waiters`
+  wakes only what is waiting at that moment, so a stop during a connect or a sync was lost. The
+  watcher ran on, no longer in the registry, and turning sync back on started a second one.
+  `StopSignal` remembers being stopped, and the watcher's whole attempt is raced against it.
+- **H13: saved attachments carried no Mark of the Web**, so SmartScreen, Office's Protected View
+  and the macro block never applied to a file from a stranger. Every saved attachment now gets a
+  `Zone.Identifier` stream with ZoneId=3, the Internet zone, as browsers and Outlook write. A
+  drive without alternate data streams (FAT32, exFAT) can't hold one; that is logged and the save
+  stands.
+- **H14: Save All replaced files already in the chosen folder without asking**, and took
+  `Invoice.pdf` and `invoice.pdf` for different files, which Windows does not. Each file is now
+  created new, and numbered `invoice (2).pdf` when the name is taken on disk.
+- **H15: a link whose text names a different site did nothing when clicked** — most newsletter and
+  tracking links. The core held it back for confirmation and nothing showed one. The frame now
+  shows a sheet naming both sites and the whole address, with Cancel and Open Link. Sites are
+  compared by registrable domain, so `links.example.com` shown as `example.com` opens without
+  asking (see Notes).
+- **L33: a link with its scheme in capitals, or with a space before it, did nothing.** The scheme
+  is now compared without case, the link is trimmed, and what goes to the browser is the parsed
+  URL. Capitals are no way round the allow-list.
+- **L34: link hosts could be looked up as a message opened**, even with images off, telling a
+  sender with a host per recipient that the message was read. The frame turns DNS prefetching off
+  before the body is parsed.
+- **L35: remote images could be fetched from the user's own network**, and could stall the reader.
+  - An image on `localhost`, a private or link-local address, or a name that resolves only to one,
+    is refused. This is checked in the URL, after every redirect, and in what the name resolves
+    to.
+  - A body is read as it arrives and dropped past 8 MB. A server that sent no length could send
+    without end before.
+  - All of a message's images get 12 seconds together, where 60 images could hold the reader for
+    100 seconds.
+- **L29: any web page could end an OAuth sign-in and show its own text as the provider's.** The
+  loopback listener believed an `error=` before checking the request's `state`. It checks the state
+  first now, and ignores a request without it, so the real redirect still gets through.
+- **M26: a custom domain on iCloud or Yahoo had its servers replaced by autodiscovery**, so the
+  password went to whatever host the domain's DNS or web host named. Discovered servers now apply
+  only to Other accounts, and the core uses a known provider's own servers whatever the window
+  sends. Servers found in DNS SRV records, which nothing authenticates, are shown for confirmation
+  before signing in.
+- **M24: signing in with the wrong Google account waited 10 seconds and then blamed the firewall.**
+  The connection test never answered Gmail's error continuation, so both ends waited. It now
+  answers it, on IMAP (`+`) and SMTP (`334`), and reads the real refusal. A refused token says the
+  browser may have signed in to a different account, not to check a password nobody typed.
+- **M25: a server offering only AUTH LOGIN could not be added**, though sending would have worked.
+  The test now reads the mechanisms from EHLO, after STARTTLS when there is one, and uses LOGIN
+  when PLAIN isn't offered.
+- **M28: switching between Halcyon's sign-in application and your own stranded every account**,
+  with a message saying signing in again wouldn't help. A refresh token works only with the
+  client that issued it. Each account now records which client that was. Once a refresh is due
+  under a different one, the account is shown as needing a new sign-in, which is the cure.
+  Accounts from before this record their client at their next successful refresh.
+- **M29: a Microsoft access token is commonly longer than a Credential Manager entry holds**
+  (1,280 characters), so storing it failed. Longer secrets are now kept in parts, and `delete` and
+  `purge` remove the parts too.
+
+### Notes
+
+- **C1 has no large-stack thread as a backstop, though the plan proposed one.** The depth
+  measurement mirrors mailparse exactly and is tested against it, so a second thread per parse
+  would guard against a disagreement the tests rule out, at the cost of a thread spawn in every
+  body fetch and render. If mailparse is upgraded, `mail::mime` has to be re-checked against its
+  splitting loop, and the module says so.
+- **`render` takes its image maps by value now**, because ammonia's attribute filter must be
+  `'static`. The callers built the maps only to hand them over, so nothing is copied.
+- **H1's kept ids are read when the page is fetched, not put in the query key.** In the key, every
+  change of selection would refetch every loaded page. As it is, the list is asked again only when
+  something changes — which reading a message does — so the message read before the open one
+  leaves at that point.
+- **H7's tests use the new shared function**, because the old code had no single function to test:
+  each command had its own copy of the logic. They describe the old failures (undo left the archive
+  queued; undo named a UID that had gone) rather than reproducing them against the old copies.
+- **H9 fetches bodies on arrival when something will read them.** Mail does the same for the Inbox.
+  It costs a download for mail the user might never open, and only when a body rule is enabled or
+  the classifier has enough mail to score. If that fetch fails, body rules simply don't run for
+  those messages, which is better than running them on an empty body.
+- **To check on a real Gmail account: Undo of an Archive after it reached the server.** That is a
+  `UID MOVE` out of `[Gmail]/All Mail` back to `INBOX`, which on Gmail should add the Inbox label
+  rather than take the message out of All Mail. It could not be tried here (no Dovecot rig, no
+  Gmail test account in this session). Add it to the person-checks list with M39, H22 and M29.
+- **Batch 3 needs a real server to confirm three things.** The new drain operations
+  (`DeleteDraft`, and an append whose `replaces` is read when it runs), and the sender's new order
+  (record, then file, then delete), are covered here only by the logic around them. The IMAP and
+  SMTP calls themselves need the Dovecot rig, which is still down.
+- **No test of M11's or M13's ordering.** The sender has no seam to stand in for SMTP, and adding
+  one only for this would have been a larger change than the fixes. Both changes are short, and
+  each carries its reasoning in the code.
+- **H6 is exercised through `drafts::discard`**, which the save calls when the account has
+  changed. The check that decides to call it sits in the command and has no test of its own.
+- **A draft is discarded when its message is sent, not when Send is pressed.** On Undo Send the
+  autosaved draft stays in Drafts, and can be reopened. It may be up to 30 s older than what was
+  sent, which is the autosave interval. Saving it again at Send would have meant an extra append
+  and delete on the server for every message.
+- **Forward as Attachment copies and the files of reopened drafts both go in the temp folder** under
+  `halcyon-fwd-`. The launch sweep deletes them after a day, by which time no compose window should
+  still need them.
+- **The Dovecot rig, restarted on the Mac Studio over SSH.**
+  - The container had been stopped for 4 days.
+  - Its live certificate expired on 25 September; the renewed pair (valid to 19 October 2027) had
+    been staged in `certs.next` and never moved into place. It is in place now, and the expired
+    pair is kept beside it as `certs.expired-2026-09-25`. That folder still holds the old CA's key.
+  - The Inbox still has its 50,000 seeded messages, and port 9993 answers from this machine.
+- **Windows trusts the new rig CA.** On request, `test/dovecot/trust-ca.ps1` added "Halcyon Test CA
+  2026-09-17" (valid to 20 October 2027) and removed the expired one. A TLS 1.3 connection to the
+  rig then validated against the system store.
+- **The rig gates passed, 16 of 16, before M2 to M6 and M9:**
+  - A 50,000-message cold sync took 47 s.
+  - In the killed-connection gate, M1's single reconnect found the server down and ended the pass
+    cleanly. The next pass lost nothing.
+  - A UIDVALIDITY reset recovered with no duplicates.
+- **H3's watchdog is still not driven against a real server.** It is tested on an in-memory stream:
+  a silent read times out and a slow one doesn't. M1's reconnect was exercised by gate 2.
+- **No rig test for M5 or M6.** Both apply only to the Inbox, and the rig's Inbox is the 50,000
+  messages every other gate measures. Delivering 500 more, or interrupting its first download on
+  purpose, would change what they measure. Both rest on pure decisions with unit tests.
+- **M9's loop has no test of its own.** Driving `watch()` needs a credential stored in Windows
+  Credential Manager. `StopSignal` is tested. A test that re-created the loop's `select!` around a
+  stand-in future was removed, because it would have passed on the old code too.
+- **M4 follows a moved message by Message-ID whether or not its move has run yet.** A change queued
+  behind a move runs after it, so the destination is right either way. A moved message with no
+  Message-ID still uses its origin, as before; there is nothing else to name it by.
+- **M3 drops a stale change rather than translating it.** After a reset the old UIDs mean nothing,
+  and the sync drops and re-reads that mailbox anyway.
+- **H15 compares registrable domains where docs/03 §6.6 says hosts.** Taken literally, every
+  company's own tracking subdomain would ask, and a prompt that comes up on ordinary links gets
+  clicked through unread. Recorded as a departure in `docs/PHASE-11-VERIFICATION.md` §14. Links
+  that go through a third-party tracker (text `example.com`, link `click.mailchimp.com`) do ask,
+  as the spec intends.
+- **A new dependency, `psl`**, for the Public Suffix List. A rule like "the last two labels" would
+  take `bank.co.uk` and `evil.co.uk` for one owner, which is the case the check exists for.
+- **L34 is plausible rather than measured.** Whether Chromium prefetches link hosts in a
+  `srcdoc` frame was not observed either way; the meta tag is cheap and standard.
+- **M28 can't help an account that never records its client.** One signed in before this change
+  whose client is switched before its next refresh still meets the old `unauthorized_client`
+  message.
+- **M29 makes the person-check of a Microsoft token's length moot**, though a real Microsoft
+  sign-in has still not been tried here.
+- **H13 marks attachments saved from mail only.** Draft attachments reopened from the server and
+  Forward as Attachment copies are written to the temp folder for the app's own use, unmarked.
+- **The gate on batch 4's first seven fixes passed first time, in one run**: format, lint,
+  stylelint, types, **342 unit**, **169 e2e**, `cargo fmt`, clippy, and **1,090 Rust tests** with 19
+  ignored (the rig gates, which couldn't run until the new CA was trusted).
+- **At the audit the gate was green, and none of the 118 was caught by it.** Each `npm run verify` step was run on
+  its own: format, lint, stylelint, types, **325 unit**, **167 e2e**, `cargo fmt`, clippy with
+  `-D warnings`, and **1,027 Rust tests** with 19 rig gates ignored. `npm audit --omit=dev`: 0.
+- **How the app was run.** The debug build against a scratch store (`LOCALAPPDATA` and
+  `WEBVIEW2_USER_DATA_FOLDER` redirected, as in the rig memory), seeded with 5,000 messages by
+  `seed`, and driven over the WebView's debug port with raw CDP. The real store and
+  `.window-state.json` were not touched.
+- **Reproduced, not just read:**
+  - C1: mailparse 0.16.1 aborts with a stack overflow on a 2 MiB thread (tokio's worker size) at
+    5,000 nested `multipart/mixed` levels in release, about 300 KB of mail; 2,000 is fine. The
+    existing `deeply_nested_mime_terminates` nests 200.
+  - H1: in the browser build, with Show unread only on, one click marked 11 messages read in 8 s
+    and auto-opened 8.
+  - Search results keep date headers while ranked by relevance; after clearing, the stale headers
+    stay drawn over the inbox and React logs duplicate keys (`header-today`).
+  - Pasting `"Smith, John" <john@example.com>` makes two broken chips.
+- **Found in the user's own log** (16 Sep–14 Nov): a dropped Yahoo connection failed 29 of 31
+  folders in 4 ms (M1), and Gmail Sent Mail held 225 of 518 messages, so two UIDs deleted on the
+  server came back empty for hours (H2).
+- **Earlier verdicts that this audit overturns:** the 2026-09-03 "not a bug" rulings on search
+  invalidation and the empty search state (only an unused hook has the `['search']` key); the
+  "already fixed" ruling on the Gmail XOAUTH2 verify hang (the fix is in `session.rs`, the hang is
+  in `verify.rs`); the token-endpoint fix, which reclassified network errors but not HTTP 5xx/429;
+  and `reconcile_expunged`'s doc comment, which assumes the local copy is the whole mailbox.
+
+### Incidents
+
+- **The Dovecot rig was unreachable** (no answer on 192.168.1.15:9993) and its CA expired on
+  2026-09-25, so the 19 rig gates could not run and every sync finding rests on code and the log.
+- **Windows refused to bring the test window forward** for a real F5 keypress (the foreground
+  lock), so whether F5 or Ctrl+R reloads a compose window is still unconfirmed (M39).
+- **The first `seed` run failed**: the binary needs `--features devtools`, which the usage comment
+  at the top of `src-tauri/src/bin/seed.rs` leaves out (`Cargo.toml` has it right).
+- The dev app was ended by stopping its process rather than closing it, because a compose window
+  held test text; the "exit 127" is that, not a crash. Port 1420 was checked and freed both times.
+- A Playwright reproduction of the search bugs in the browser build found no result rows and was
+  abandoned; the same bugs were confirmed in the running app instead.
+- **Batch 1's first `npm run verify` failed at clippy.** `render` now takes its image maps by value
+  and `remote_urls` became `remote_image_urls`, and five integration tests under
+  `src-tauri/tests/` (`xss_corpus`, `render_budget`, `head_content`, `stylesheet_mail`,
+  `live_gmail`) still used the old forms. Only the library's own tests had been run. Fixed, and
+  clippy is clean.
+- **The second run was stopped by Claude Code for low system memory** while `cargo test` was
+  compiling. Everything before it passed: format, lint, stylelint, types, **332 unit**, **167
+  e2e**, `cargo fmt` and clippy. The Rust suite was then run on its own, on request: **1,048
+  passed, 0 failed**, 19 ignored (the rig and live-Gmail gates, as at the audit), including
+  `xss_corpus` and `render_budget` against the new render path. So every step of the gate has now
+  passed on this code, across two runs.
+- **The M23 test still failed after the fix**, inside jsdom: its own `table.rows` overflows on a
+  130,000-row table. Chromium's is native and would not, but the test could not reach the real
+  limit, so `ownRows` now selects the table's rows with `:scope >` selectors. That is equivalent
+  and makes the nested-table filter unnecessary. The test takes about 7 s in jsdom.
+- **Three batch-2 tests were wrong before they were right:**
+  - The H1 store test expected two equal-date messages in the wrong order; ties go by id, newest
+    first.
+  - The H18 test first passed on the old code: with a signature on the second account, the
+    editor's own load-time save reset the timer and hid the bug. The report's case, an account
+    with no signature, reproduces it.
+  - The M33 test first "failed" only because it lacked a `ToastProvider`. It was fixed and re-run
+    against the old code (stashed for the run) to see it fail for the right reason.
+- **H9's guard was checked by disabling it for one run**, which made the negated-body case fail as
+  reported. It was then restored.
+- **Batch 2's `npm run verify` failed at clippy** (`type_complexity`: a seven-field tuple read in
+  `ops::on_server`). It is a struct now. Everything before clippy had passed: format, lint,
+  stylelint, types, **334 unit** and **169 e2e**. The Rust suite was then run on its own: **1,063
+  passed, 0 failed**, 19 ignored, as before.
+- A `grep` over this session's 18 MB transcript, looking for the audit's reasoning on Gmail, hung
+  for over two minutes and was stopped. The reasoning was worked out from the code instead.
+- **Batch 3's first gate run failed at lint**: an unused parameter name in a test's mock. Fixed
+  and re-run.
+- **A splice helper damaged three doc comments, across batches 1 and 3.** Git Bash rewrites a
+  command-line argument that starts with `//` to start with `/`. So a marker passed as
+  `/// Saves a draft…` arrived as `// Saves a draft…`, matched one character late, and left
+  comments reading `////` at one end of each splice and `//` at the other:
+  - `render.rs`: `/// HTML void elements` became a plain comment. Clippy doesn't flag that.
+  - `compose.rs`: `/// One suggested recipient.` lost a slash, noticed by hand.
+  - `compose.rs`: `/// Saves a draft` gained one. Clippy's `four_forward_slashes` caught it in batch
+    3's second gate run.
+
+  All three are fixed. For any future splice by marker, the markers have to be passed in a file,
+  not as arguments.
+
+- **Two shell-quoted edits of this file failed on backticks** before writing anything, and were
+  redone with the editor.
+- **Batch 3's second gate run failed at clippy**: the `////` above, and a collapsible `if` in the
+  new sweep. Everything before clippy had passed: format, lint, stylelint, types, **341 unit** and
+  **169 e2e**. Clippy was then clean.
+- **Batch 3's first Rust run failed to link.** The app binary failed with
+  `LNK1123: failure during conversion to COFF: file invalid or corrupt` on the build script's
+  `resource.lib`, and Claude Code then stopped it for low system memory. The same `resource.lib`
+  had linked in batch 2's passing run, so memory is the likelier cause than a damaged file.
+  - Run again on request once memory had recovered: it linked without the error and passed —
+    **1,081 passed, 0 failed**, 19 ignored (the rig and live-Gmail gates). So every step of the
+    gate has passed on batch 3, across three runs.
+- The H18 lesson from batch 2 applied again in batch 3: a test that passed on the old code was
+  testing the wrong case. The Send Later and compose-close tests were each checked to fail on the
+  old behaviour before the fixes went in.
+- **A shell heredoc damaged a gate edit in batch 4.** A Node splice script passed through a Bash
+  heredoc lost the backslash before each line break and halved `'\\Flagged'`. The two `doveadm`
+  commands added to gate 4 ran together on one line. It was seen in the result and rewritten with
+  the editor, and the later scripts were written to files with the editor.
+- **Two more splice scripts stopped before writing anything**: one on shell quoting, and one
+  because a marker matched three times where it expected two.
+- **An edit put literal backslashes into a doc comment** (`` \`ENVELOPE\` ``). Fixed at once.
+- **Clippy failed on the M2 test** (`io_other_error`), and was clean after.
+- **M4's old behaviour was put back for one rig run**, to check the new test fails on it. It did,
+  with "the star was sent to where the message used to be". The fix was restored and checked.
+- **After all of batch 4, the rig gates passed 18 of 18**, including the three new ones. The cold
+  sync took 51 s, the killed connection and the UIDVALIDITY reset each ended with 50,000 messages
+  and no duplicates, and the change queued before the reset never reached the server.
+- **The final `npm run verify` was stopped by Claude Code for low system memory** while compiling
+  the Rust tests. Everything before that passed: format, lint, stylelint, types, **342 unit**, **169
+  e2e**, `cargo fmt` and clippy.
+  - Run again on request once memory had recovered: **1,099 passed, 0 failed**, 21 ignored (the 18
+    rig gates, now including the two new ones, and the live-Gmail tests). So every step of the gate
+    has passed on batch 4's final code, across two runs.
+- **A test asserted the M26 bug as intended.** "Shows the server form when the servers were only
+  guessed" used an iCloud account, so it required iCloud's servers to be replaced by a guess. It
+  uses an Other account now, and a new test holds iCloud to its own servers.
+- **Clippy failed batch 5 on the crate's minimum Rust version**: `Ipv6Addr::is_unique_local` and
+  `is_unicast_link_local` are newer than 1.82. The two ranges are written out instead of raising
+  the minimum. After that, batch 5's gate passed in one run: format, lint, stylelint, types, **348
+  unit**, **169 e2e**, `cargo fmt`, clippy, and **1,114 Rust tests** with 21 ignored (the 18 rig
+  gates and 3 live-Gmail tests). The rig gates were not run for batch 5, which changes no sync
+  code.
+
+---
+
+## 2026-11-15 — The audit's batches 6 to 8: Windows integration; rules, search and the main window; compose and the low list
+
+Asked: _"batch 6"_ — H19, H20, H22, M30, M31, L36 and L37 from the 2026-11-14 audit
+(<https://claude.ai/artifact/FB4J7EekXj1ksWL6qW3eiX>). All seven are fixed. Two of them, H22 and
+M31, only behave differently in the Store package, and the plan says they must be tried on a PC
+that never had the installer build; that has not been done, and Notes says what was shown instead.
+
+Then: _"run test now"_, and _"start batch 7"_ — rules, search and the main window: H11, M16 to
+M20 and M34 to M43, with M22, which was suggested for this batch before batch 5 began. All
+seventeen are fixed; batch 7 has its own sections after batch 6's below.
+
+Then _"run test now"_ again, for batch 7's Rust suite, and _"then start the next batch"_: batch 8,
+compose polish and the low list, M44 to M48 and L1 to L45, with M32. L6, L7, L28, L29 and L33 to
+L37 were fixed in earlier batches. Every other item is fixed except L44, which needs a release
+published; and a 35-fold slowdown in rendering remote images, from batch 1, was found and fixed
+on the way. Batch 8's sections follow batch 7's.
+
+Then _"start batch 8 and finish pending work of batch 7"_. The plan has eight batches and batch 8
+was done, so this was read as closing what both left open: the full Rust suite, which had not run
+on batch 8, now passed; and the one bug batch 7 found and left, the list header's "0 messages"
+for every smart row, is fixed. Both are in batch 8's sections.
+
+Then _"cant you do these"_, of the checks left for the user: M39's F5, H22 and M31 on a clean PC,
+L44's release, L1, L2, L3 and L9 on the rig, and M48 in a compose window. All but L44 were done,
+none on a clean PC and without pressing a key on the desktop, as Notes — batch 8 says. Doing them
+found three more bugs, all fixed: a move into any folder with a space in its name failed on a
+server without MOVE; a draft or a sent copy could not be put in a folder with a quote or a
+backslash in its name; and text put into a recipient field whole became one chip. L44 cannot be
+done: the updater's private key is gone.
+
+### Added
+
+- **`platform::package`**: whether this process is the Store package, and the AppUserModelID
+  Windows gave it, from `GetCurrentApplicationUserModelId`. Asked at run time rather than taken
+  from the `store` feature, because what decides toasts and startup is Windows' answer, not the
+  build's intent.
+- **`platform::startup`**: Run at login through the manifest's `StartupTask` (`HalcyonStartup`),
+  with the two states only the user or a policy may change reported as what they are.
+- **`platform::handoff`** and the `handoff_take` command: Jump List tasks and toast presses that
+  arrive before the main window is listening are held until it asks for them, then let straight
+  through; when the main window closes they are held again.
+- A line in the Notifications pane saying why Run at login could not be changed. A refusal used to
+  be an unhandled rejection that left the box showing the change.
+- `platform::reopen_main`, and `tray::refresh_soon`.
+- The `ApplicationModel` and `Win32_Storage_Packaging_Appx` features of the `windows` crate. No new
+  crate.
+
+### Fixed
+
+- **H19: a `mailto:` link, a `.eml` file or a Jump List task that started Halcyon did nothing but
+  open the main window.** Only a second launch's arguments were read, by the single-instance
+  plugin; the running process's own were never looked at. `setup` now passes `std::env::args()` to
+  the same `links::handle_arguments`, after the window is shown. Inbox and Search, which are places
+  in the UI rather than windows Rust opens, go through the handoff: at launch the page has not
+  loaded, so an emitted event reached nobody. The Jump List listener waits for the mailbox list
+  before asking, or Inbox would select All Inboxes with no inboxes in it.
+- **H20: the taskbar badge and the tray tooltip did not follow mail arriving or being read on
+  another device.** They refreshed on `mailbox:changed`, which a local action raises and a sync
+  raises only for an expunge or a rebuild; new mail and server flag changes are `messages:added`.
+  They now refresh on `messages:added`, `mailbox:changed` and `mailboxes:changed`, coalesced to one
+  count per 250 ms burst, because a backfill announces every 500 messages it writes.
+- **H22: the Store build addressed its toasts to the installer's app ID.** `com.uniki.halcyon` is
+  the name the installer's Start Menu shortcut registers; the package is
+  `<package family name>!Halcyon` and registers nothing under the other name. So a Store install's
+  toasts appeared only on a PC that once had the installer build, which is the developer's. Toasts
+  now go to the package's own ID when there is one.
+- **M30: closing the main window while a compose or Settings window was open left the app
+  unreachable.** The process stayed up for the other window, and the tray, the Start menu and every
+  toast called a `show` that found no main window and returned. `tray::show` now makes it again
+  from the same `tauri.conf.json` entry, on a task (building a window inside the tray's own event
+  handlers deadlocks on Windows), with its backdrop applied before it is shown and its badge redrawn.
+  One at a time, since the tray, a second launch and a toast can all ask at once. The second-launch
+  handler calls `tray::show` instead of its own copy, which had the same gap.
+- **M31: in the Store build, Run at login wrote a `Run` key instead of enabling the declared
+  startup task.** MSIX redirects that write into the package's private registry, which Windows never
+  reads at sign-in, so the box said it was on and nothing started. The packaged app now enables and
+  disables `HalcyonStartup`; the installer build keeps the autostart plugin. A task the user turned
+  off in Settings, or that a policy controls, is refused with a sentence saying so, and the box is
+  read back from Windows after every change.
+- **L36: the window-state plugin showed the main window before `setup` had put the backdrop and
+  theme on it.** The plugin restores every window as it is created, and restoring `VISIBLE` meant
+  `show()` and `set_focus()` — the white flash docs/02 §8 rules out. It now restores everything but
+  visibility. Every window is shown by the code that made it: compose, Settings and the `.eml`
+  viewer are built visible, and the main window is shown at the end of `setup`.
+- **L37: an old toast could act on a different message.** `message.id` is SQLite's rowid, reused
+  once the highest row is deleted, and a toast sits in the Action Center for hours; Archive on a
+  toast for a message since deleted on a phone archived whichever message had its id now. A toast
+  now carries a fingerprint of the message (FNV-1a over its Message-ID, date and subject — not its
+  UID or folder, which change when it moves), and a press is acted on only if the message at that
+  id still has it. Otherwise the window comes forward and nothing else happens. A toast from before
+  this change, which carries no fingerprint, is refused the same way.
+
+### Notes
+
+- **Shown working in the release build**, run isolated from the user's data (store, logs and
+  WebView2 profile in a scratch folder, the 5,000-message seeded store, driven over WebView2's
+  debugging port):
+  - H19, each from a cold start: a `mailto:` link opened a compose window with To and Subject
+    filled and its `bcc=` dropped; a `.eml` file opened the viewer; `--search` put the caret in the
+    search field, held by the core until the page asked for it.
+  - M30: with a compose window open, the main window was closed, and a second launch, as Start
+    would do, made it again in the same process, rendered and badged. Closed again, a launch with
+    `--inbox` made it again and selected All Inboxes, which the new page took from the handoff once
+    its mailboxes loaded. `--search` to a running app focused the field directly.
+  - H20: one Inbox message was marked read in the store from outside the app, as a sync does. The
+    badge stayed at 602 until `messages:added` was raised, and went to 601 250 ms after it. A
+    debug-level log line, "unread badge updated", now records each change of the count.
+- **Not shown: H22 and M31 in the Store package.** Both turn on whether the process has package
+  identity, and the test runner has none, so the tests cover only the installer build's side: the
+  app ID falls back to `com.uniki.halcyon`, and Run at login keeps the autostart plugin. The
+  StartupTask state handling is unit-tested, and a test holds `TASK_ID` to the manifest. Nothing was
+  sideloaded: that needs Developer Mode and installs a package on this PC, and on this PC the
+  installer build's app ID is registered anyway, so a Store build would show toasts here even with
+  the bug. The plan's clean-PC check stands, along with a Store install showing a new-mail toast.
+- **L36 is traced, not seen.** `tauri-plugin-window-state` 2.4.1's `restore_state` calls `show()`
+  and `set_focus()` when the saved state says visible, from `on_window_ready`, which runs as the
+  configured window is created and before `setup`. One early frame is not something a screenshot
+  catches.
+- **L37 is unit-tested only.** A toast was not pressed: a real press needs UI automation of the
+  Action Center. The fingerprint, the argument encoding, a reused id and a moved message are
+  tested; `toast::act`, which reads the store and compares, was not run.
+- **No spec departures**, so no phase verification entry. docs/03 §8 already allows "an MSIX startup
+  task", and docs/07 asks for `windows.startupTask` over the `Run` key; M31 brings the code into
+  line with both. The MSIX manifest's comment, which said the autostart plugin enables the task, is
+  corrected.
+- The window-position file in `%APPDATA%\com.uniki.halcyon`, which the isolated runs do not
+  redirect, was backed up first and restored byte for byte afterwards.
+
+### Incidents
+
+- **The batch 6 verify was stopped by Claude Code for low memory**, in its last step. Every step
+  before it passed: format, lint, stylelint, types, **349 unit**, **169 e2e**, `cargo fmt` and
+  clippy. `cargo test` had by then failed to link two test binaries, `0xc0000142` (a process that
+  could not initialise) and `LNK1123: failure during conversion to COFF: file invalid or corrupt`,
+  both consistent with the same memory shortage rather than with the code. Run again on request,
+  alone, since every other step had already passed on the same code: **1,131 passed, 0 failed**, 21
+  ignored (the 18 rig gates and 3 live-Gmail tests). Both binaries linked, so nothing corrupt was
+  left behind. Every step of the gate has therefore passed on batch 6's code, across two runs.
+- **A script written through a Bash heredoc failed to parse** ("unexpected EOF while looking for
+  matching `'`") and changed nothing. Written with the Write tool instead, as the earlier note on
+  Git Bash says. A recursive `grep` that wandered into `src-tauri/target` was stopped.
+
+### Added — batch 7
+
+- **Migration 19** (`0019_fts_update_only_on_text.sql`): the full-text update trigger fires only
+  when a statement sets one of the five indexed columns and one of them actually changed (M19).
+- **Two predicate fields the sidebar builds rows from**, not offered in the editor: `flagColor`,
+  the colour the flag shows, with a flag recorded without one counting as the orange the list
+  draws (H11); and `fromAddress`, the sender's address alone (the VIPs row, with M17). Both are
+  evaluated identically in SQL and in memory, and both are in the property test.
+- `useToday`, "now" for date labels, moved on at midnight and when the window is shown again
+  after sleep (M37).
+- `selectionByUser` in the mail store: whether the user chose the current selection or the list
+  did (M38). `rowElementId`, and `aria-activedescendant` on the message list (M40).
+- `platform::browser_keys`, and `webview2-com` 0.38.2 as a direct dependency: the version Tauri
+  already uses, so nothing new is downloaded (M39).
+- The scope bar's mailbox tab is cut short past a new `--scope-tab-max-width` token (M43).
+- Tests: Rust for H11, M16, M17, M18, M19, M20 and M22, each shown failing on the old code first
+  (M16 and M19 by putting the old line back); 12 unit tests for M34 to M38 and M42; three
+  end-to-end specs, `listKeyboard` (M40), `searchFits` (M43) and `onePane` (M38), each run against
+  the old code and failing there.
+
+### Fixed — batch 7
+
+- **H11: the Red, Orange, ... rows under Flagged listed flagged mail that mentioned the colour.**
+  They were "flagged, and any text contains `red`", so Red listed flagged mail from Fred or about
+  credit and none of the mail flagged red. They are the flag's colour now. Shown in the release
+  build: with three messages flagged red and one orange-flagged message renamed "Lunch with
+  Fred", Red listed exactly the three and Orange the other 257, Fred's included.
+- **M16: smart mailboxes folded case for A-Z only.** The SQL half relied on `LIKE`, which folds
+  ASCII, while the in-memory half (rules on arrival) used Rust's `to_lowercase`, so "über" missed
+  "Überweisung" in a smart mailbox while the same rule matched it. Both sides now go through
+  `to_lowercase`: the statement calls the store's Unicode `lower()` on the column and binds a
+  lowercased pattern.
+- **M17: Block Sender's pass over existing mail matched by substring.** Blocking ann@company.com
+  junked joann@company.com's mail, and anything whose sender's name contained the address; a `_`
+  in the address was a wildcard. It compares the sender's address exactly, as the arrival half
+  already did. The VIPs row had the same flaw ("from contains") and now uses `fromAddress is`.
+- **M18: a rule could file mail into another account's folder.** Rules run over every account's
+  mail and a folder belongs to one; the row was moved under the other account while its own server
+  was asked for a folder it has never had. The move is skipped, like a deleted folder's, and the
+  rule's other actions still apply.
+- **M19: every update to a message re-indexed its whole text.** The trigger fired on any UPDATE:
+  marking a message read rewrote its body in the index, and so did each of the up to 5,000 rows a
+  threading pass touched. Migration 19 narrows it; rethreading also skips rows whose thread did
+  not change. And imports threaded the whole account after every folder and every 200 `.pst`
+  messages, quadratic in the size of the import for a result only the last pass decides: they now
+  recount per batch and thread once at the end.
+- **M20: undoing a read change, and rules that mark read or unread, left the unread count wrong**
+  until the next sync. Both wrote `flag_seen` directly; they go through `db::write::set_flags`,
+  which keeps each mailbox's cached count in step.
+- **M22: Delete on mail already in the Bin did nothing visible**, recorded an Undo step, and parked
+  the rows as moved, so they became ghosts once the server purged the Bin. Such mail is deleted for
+  good, as Mail does, and gets no undo step; the rest of the same selection still moves to the Bin
+  and can be undone. A selection only of binned mail offers no Undo.
+- **M34: relevance-ranked search results got date headers.** "Today" and "Yesterday" repeated down
+  the results, each repeat with the first one's key, and the duplicate keys left stale headers
+  drawn over the inbox after the search was cleared. Ranked results have no headers, and a header
+  key can no longer repeat in any list. Shown in the release build: no headers while searching,
+  and after clearing, the inbox's one header with nothing overlapping a row.
+- **M35: search results never refreshed.** They were component state filled once, so a hit opened
+  and read stayed bold and one deleted stayed listed. They are a TanStack query under `['search']`,
+  which every mutation and change event already invalidated, and the sync's debounced
+  invalidation now includes it. Shown in the release build: an unread hit, opened, showed as read
+  in the results without leaving the search.
+- **M36: a search with no hits showed a blank pane.** The folder query is disabled while searching,
+  and a disabled query is pending for ever, so "No messages match that search" could not appear.
+  The list takes the search's own state, which stays "running" through the debounce so the empty
+  state cannot flash while typing; a failed search has its own message. Shown in the release
+  build.
+- **M37: dates were labelled against the moment the window opened**, so after midnight yesterday's
+  mail was filed under Today and the reader said Today about it. The list, the reader and the
+  selection deck take `useToday`.
+- **M38: in the one-pane layout, picking a mailbox opened its first message and marked it read**,
+  because the reader opened for any new selection, including the list's own pick. It opens only
+  for a selection the user made, including a click on the row the list had picked. And Delete,
+  Archive, Junk and Move from the reader go back to the list: the list is not mounted while the
+  reader is up, so nothing moved the selection on, and the reader went on showing the deleted
+  message from the Bin.
+- **M39: F5 and Ctrl+R reloaded the window** wherever the app does not swallow them itself: in a
+  text field, in the message body (a sandboxed frame), and in the compose and Settings windows,
+  where a reload is the unsaved draft gone. WebView2's browser keys are turned off in every webview
+  as each page starts loading. The app's own keys are unaffected, and editing keys are not browser
+  keys. The cost is the developer tools' F12 and Ctrl+Shift+I.
+- **M40: holding ArrowDown stopped after about twenty rows** when the list had been clicked. The
+  click focused the row; arrowing scrolled it out of the virtualised window, it was unmounted, and
+  focus fell to the page. Rows are no longer focusable, so the list itself keeps focus and says
+  which row is current with `aria-activedescendant`.
+- **M41: about a dozen toasts and error states showed "[object Object]"**, or no description, for
+  the core's errors, which arrive as `{ code, message }` rather than as `Error`s. Fourteen
+  conversions in thirteen files, plus compose's and the message body's, go through `reasonFor`.
+- **M42: with several accounts failing, the sidebar strip showed only the first account's error and
+  button**, so a second account needing Sign In could not be fixed from it, and nothing named it.
+  Each account is named with its own Sign In or Change Password; the core's words are given once
+  when they are the same for all and per account when not; one Retry covers the rest. Shown in the
+  release build with the seeded store's three accounts.
+- **M43: at the default window size the scope bar was clipped ("200 re…")** and the focused search
+  field ran 78px past the window's right edge. The bar wraps onto a second line when it needs to,
+  and the field grows into the room the toolbar has, never below its resting width. Measured at
+  1,400 × 900: before, the bar's content was 118px wider than the bar and the field ended at
+  1,478px; after, nothing overflows.
+
+### Notes — batch 7
+
+- **Departures recorded** in `docs/PHASE-11-VERIFICATION.md` §15: search results are one ranked list
+  with no date headers, where docs/01 §7 describes Top Hits above chronological results (a Phase
+  9 decision never written down until M34 depended on it); and the scope bar wraps in a narrow
+  list.
+- **Shown in the release build**, run isolated against a copy of the seeded store: H11, M34, M35,
+  M36, M42 and M43 as described above; migration 19 applied on opening the store; and no failure
+  turning off the browser keys was logged. M38 was then found to need one more case, a click on
+  the row the list had picked, and that is covered by `onePane.spec.ts` rather than a second
+  release build. The window-position file was backed up and restored byte for byte again.
+- **M39 has not been tried with a real key press.** Keys sent over the debugging protocol do not
+  reach a browser's own shortcuts, so they cannot show it either way, and pressing keys on this
+  desktop could land in whatever window had focus. The audit already lists it as a person check:
+  F5 in a compose window with text typed in it should now leave the text alone.
+- **M37 is unit-tested**, with the clock moved past midnight and a wake from sleep simulated; no
+  window was left open overnight.
+- **Found, not fixed:** the list header reads "0 messages" for every smart row (Red, Orange, VIPs,
+  saved searches), because it counts the selection's mailboxes and a smart row has none. It
+  predates this batch.
+- **The search field has no clear button.** `TextField` draws one only when given `onClear`, and
+  the search field passes none, so a search is cleared by deleting its text. Noticed while testing
+  M34; not changed.
+
+### Incidents — batch 7
+
+- **The batch 7 verify was stopped by Claude Code for low memory**, in its last step, as batch 6's
+  was. Every step before it passed: format, lint, stylelint, types, **360 unit**, **175
+  end-to-end** (169 before, plus the three new specs' six tests), `cargo fmt` and clippy.
+  `cargo test` had by then failed to link, with the linker's `LNK1123` ("file invalid or
+  corrupt"), the same failure memory pressure caused on 2026-11-15's first run. So the full Rust
+  suite has not passed on batch 7. The modules batch 7 touched passed on their own
+  before it: `db`, `transfer`, `sync::persist`, `rules` and `undo` (230), `ipc::mail`, and the
+  `undo_coverage` and `phase8_gate` integration tests.
+- **The two runs before it failed on this batch's own mistakes**: the new `onePane.spec.ts` had not
+  been through Prettier, and two new CSS comments lacked the empty line Stylelint requires before
+  a comment (two stacked comments in `TextField.module.css`, now merged into one).
+- **Two existing tests were changed on purpose.** The predicate engine's "no value is ever spliced"
+  test looked for `DROP` in the bound parameter, which M16 now binds lowercased; it compares
+  case-blind, and the point of it stands. The VIP row test required the `from` field, which M17's
+  half for VIPs replaces with `fromAddress is`, which is stricter about the same thing.
+- **M38's first fix was incomplete.** Opening the reader only for the user's selections stopped
+  the jump, and also stopped a click on the row the list had picked from opening it, because that
+  click does not change the selection. Found by driving the release build in one-pane width; the
+  click is now treated as the user taking the selection over.
+- **Several scripted edits misfired before writing anything**: an anchor that appeared twice (the
+  M19 script, which had already written three of its four files, so the fourth was redone on its
+  own), an anchor that began mid-line, and quoting that broke a `node -e`. A `sed` meant to put
+  M16's old line back did not match, so one "should fail" run tested the fixed code and passed;
+  redone with the Edit tool, it failed as it should.
+- **The old-code checks put files back with `git stash push -- <paths>`** and `git stash pop`
+  straight after, each time confirmed by the diff coming back.
+
+### Added — batch 8
+
+- **Migration 20** (`0020_imported_inbox_is_a_folder.sql`): takes the inbox role off folders an
+  import made (L40).
+- **`ops::FlagBatch`**: flag changes made a message at a time, queued as one operation per mailbox
+  and change. Undo, redo and the rules engine use it, and queue it before any move (L4).
+- **`oauth_cancel`** and `ipc.oauthCancel`, with a Cancel button while the account assistant waits
+  for the browser, on first run too (L30).
+- **`diagnostics::Log`**, the log file as a writer that rotates while the app runs, and
+  `diagnostics::panics_expected` for code that catches its own panics (L39).
+- **`accounts::retire` and `revive`**: a removed account's references, and the lock that orders
+  removing its secrets against a token refresh writing them (L32).
+- `import::removing_bodies_on_failure` (L38), `Caps::for_mailbox` (L2),
+  `outgoing::quoted_text_from_html` (L11) and `idle::still_quiet` (L1).
+- **`smart_count`**, a command answering how many messages a smart mailbox holds and how many are
+  unread, as `MatchCounts`; `db::query::count_matching`, which shares its `WHERE` with
+  `messages_matching` so the header and the list cannot count different things; and
+  `useSmartCount` and `listCounts` on the frontend. docs/03 §4's `smartbox_*` covers it.
+- **`tests/audit_gate.rs`**, a rig gate for the audit's server-side fixes, `#[ignore]`d like the
+  others: L3's folder names, with mail moved into them by COPY and a draft appended; L2's mailbox
+  without mod-sequences, synced twice; and L9's interrupted Redirect, built by the real builder and
+  recovered by `sender::recover` against the rig's Sent. It tidies by UID and never touches the
+  Inbox.
+- **The rig's `Volatile/` namespace** (`test/dovecot/dovecot.conf` and its README, and the Mac's
+  copy): indexes in memory, so its mailboxes answer `NOMODSEQ` on a server with CONDSTORE. The
+  Mac's previous config is kept beside it as `dovecot.conf.before-volatile`.
+- `sync::session::append_name` and `copy_name`, a mailbox name in the form each of async-imap's
+  `append` and `uid_copy` needs.
+- Frontend: `readRecipient` in `compose/address.ts` (M44), `savedSearch.ts` (L18),
+  `useAppliedDensity` (L19), `tabStopRow` in the sidebar model (L27), and the token
+  `--chip-dragging-opacity` (M48).
+- Tests: every fix below has one that was shown failing on the old code first, by putting the old
+  line back or, for the frontend, the old file. New specs: `tokenDrag`, `listDensity` and
+  `sidebarTabStop`; new unit files `saveSearch`, `assistantDiscovery`, `assistantOauthCancel`,
+  `accountDescription` and `searchField`.
+
+### Fixed — batch 8
+
+- **Remote images made a message render 35 times slower.** Found by the batch 7 test run: the
+  render-budget test took 153 ms against its 150 ms budget, where the changelog of the phase that
+  wrote it records 4 ms. Batch 1's M21 fix moved the image rewrite inside the sanitiser, so every
+  inlined image, hundreds of kilobytes of base64, went through html5ever's attribute escaping a
+  character at a time, for nothing: an image data URI holds no character it escapes. The
+  sanitiser now sees a marker random to each render, and the checked URI goes in afterwards; a
+  test proves the output byte for byte what the serialiser writes, and another that a message
+  cannot write the marker. 141–156 ms is now 30–34 ms in a debug build.
+- **M32: a Thunderbird import brought back mail deleted in Thunderbird.** It marks a deleted
+  message expunged and keeps it in the mbox until the folder is compacted. Expunged messages are
+  skipped.
+- **M44: pasting `"Smith, John" <john@example.com>` made two broken chips, and a chip showed its
+  raw text.** Recipients split only outside quotes and angle brackets, typed or pasted; a chip
+  shows the display name, and its initials come from it.
+- **M45: Ctrl+Enter in a recipient field sent without the address just typed.** The send now runs
+  after the render that commits the chip.
+- **M46: changing From kept the first account's signature.** It was not H18's bug, which was the
+  Signatures pane. The editor loads the signature as blocks it knows and replaces them where they
+  stand, adds one where there was none, and leaves alone a signature the user deleted.
+- **M47: a signature's colour and size were lost whenever it loaded, and opening the Signatures
+  pane saved the stripped version back.** Lexical 0.49 drops span styles other than bold and
+  italic on import; colour and size now survive, but only for markup the editor wrote, so pasted
+  white-on-dark text still cannot go out invisible. The pane saves only changes the user made.
+- **M48: recipient chips could not be dragged between To, Cc and Bcc in the app, and a chip dropped
+  on its own field was deleted.** HTML5 drag and drop never starts in a compose window: it keeps
+  Tauri's native drop handler, which is how files dragged in from Explorer arrive with paths, and
+  that handler takes every HTML5 drag in the page. Browser tests have no Tauri and passed. Chips
+  move with pointer events now; one released over its own field, or anywhere else, stays.
+- **L1: new mail could wait five minutes despite IDLE.** A change announced inside the ten-second
+  quiet gap after a sync was dropped, and the server does not announce it twice. It waits for the
+  rest of the gap and syncs then.
+- **L2: a mailbox that keeps no mod-sequences never synced.** The server had CONDSTORE; the mailbox
+  said NOMODSEQ, and every fetch asked it for MODSEQ and failed. The capabilities are narrowed per
+  mailbox from what its SELECT reported.
+- **L3: a folder with a quote or a backslash in its name could not be opened.** The IMAP parser
+  returns a quoted string with its escapes in, so `"Q4" plans` was stored and shown as
+  `\"Q4\" plans` and escaped a second time on SELECT. A `\` delimiter came in as two characters.
+- **L4: undoing Mark All as Read over 5,000 messages held the account's sync for minutes.** Undo,
+  redo and rules queued one operation per message. `FlagBatch` queues one per mailbox and change.
+- **L5: replying to your own sent message opened with To empty.** It goes to the people it went to,
+  as Mail's does, and a note sent only to yourself comes back to you.
+- **L8: a message forwarded as an attachment went as quoted-printable or base64**, which RFC 2046
+  forbids for `message/rfc822`, with its cached bare-LF line ends. It goes 7bit or 8bit with CRLF;
+  a source neither can carry keeps lettre's choice rather than failing to send.
+- **L9: an interrupted Redirect could be marked sent when it was not.** It was known by the
+  original's Message-ID, and a redirect of your own message, or one passed on before, found the
+  original in Sent. It is known by its `Resent-Message-ID` now, and the Sent search looks for
+  either, escaped: the original's id was a stranger's, put into the search string as it was.
+- **L10: a Redirect showed no Undo banner and went up to thirty seconds after its hold.** It
+  announces the hold and wakes the sender when it ends, through the helper the ordinary send uses.
+- **L11: a reply's plain-text part did not mark what it quoted.** The editor's text has the quoted
+  words and not their shape. When the HTML quotes, the text part is made from it with `>` per
+  level.
+- **L12: search showed one copy of an email both accounts received.** A second pass over the
+  ranked hits folded copies by Message-ID alone; the first pass already keeps one per account.
+- **L13: choosing a mailbox suggestion with a space in its name broke the search.** Sent Items
+  went in as `mailbox:Sent Items`, which searched "Sent" for "Items". Such names are quoted.
+- **L14: "yesterday" and "last week" were a day off around a change of the clocks.** Days were 24
+  hours, so on the morning after the clocks went forward "yesterday" was two days back. They are
+  calendar days. Tested in a zone written for the test, since Windows ignores `TZ`.
+- **L15: `after:"300000 years"` panicked the search, which never answered.** The arithmetic is
+  checked; a date no calendar holds is searched for as text.
+- **L16: a filter typed between the words of a date phrase was dropped.** `last from:bob week`
+  lost `from:bob`. Phrases are read only from adjacent plain words.
+- **L17: undoing agreement with the junk filter left its training in.** Marking as junk mail the
+  filter had already put in Junk trains it, and undo, which checked only the junk flag, saw nothing
+  to take back. Undo and redo compare the user's judgement instead.
+- **L18: Save Search dropped the scope bar's mailbox and its Unread or Flagged choice.** They are
+  written into the saved search as `mailbox:`, `is:unread` and `is:flagged`.
+- **L19: after a density change, rows were one step behind until reload.** The list measured before
+  the attribute that sets the size was written; it watches the attribute now.
+- **L20: Help listed →, ← and Space for things that did nothing.** The arrows are gone until there
+  are conversation rows; Space is listed for what it does, previewing a focused attachment.
+- **L21: duplicate recipients were kept.** Compared without regard to case or display name.
+- **L22: Send Later's "That moment has already passed" never appeared**, being passed as a prop the
+  field does not have.
+- **L23: autodiscovery was skipped for good if you moved on before it answered.** The address is
+  marked looked up when the answer comes, and the mark is cleared when the assistant closes.
+- **L24: the Signatures pane dropped the last edits if you left it within 0.8 seconds.** The save
+  is made as the pane closes.
+- **L25: an untouched reply, or a new message holding only its signature, asked to be saved on
+  close, and a reply was autosaved on losing focus.** Nothing is asked or saved until the user
+  changes something.
+- **L26: an account's description could be saved empty**, blanking its sidebar heading and its
+  From name. Settings puts the old name back, and the core refuses a blank one as well.
+- **L27: the sidebar lost its only Tab stop when the selected row was collapsed.** The stop moves
+  to the collapsed row hiding the selection.
+- **L30: an abandoned Google sign-in left a spinner for five minutes**, and on first run there was
+  no other way out. The assistant has a Cancel while it waits, which closes the listener.
+- **L31: a failed OAuth add left a live refresh token in Credential Manager.** The tokens were kept
+  for a retry that signs in again anyway. A sign-in that does not become an account is removed.
+- **L32: removing an account during a token refresh could write its secrets back.** The refresh
+  finished after the purge. Removal and the refresh's write now take one lock, and the write is
+  refused for a removed account; an address added back is allowed again.
+- **L38: a failed export or import left partial files.** An export reads before it creates
+  anything and removes what it wrote if it fails, and never writes over a file that is there; a
+  folder import that fails removes the bodies it had cached.
+- **L39: crash reports in the same second overwrote each other, caught panics filled the ten
+  places, and the log never rotated in a long session.** Reports get a numbered name, panics the
+  code catches (the attachment text extractors) are not reports, and the log rotates as it runs.
+- **L40: an imported folder named Inbox got the inbox role**, so an archive's old unread mail joined
+  the taskbar badge and the Inboxes row. Imports leave it off; migration 20 takes it off the
+  folders earlier imports made.
+- **L41: `mailto:` turned `+` into a space in `to=` and `cc=` addresses.** Only text reads `+` as a
+  space now.
+- **L42: the flagged-conversation banner showed the Junk shield.** It shows a flag.
+- **L43: Escape in the search field did not clear the search.** It closes the suggestions if they
+  are open, and otherwise clears it.
+- **The search field had no clear button**, found in batch 7: it was passed under a prop the field
+  does not have. It uses the field's own.
+- **L45: the log filled with html5ever's "foster parenting not implemented".** html5ever is logged
+  at error only by default.
+- **Every smart row's header read "0 messages"**: Flagged, the flag colours, VIPs and every saved
+  search, over a full list. Found in batch 7 and left then. The header added up the selection's
+  mailboxes, and a smart row has none; it lists by predicate. It now asks the core to count what
+  the predicate matches, snoozed mail left out as the list leaves it out, and shows nothing rather
+  than a 0 until the answer comes. The count sits under the `messages` query key, so every event
+  that marks the list stale marks it stale too. Not counted from the loaded rows, which are a
+  page at a time. Shown failing on the old rule: both smart-row tests read 0.
+- **On a server without MOVE, a move into any folder with a space in its name failed.** async-imap
+  0.10 writes `UID COPY`'s mailbox exactly as given, with no quotes, and COPY is the fallback the
+  move takes when the server has no MOVE. Dovecot read `UID COPY 1 Audit "Q4" plans` as a move into
+  "Audit" and answered "Mailbox doesn't exist". Delete moves to the Trash, which on Exchange is
+  "Deleted Items", and Exchange's own IMAP has no MOVE. The name is now quoted and escaped first.
+  Found running `audit_gate` with MOVE turned off; it failed there before the fix and passes after.
+- **A draft or a sent copy could not be put in a folder with a quote or a backslash in its name.**
+  async-imap's `append` quotes the name without escaping it, where its SELECT, CREATE and MOVE
+  escape, so the quoted string ended early. L3 fixed listing and opening such a folder; this is
+  the half it left. Found when the gate's own APPEND into its `"Q4"` folder failed.
+- **Text put into a recipient field whole was committed as one chip holding every address.**
+  Typing a comma commits as it goes and a paste is split, but text dropped in, dictated or set by
+  an input method reached Enter with its commas. M44's fix covered typing and pasting only. Enter,
+  Tab and leaving the field now cut it where a paste is cut, and a quoted comma stays in the name.
+  Found driving the release build's compose window; the new test failed first.
+
+### Notes — batch 8
+
+- **Not fixed: L44**, direct-download builds never update, because no GitHub release carrying a
+  signed `latest.json` has been published. Publishing one is a decision about releases, not a
+  code change, and is left to the user.
+- **The batch 7 Rust suite, run on request**: 1,143 passed and one failed, the render-budget test
+  above, the only failure across all 18 binaries. That closes batch 7's open incident.
+- **Departures recorded** in `docs/PHASE-11-VERIFICATION.md` §16: Help's thread arrows removed
+  (L20); a saved search's mailbox scope matched by name (L18); a reply's text part made from its
+  HTML (L11); an imported Inbox as a folder (L40); and a reopened draft keeps the signature it was
+  saved with when From changes (M46).
+- **Work split**: the frontend items (M44 to M48, L18 to L27, L42, L43) were done in parallel by a
+  second agent, limited to frontend files while the Rust items were done here. M48's cause was
+  found on the Rust side and handed over.
+- **Not shown in the app**: L1 is tested for its timing only, as the IDLE loop needs the Dovecot
+  rig; L2's NOMODSEQ mailbox, L3's quoted names and L9's recovery need a server too. M48's drag is
+  shown in a browser, not yet in a compose window.
+- **The smart-row count, shown in the release build**, run isolated against a copy of batch 7's
+  seeded store, driven over WebView2's debugging port: Flagged read "260 messages, 41 unread" and
+  Red "3 messages", each what a read-only count of the store gave. Opening an unread flagged
+  message made it "40 unread" within the second, with the store at 40. The window-position file
+  was backed up and restored byte for byte.
+- **The checks the audit left for a person, done.** Each ran isolated from the user's data, and
+  the window-position file was restored byte for byte after each app run.
+  - **M39**, F5 in a compose window with text typed: nothing happened, and the text and a marker
+    set on the page were still there. The key was a real `WM_KEYDOWN` posted to the compose
+    window's WebView2 input window, which needs no focus, so nothing could land in another app;
+    an X posted the same way typed an "x", so the path reaches the page. With M39's one call
+    disabled in a debug build, the same F5 reloaded the window and the text was gone. The file
+    was restored from a copy and its hash checked.
+  - **M48**, in a release compose window with Tauri's file-drop handler on: a chip dragged To →
+    Cc, then Cc → Bcc, and one dropped on its own field or on the body stayed. The drags were
+    mouse events through the page's debugging port, not the desktop's mouse.
+  - **L1**, the release app against the rig: a message delivered inside the quiet gap after a
+    sync landed 9.7 s after delivery, the gap's remainder and a sync. The old code dropped that
+    announcement and waited for the five-minute poll; that was not run again here.
+  - **L2, L3 and L9** in `audit_gate` against the rig, above. L2 also failed with its one line
+    taken out, and Dovecot's own answer to the old request was seen in a probe: "FETCH MODSEQ
+    can't be used with non-permanent modseqs".
+  - **H22 and M31**, not on a clean PC: on this one, in a test copy of the package registered
+    from a loose layout under its own name (Developer Mode was already on), from the Store build
+    with the updater compiled out, and removed afterwards along with its startup task, alias and
+    notification. The Store install was not touched. It ran through an app execution alias,
+    which gives the process package identity and keeps the caller's environment, so it used a
+    scratch store with the rig's account. Its log said toasts went to
+    `Unikie1.HalcyonMail.AuditTest_…!Halcyon`, `packaged=true`; a message delivered on the rig
+    raised a toast, and Windows' notification database held it under that ID, not under
+    `com.uniki.halcyon`, which is what a clean PC lacks. Run at login on set the package's
+    `HalcyonStartup` to Enabled (2) in Windows' own record, off set it to Disabled (0), and no
+    `Run` key was written. A sign-in was not done to watch it start.
+- **L44 cannot be done from here.** The updater's private key was generated into a session
+  scratch folder on 2026-09-23 and that folder has since been cleared; no copy was found on this
+  machine. Unless the user kept one, the public key in `tauri.conf.json` can never sign another
+  update, a new key pair has to be made, and copies already installed from the site can only be
+  updated by downloading the installer again.
+- **The rig was left as found**: Inbox at 50,000 with UID 137, and no test folder or message
+  anywhere, checked with `doveadm` after each run. Its password was stored for the app runs and
+  purged after each, by a temporary test file deleted after use.
+
+### Incidents — batch 8
+
+- **A regression from batch 1 shipped in five batches of green runs.** The render budget held only
+  narrowly after M21 (141–156 ms on a 150 ms budget), passed in each earlier run, and was noticed
+  only when it tipped over. The changelog's own 4 ms figure is what showed it was not noise.
+- **Two tests passed on the old code at first.** The caught-panic test asserted inside the
+  `catch_unwind`, so its own failure was swallowed as the expected panic; it records the value
+  now and fails as it should. The L14 test for the clocks going back passes on the old code too,
+  as it should: that direction was never wrong, and it stays as a guard.
+- **Scripted edits misfired**: a Bash heredoc broke twice, a `node -e` mangled a backslash literal
+  in Rust and a `\x27` in an anchor, and two anchors matched twice; each was redone, with the Edit
+  tool where quoting was the problem. Nothing was half written.
+- **The first L5 fix's comment was wrong**: it said a note sent only to yourself would come back
+  to you, and the code fell through to an empty To. Caught on rereading; the case is handled and
+  tested.
+- **Three verify runs, none complete.** The first failed lint on this batch's own new test, which
+  rejected a promise with a plain object; it rejects with an `Error` carrying the code now. The
+  second passed format, lint, stylelint, types, **394 unit** and **181 end-to-end**, then failed
+  clippy: the new log-filter tests sat in the middle of `lib.rs` (`items_after_test_module`), and
+  are at its end now. The third ran the Rust steps only, the rest having passed on the same
+  frontend code: `cargo fmt` and clippy passed, and `cargo test` failed to link the app binary
+  with `LNK1123` ("file invalid or corrupt"), after which Claude Code stopped the run for low
+  memory, as in batches 6 and 7. The report to the user said only that it was stopped for low
+  memory, while still compiling; the log showed the link failure, and this entry has been
+  corrected to match it.
+- **The full Rust suite, run again with six build jobs instead of the default 24**
+  (`cargo test -j 6`), with 19 GB free: **1,186 passed, 0 failed**, 21 ignored (the 18 rig gates
+  and 3 live-Gmail tests), across all 18 binaries. Every binary linked, using the same
+  `resource.lib` that failed, so the `LNK1123` in this batch and in batches 6 and 7 was memory
+  pressure from linking many test binaries at once, not a corrupt file. The final verify was run
+  with `CARGO_BUILD_JOBS=6` for the same reason; nothing in the repository sets it.
+- **The final verify, after the smart-row count, passed every step in one run**: format, lint,
+  stylelint, types, **398 unit**, **181 end-to-end**, `cargo fmt`, clippy, and **1,188 Rust passed,
+  0 failed**, 21 ignored. So every step of the gate has passed on batch 8's code together.
+- **Shell quoting broke two more edits**, as the Git Bash note warns: a `node -e` lost the
+  backslashes in `\\Draft \\Seen` and stopped before writing, and a heredoc turned the gate's
+  `\\Flagged` into `\F`, which the compiler caught. Both were redone with the Edit tool.
+- **A restored file was not rebuilt.** After the L2 old-code check, `engine.rs` was put back from
+  a copy, which kept the copy's older modification time, so cargo saw nothing newer than the
+  reverted build and ran the stale binary: the gate failed with the fix in place. Touching the
+  file rebuilt it and the gate passed. The M39 restore had the same exposure, and was rebuilt by
+  later edits to the same crate before anything ran on it.
+- **The first clean-up of L1's messages searched for a subject they did not have**
+  (`audit-l1-<n>` for `audit-l1-A-<n>`) and removed nothing; the Inbox read 50,002. Redone by the
+  exact subjects, back to 50,000.
+- **`target\release\halcyon.exe` is now the Store build** (updater compiled out), from the H22
+  run. The next ordinary `tauri build` replaces it.
+- **The verify after the person checks and their three fixes passed every step in one run**:
+  format, lint, stylelint, types, **399 unit**, **181 end-to-end**, `cargo fmt`, clippy, and
+  **1,189 Rust passed, 0 failed**, 24 ignored (the 21 before, and `audit_gate`'s three, which ran
+  against the rig as Notes says). Run with `CARGO_BUILD_JOBS=6`, as before.
+- **Committed on a branch, `audit-2026-11-14`**, not on `main`, with every batch of the audit in
+  one commit: none of the eight had been committed. `tools/demo-video.cjs`, untracked since
+  2026-10-04 and no part of the audit, was left out.

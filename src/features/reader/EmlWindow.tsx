@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Paperclip } from 'lucide-react'
 
 import type { EmlMessage } from '@/lib/generated/EmlMessage'
-import { emlRead } from '@/lib/ipc'
+import { emlRead, reasonFor } from '@/lib/ipc'
 import { useAppearanceSync } from '@/app/useAppearanceSync'
 import { EmptyState } from '@/ui'
 
@@ -49,7 +49,7 @@ export function EmlWindow() {
         // The core's words. It distinguishes "not a message", "could not be read" and "could
         // not be parsed", and flattening those into one sentence would throw away the only
         // information the user has about what to do next.
-        if (alive) setProblem(cause instanceof Error ? cause.message : String(cause))
+        if (alive) setProblem(reasonFor(cause))
       })
 
     return () => {

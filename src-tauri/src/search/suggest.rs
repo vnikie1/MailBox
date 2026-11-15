@@ -192,8 +192,8 @@ pub fn suggest(
         for name in rows {
             out.push(Suggestion {
                 kind: Kind::Mailbox,
-                label: name.clone(),
-                insert: with_word(text, &format!("mailbox:{name}")),
+                insert: with_word(text, &format!("mailbox:{}", as_value(&name))),
+                label: name,
                 detail: None,
             });
         }
@@ -201,6 +201,29 @@ pub fn suggest(
 
     out.truncate(limit);
     Ok(out)
+}
+
+/// `name` written so the parser reads it back as one value.
+///
+/// A space ends a value unless it is inside quotes, so "Sent Items" went in as `mailbox:Sent Items`
+/// and came back as the mailbox "Sent" and the word "Items", which matched nothing (L13). The
+/// query language has no way to escape a quote, so a name with one in it is given by its longest
+/// part without one: the mailbox filter matches part of a name, so that still finds it.
+fn as_value(name: &str) -> String {
+    let part = if name.contains('"') {
+        name.split('"')
+            .map(str::trim)
+            .max_by_key(|piece| piece.len())
+            .unwrap_or_default()
+    } else {
+        name
+    };
+
+    if part.contains(char::is_whitespace) {
+        format!("\"{part}\"")
+    } else {
+        part.to_string()
+    }
 }
 
 fn escape_like(value: &str) -> String {
@@ -331,6 +354,36 @@ mod tests {
         assert!(found
             .iter()
             .any(|s| s.kind == Kind::Mailbox && s.label == "Archive"));
+    }
+
+    #[test]
+    fn a_mailbox_with_a_space_in_its_name_is_inserted_as_one_value() {
+        // "mailbox:Sent Items" searched the mailbox "Sent" for the word "Items" (L13).
+        let conn = store();
+        conn.execute_batch(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+                 VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me');
+             INSERT INTO mailbox (id, account_id, remote_path, display_name, role) VALUES
+                 (1, 1, 'Sent Items', 'Sent Items', 'sent'),
+                 (2, 1, 'Sent \"Old\" Stuff', 'Sent \"Old\" Stuff', NULL);",
+        )
+        .expect("seed");
+
+        let found = suggestions(&conn, "budget sen");
+        let inserted: Vec<&str> = found
+            .iter()
+            .filter(|s| s.kind == Kind::Mailbox)
+            .map(|s| s.insert.as_str())
+            .collect();
+
+        assert_eq!(
+            inserted,
+            vec![r#"budget mailbox:Stuff"#, r#"budget mailbox:"Sent Items""#]
+        );
+
+        let chosen = query::parse(inserted[1], 1_787_000_000);
+        assert_eq!(chosen.mailbox, vec!["Sent Items"]);
+        assert_eq!(chosen.terms, vec!["budget"]);
     }
 
     /// Multi-byte whitespace used to crash the suggestion list.

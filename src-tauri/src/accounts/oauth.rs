@@ -57,6 +57,10 @@ pub enum OAuthError {
     #[error("timed out waiting for the browser sign-in to finish")]
     TimedOut,
 
+    /// The user gave up on the browser sign-in. See [`cancel_authorisation`].
+    #[error("the browser sign-in was cancelled")]
+    Cancelled,
+
     /// The provider said no. `error` is its machine-readable code, which the caller branches
     /// on — `invalid_grant` in particular means re-authenticate, not retry.
     #[error("{provider} refused the request: {error}")]
@@ -65,9 +69,6 @@ pub enum OAuthError {
         error: String,
         description: Option<String>,
     },
-
-    #[error("the redirect did not match the request it was started for")]
-    StateMismatch,
 
     #[error("network error talking to {provider}: {source}")]
     Network {
@@ -194,6 +195,15 @@ fn completion_page(success: bool) -> String {
 /// else is running and, worse, would let another local process squat on it and receive the
 /// code first.
 async fn await_code(listener: TcpListener, expected_state: &str) -> Result<String, OAuthError> {
+    await_code_or(listener, expected_state, waiting().notified()).await
+}
+
+/// `await_code`, ended early by `cancelled`.
+async fn await_code_or(
+    listener: TcpListener,
+    expected_state: &str,
+    cancelled: impl std::future::Future<Output = ()>,
+) -> Result<String, OAuthError> {
     let accept = async {
         loop {
             let (mut stream, _) = listener.accept().await.map_err(OAuthError::Listener)?;
@@ -238,6 +248,19 @@ async fn await_code(listener: TcpListener, expected_state: &str) -> Result<Strin
                 }
             }
 
+            // The state first, before anything else in the request is believed. Only the
+            // provider has it, so a request without it came from somewhere else: any page open in
+            // the browser can reach a loopback port. It used to be checked *after* `error=`, so
+            // such a page could end the sign-in and have its own words shown as the provider's;
+            // and a wrong state ended it too, where it is now ignored and the real redirect still
+            // gets through (L29, 2026-11-14 audit).
+            if state.as_deref() != Some(expected_state) {
+                tracing::warn!("oauth: a request to the sign-in listener without this sign-in's state; ignored");
+                let _ = stream.write_all(completion_page(false).as_bytes()).await;
+                let _ = stream.shutdown().await;
+                continue;
+            }
+
             let success = code.is_some() && error.is_none();
             let _ = stream.write_all(completion_page(success).as_bytes()).await;
             let _ = stream.shutdown().await;
@@ -250,22 +273,34 @@ async fn await_code(listener: TcpListener, expected_state: &str) -> Result<Strin
                 });
             }
 
-            // Checked before the code is used for anything. Without this the listener would
-            // accept a code from any page on the machine that can reach localhost.
-            if state.as_deref() != Some(expected_state) {
-                return Err(OAuthError::StateMismatch);
-            }
-
             if let Some(code) = code {
                 return Ok(code);
             }
         }
     };
 
-    match tokio::time::timeout(AUTHORISATION_TIMEOUT, accept).await {
-        Ok(result) => result,
-        Err(_) => Err(OAuthError::TimedOut),
+    tokio::select! {
+        result = tokio::time::timeout(AUTHORISATION_TIMEOUT, accept) => match result {
+            Ok(result) => result,
+            Err(_) => Err(OAuthError::TimedOut),
+        },
+        () = cancelled => Err(OAuthError::Cancelled),
     }
+}
+
+/// The browser sign-in being waited for, so that it can be given up on.
+fn waiting() -> &'static tokio::sync::Notify {
+    static WAITING: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    WAITING.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Stops waiting for the browser sign-in under way, if there is one.
+///
+/// The wait was five minutes with nothing to end it: a Google sign-in abandoned in the browser
+/// left the assistant on its spinner, and on first run there was no other way out (L30). The
+/// listener closes with it.
+pub fn cancel_authorisation() {
+    waiting().notify_waiters();
 }
 
 #[derive(Debug, Deserialize)]
@@ -615,27 +650,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_listener_rejects_a_code_with_the_wrong_state() {
-        // Without the state check, any page on this machine that can reach the loopback port
-        // could hand us a code of its choosing.
+    async fn a_request_without_this_sign_ins_state_is_ignored() {
+        // Any page open in the browser can reach the loopback port. Without the state check it
+        // could hand us a code of its choosing; with it checked late (L29, 2026-11-14 audit) it
+        // could still end the sign-in with an `error=` and words of its own, or with a wrong
+        // state. Neither may decide anything, and the real redirect still gets through.
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let port = listener.local_addr().expect("addr").port();
 
         let waiter = tokio::spawn(async move { await_code(listener, "expected-state").await });
 
-        let response = reqwest::get(format!(
-            "http://127.0.0.1:{port}/callback?code=stolen&state=attacker"
+        for hostile in [
+            "code=stolen&state=attacker",
+            "code=stolen",
+            "error=access_denied&error_description=Call%20this%20number",
+            "error=access_denied&state=attacker",
+        ] {
+            let response =
+                reqwest::get(format!("http://127.0.0.1:{port}/callback?{hostile}")).await;
+            assert!(response.is_ok(), "the listener still answers: {hostile}");
+        }
+
+        let _ = reqwest::get(format!(
+            "http://127.0.0.1:{port}/callback?code=good-code&state=expected-state"
         ))
         .await;
-        assert!(
-            response.is_ok(),
-            "the listener should still answer the request"
-        );
 
-        match waiter.await.expect("join") {
-            Err(OAuthError::StateMismatch) => {}
-            other => panic!("expected StateMismatch, got {other:?}"),
-        }
+        assert_eq!(waiter.await.expect("join").expect("code"), "good-code");
+    }
+
+    #[tokio::test]
+    async fn giving_up_on_the_browser_ends_the_wait_and_closes_the_listener() {
+        // Five minutes with nothing to end it, and on first run nowhere else to go (L30).
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+
+        let waiter = tokio::spawn(async move {
+            await_code_or(listener, "state-c", async {
+                let _ = cancelled.await;
+            })
+            .await
+        });
+
+        cancel.send(()).expect("cancel");
+        let ended = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("ended at once")
+            .expect("join");
+
+        assert!(matches!(ended, Err(OAuthError::Cancelled)), "{ended:?}");
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+            "the loopback listener is still open"
+        );
     }
 
     #[tokio::test]

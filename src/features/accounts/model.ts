@@ -58,6 +58,7 @@ export type Action =
   | { type: 'busy'; busy: boolean }
   | { type: 'tested'; report: DiagnosticReport }
   | { type: 'failed'; message: string }
+  | { type: 'cancelled' }
   | { type: 'added' }
   | { type: 'reset' }
 
@@ -142,6 +143,15 @@ export function reduce(state: AssistantState, action: Action): AssistantState {
     case 'discovered': {
       const provider = action.provider ?? state.provider
 
+      // Only an Other account takes its servers from a lookup. iCloud and Yahoo serve a custom
+      // domain from their own servers, and a lookup of that domain finds whatever its DNS or web
+      // host says — so the password went to a host the provider never named (M26, 2026-11-14
+      // audit). A domain that turns out to front Google or Microsoft switches to that provider,
+      // which has its own servers too; Other's defaults are cleared rather than carried over.
+      if (provider?.needsManualSetup !== true) {
+        return { ...state, provider, discovery: null, imap: null, smtp: null }
+      }
+
       return {
         ...state,
         provider,
@@ -210,6 +220,15 @@ export function reduce(state: AssistantState, action: Action): AssistantState {
         ...state,
         step: state.step === 'testing' ? 'identity' : state.step,
         error: action.message,
+        busy: false,
+      }
+
+    // The user gave up on the browser sign-in. Back to the fields, with nothing to apologise for.
+    case 'cancelled':
+      return {
+        ...state,
+        step: state.step === 'testing' ? 'identity' : state.step,
+        error: null,
         busy: false,
       }
 

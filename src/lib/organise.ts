@@ -17,6 +17,7 @@ import type { Action } from './generated/Action'
 import type { Available } from './generated/Available'
 import type { FlagName } from './generated/FlagName'
 import type { JunkStatus } from './generated/JunkStatus'
+import type { MatchCounts } from './generated/MatchCounts'
 import type { MessageRow } from './generated/MessageRow'
 import type { Predicate } from './generated/Predicate'
 import type { Rule } from './generated/Rule'
@@ -53,6 +54,13 @@ export async function smartMessages(
 ): Promise<MessageRow[]> {
   if (!inTauri) return []
   return invoke<MessageRow[]>('smart_messages', { predicate, limit, offset })
+}
+
+/** How many messages a smart mailbox holds, and how many are unread: its list header. */
+export async function smartCount(predicate: Predicate): Promise<MatchCounts> {
+  // The browser lists nothing for a smart row, above, so it counts nothing either.
+  if (!inTauri) return { total: 0, unread: 0 }
+  return invoke<MatchCounts>('smart_count', { predicate })
 }
 
 /* ------------------------------------------------------------------------- rules */

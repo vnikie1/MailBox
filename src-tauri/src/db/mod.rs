@@ -156,7 +156,7 @@ fn configure(conn: &Connection) -> Result<(), rusqlite::Error> {
 /// here are case-insensitive *matches*; none wants ASCII-only folding.
 ///
 /// Marked deterministic so SQLite may still use it in an index expression.
-fn unicode_lower(conn: &Connection) -> Result<(), rusqlite::Error> {
+pub(crate) fn unicode_lower(conn: &Connection) -> Result<(), rusqlite::Error> {
     use rusqlite::functions::FunctionFlags;
 
     conn.create_scalar_function(

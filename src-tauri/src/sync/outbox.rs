@@ -89,6 +89,8 @@ pub struct Entry {
     pub subject: Option<String>,
     pub recipients: Option<String>,
     pub created_at: i64,
+    /// The draft this message was written as, discarded once the message has gone.
+    pub draft_message_id: Option<String>,
 }
 
 /// How many times to try before leaving it to the user.
@@ -133,6 +135,7 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entry> {
         subject: row.get("subject")?,
         recipients: row.get("recipients")?,
         created_at: row.get("created_at")?,
+        draft_message_id: row.get("draft_message_id")?,
     })
 }
 
@@ -475,6 +478,105 @@ pub fn retry(tx: &Transaction<'_>, id: i64) -> Result<bool, DbError> {
     )?;
 
     Ok(changed > 0)
+}
+
+/// How long a Forward as Attachment copy is left for the compose window that made it.
+const FORWARD_COPY_DAYS: u64 = 1;
+
+/// Deletes message files nothing refers to any more, and returns how many went.
+///
+/// Every message sent stayed on disk as an `.eml` for ever, with every draft and every Forward as
+/// Attachment copy, after its account was removed too (M14, 2026-11-14 audit). The sender now
+/// deletes each file once its message is filed; this catches what a crash, an older version or a
+/// removed account left behind. Run once a launch, before anything is sent.
+///
+/// * `outbox/<account>/<id>.eml` — kept while its row is waiting, sending or failed; gone once
+///   it is sent or the row is; a whole folder goes with its account.
+/// * `drafts/<id>.eml` — kept while its draft exists.
+/// * `halcyon-fwd-*` in the temp folder — kept for a day, for the compose window that may still
+///   be about to send it.
+///
+/// A row is always written before its file, so a file with no row is never one being written.
+pub fn sweep_leftover_files(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    temp: &Path,
+    now: std::time::SystemTime,
+) -> Result<usize, DbError> {
+    use std::collections::HashSet;
+
+    let ids = |sql: &str| -> Result<HashSet<i64>, DbError> {
+        let mut statement = conn.prepare(sql)?;
+        let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    };
+
+    let accounts = ids("SELECT id FROM account")?;
+    let unsent = ids("SELECT id FROM outbox WHERE state <> 'sent'")?;
+    let drafts = ids("SELECT id FROM draft")?;
+
+    let stem = |path: &Path| -> Option<i64> { path.file_stem()?.to_str()?.parse().ok() };
+    let mut removed = 0usize;
+
+    if let Ok(folders) = std::fs::read_dir(root.join("outbox")) {
+        for folder in folders.flatten().map(|entry| entry.path()) {
+            match stem(&folder) {
+                Some(account) if accounts.contains(&account) => {
+                    for file in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+                        let path = file.path();
+                        if stem(&path).is_some_and(|id| !unsent.contains(&id))
+                            && std::fs::remove_file(&path).is_ok()
+                        {
+                            removed += 1;
+                        }
+                    }
+                }
+                Some(_) if folder.is_dir() => {
+                    removed += usize::from(std::fs::remove_dir_all(&folder).is_ok());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for file in std::fs::read_dir(root.join("drafts"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = file.path();
+        if stem(&path).is_some_and(|id| !drafts.contains(&id))
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+
+    let cutoff = now - std::time::Duration::from_secs(FORWARD_COPY_DAYS * 24 * 60 * 60);
+    for entry in std::fs::read_dir(temp).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let ours = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("halcyon-fwd-"));
+        let old = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|modified| modified < cutoff);
+
+        if ours && old {
+            let gone = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if gone.is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    Ok(removed)
 }
 
 /// Moves a held message's send time. This is **Send Later**.
@@ -823,5 +925,98 @@ mod discard_tests {
     async fn deleting_a_message_that_is_already_gone_reports_nothing_done() {
         let (_dir, db, _rows) = store_with(&[]).await;
         assert!(!discard_failed(&db, 42).await.expect("discard"));
+    }
+}
+
+#[cfg(test)]
+mod leftover_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    fn touch(path: &Path) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        std::fs::write(path, b"x").expect("file");
+    }
+
+    /// M14 in the 2026-11-14 audit: every message ever sent stayed on disk as an `.eml`, with
+    /// every draft and every Forward as Attachment copy, after the account was removed too.
+    #[test]
+    fn files_nothing_refers_to_any_more_are_deleted() {
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+        let waiting = insert(&tx, "holding", 0);
+        let sent = insert(&tx, "sent", 0);
+        tx.execute(
+            "INSERT INTO draft (id, account_id, message_id, updated_at) VALUES (4, 1, '<d@x>', 0)",
+            [],
+        )
+        .expect("draft");
+        tx.commit().expect("commit");
+
+        let root = tempfile::tempdir().expect("root");
+        let temp = tempfile::tempdir().expect("temp");
+
+        let keep_outbox = eml_path(root.path(), 1, waiting);
+        let gone_sent = eml_path(root.path(), 1, sent);
+        let gone_row = eml_path(root.path(), 1, 999);
+        let gone_account = eml_path(root.path(), 77, 1);
+        let keep_draft = root.path().join("drafts").join("4.eml");
+        let gone_draft = root.path().join("drafts").join("5.eml");
+        let old_forward = temp.path().join("halcyon-fwd-12").join("Figures.eml");
+        let unrelated = temp.path().join("somebody-elses.tmp");
+
+        for path in [
+            &keep_outbox,
+            &gone_sent,
+            &gone_row,
+            &gone_account,
+            &keep_draft,
+            &gone_draft,
+            &old_forward,
+            &unrelated,
+        ] {
+            touch(path);
+        }
+
+        // A day and a minute later, so the forward copy is old enough to go.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(86_460);
+        let removed = sweep_leftover_files(&conn, root.path(), temp.path(), later).expect("sweep");
+
+        assert!(
+            keep_outbox.exists(),
+            "a message still to be sent was deleted"
+        );
+        assert!(keep_draft.exists(), "a live draft was deleted");
+        assert!(unrelated.exists(), "something that is not ours was deleted");
+
+        assert!(!gone_sent.exists());
+        assert!(!gone_row.exists());
+        assert!(!gone_account.exists());
+        assert!(!gone_draft.exists());
+        assert!(!old_forward.exists());
+        assert!(removed >= 5, "{removed}");
+    }
+
+    #[test]
+    fn a_forward_copy_made_today_is_left_for_its_window() {
+        let conn = store();
+        let root = tempfile::tempdir().expect("root");
+        let temp = tempfile::tempdir().expect("temp");
+
+        let fresh = temp.path().join("halcyon-fwd-12").join("Figures.eml");
+        touch(&fresh);
+
+        sweep_leftover_files(
+            &conn,
+            root.path(),
+            temp.path(),
+            std::time::SystemTime::now(),
+        )
+        .expect("sweep");
+
+        assert!(
+            fresh.exists(),
+            "a compose window may still be about to send it"
+        );
     }
 }

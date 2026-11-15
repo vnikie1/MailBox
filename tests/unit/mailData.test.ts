@@ -33,6 +33,7 @@ describe('browser store pagination', () => {
         cursor,
         limit: 7,
         unreadOnly: false,
+        keepIds: [],
       })
 
       seen.push(...page.items.map((item) => item.id))
@@ -58,6 +59,7 @@ describe('browser store pagination', () => {
       cursor: null,
       limit: 500,
       unreadOnly: false,
+      keepIds: [],
     }).items
 
     for (let i = 1; i < all.length; i += 1) {
@@ -80,6 +82,7 @@ describe('browser store pagination', () => {
       cursor: null,
       limit: inbox.totalCount,
       unreadOnly: false,
+      keepIds: [],
     })
 
     expect(page.items).toHaveLength(inbox.totalCount)
@@ -88,7 +91,13 @@ describe('browser store pagination', () => {
 
   it('returns nothing for an empty mailbox set rather than everything', () => {
     // The dangerous failure: no filter at all, and the caller pages the entire store.
-    const page = store.messagesPage({ mailboxIds: [], cursor: null, limit: 10, unreadOnly: false })
+    const page = store.messagesPage({
+      mailboxIds: [],
+      cursor: null,
+      limit: 10,
+      unreadOnly: false,
+      keepIds: [],
+    })
     expect(page.items).toHaveLength(0)
     expect(page.nextCursor).toBeNull()
   })
@@ -102,6 +111,7 @@ describe('browser store pagination', () => {
       cursor: null,
       limit: 300,
       unreadOnly: false,
+      keepIds: [],
     }).items
 
     expect(new Set(merged.map((row) => row.accountId)).size).toBeGreaterThan(1)
@@ -119,6 +129,7 @@ describe('browser store pagination', () => {
       cursor: null,
       limit: 200,
       unreadOnly: true,
+      keepIds: [],
     })
 
     expect(page.items.every((row) => !row.seen)).toBe(true)

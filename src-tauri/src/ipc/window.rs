@@ -103,6 +103,26 @@ pub async fn badge_paint(app: tauri::AppHandle, fill: u32, ink: u32) -> Result<(
     Ok(())
 }
 
+/// The main window is listening for `event`: hands over what Windows asked for before it was.
+///
+/// A Jump List task that started the app, or a toast pressed while the main window was being
+/// made again, arrives before the page can hear it. See `platform::handoff`.
+///
+/// The main window's alone. Another window asking would take the main window's requests and
+/// then do nothing with them.
+#[tauri::command]
+pub fn handoff_take(
+    window: WebviewWindow,
+    handoff: State<'_, crate::platform::handoff::Handoff>,
+    event: String,
+) -> Vec<serde_json::Value> {
+    if window.label() != "main" {
+        return Vec::new();
+    }
+
+    handoff.take(&event)
+}
+
 /// Opens the Settings window, or brings it forward if it is already open.
 ///
 /// A real window rather than a sheet over the mailbox, which is what docs/06 Phase 11 asks for

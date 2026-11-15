@@ -144,14 +144,49 @@ pub fn install(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error>> 
 ///
 /// All three calls are needed and each covers a different state: hidden, minimised, and open
 /// but behind something. Doing only `show` leaves a minimised window minimised.
+///
+/// And closed. Closing the main window while a compose or Settings window is open leaves the
+/// app running with no main window, and this used to return without a word: the tray, the
+/// Start menu and every toast then did nothing until the app was quit (M30, 2026-11-14 audit).
+/// Now it is made again. On a task rather than here, because building a window from the main
+/// thread's own event handlers deadlocks on Windows, and the tray's handlers are those.
 pub fn show(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = super::reopen_main(&app) {
+                tracing::warn!(%error, "could not bring the main window back");
+            }
+        });
         return;
     };
 
     let _ = window.show();
     let _ = window.unminimize();
     let _ = window.set_focus();
+}
+
+/// Whether a refresh is already waiting, so a burst of events costs one.
+static REFRESH_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long a burst is given to finish. A backfill announces every 500 messages it writes.
+const REFRESH_SETTLE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Refreshes the count shortly, once for however many changes arrive meanwhile.
+pub fn refresh_soon(app: &AppHandle) {
+    if REFRESH_WAITING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REFRESH_SETTLE).await;
+
+        // Cleared before counting, not after: a change landing while the count is read must
+        // be able to ask for another.
+        REFRESH_WAITING.store(false, Ordering::Release);
+        refresh(&app).await;
+    });
 }
 
 async fn compose_from_tray(app: &AppHandle) -> Result<(), String> {
@@ -199,7 +234,7 @@ pub async fn repaint(app: &AppHandle) {
 /// Recomputes the count and updates the tray tooltip and the taskbar badge.
 ///
 /// Both from one number, so they cannot disagree. Cheap when nothing changed, which matters:
-/// this runs on every `mailbox:changed`, and a sync raises a lot of those.
+/// this runs after every change to the mail, and a sync raises a lot of those.
 pub async fn refresh(app: &AppHandle) {
     let db = app.state::<Db>();
 
@@ -210,6 +245,7 @@ pub async fn refresh(app: &AppHandle) {
     if SHOWN.swap(count, Ordering::Relaxed) == count {
         return;
     }
+    tracing::debug!(count, "unread badge updated");
 
     if let Some(window) = app.get_webview_window("main") {
         crate::platform::badge::refresh(&window, count);

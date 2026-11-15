@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useAccounts } from '@/app/queries'
 import { Field, Form } from '@/features/settings/SettingsForm'
 import type { NotifyPrefs } from '@/lib/generated/NotifyPrefs'
+import { reasonFor } from '@/lib/ipc'
 import { notifyPrefs, runAtLogin, setNotifyPrefs, setRunAtLogin } from '@/lib/platform'
 
 import styles from '@/features/settings/settings.module.css'
@@ -24,6 +25,9 @@ export function NotificationSettings() {
   const { data: accounts = [] } = useAccounts()
   const [prefs, setPrefs] = useState<Record<number, NotifyPrefs>>({})
   const [startup, setStartup] = useState<boolean | null>(null)
+  // Why the last change did not take. Windows keeps two states the app may not override: a
+  // startup entry the user turned off in Settings, and one a policy controls (M31).
+  const [startupError, setStartupError] = useState<string | null>(null)
 
   useEffect(() => {
     let live = true
@@ -146,11 +150,24 @@ export function NotificationSettings() {
               disabled={startup === null}
               onChange={(event) => {
                 setStartup(event.target.checked)
-                void setRunAtLogin(event.target.checked).then(runAtLogin).then(setStartup)
+                setStartupError(null)
+                // Read back either way, so the box shows what Windows will actually do. A refusal
+                // used to be an unhandled rejection and left the box showing the change.
+                void setRunAtLogin(event.target.checked)
+                  .catch((cause: unknown) => {
+                    setStartupError(reasonFor(cause))
+                  })
+                  .then(runAtLogin)
+                  .then(setStartup)
               }}
             />
             Start Halcyon when I sign in
           </label>
+          {startupError !== null && (
+            <p className={styles.hint} role="alert">
+              {startupError}
+            </p>
+          )}
         </Field>
       </Form>
     </section>

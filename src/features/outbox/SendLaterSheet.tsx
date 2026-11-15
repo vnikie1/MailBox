@@ -83,7 +83,12 @@ export function SendLaterSheet({ open, onOpenChange, onChoose }: SendLaterSheetP
           setTime(event.target.value)
           setProblem(null)
         }}
-        {...(problem === null ? {} : { invalid: true, hint: problem })}
+        // `description`, which is what the field has. This passed the refusal as `hint`, which
+        // it does not, so the field went red and never said why (L22, 2026-11-14 audit). Room
+        // for the line is kept while it is empty, so it does not push the sheet's buttons down
+        // when it appears. Standing rule 6.
+        invalid={problem !== null}
+        description={problem ?? ' '}
       />
     </Sheet>
   )

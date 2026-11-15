@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 import { RecipientField } from '@/features/compose/RecipientField'
-import { redirectMessage } from '@/lib/ipc'
+import { reasonFor, redirectMessage } from '@/lib/ipc'
 import { Button, Sheet, useToast, type Token } from '@/ui'
 
 import styles from './RedirectSheet.module.css'
@@ -69,7 +69,7 @@ export function RedirectSheet({ open, onOpenChange, messageId, subject }: Redire
         // something the user can act on; "redirect failed" is not.
         toast.show({
           title: 'The message was not redirected',
-          description: error instanceof Error ? error.message : String(error),
+          description: reasonFor(error),
         })
       })
       .finally(() => {

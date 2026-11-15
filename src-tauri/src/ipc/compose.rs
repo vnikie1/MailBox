@@ -16,6 +16,7 @@ use ts_rs::TS;
 use crate::db::Db;
 use crate::mail::outgoing::{self, Draft};
 use crate::mail::reply;
+use crate::sync::drafts;
 use crate::sync::envelope::Address;
 use crate::sync::outbox;
 use crate::sync::sender::Sender;
@@ -219,7 +220,43 @@ pub async fn compose_redirect(
     let _ = tauri::Emitter::emit(&app, "outbox:changed", ());
     sender.poke();
 
+    // Held like any other send, and said so. A redirect showed no Undo banner, because only the
+    // ordinary send told the main window it was holding a message, and it left when the sender
+    // next looked rather than when its hold ran out: up to thirty seconds late (L10).
+    let hold = hold_seconds(db.inner()).await;
+    held(&app, sender.inner().clone(), id, account_id, hold);
+
     Ok(id)
+}
+
+/// Tells the main window a message is being held for Undo Send, and wakes the sender when the hold
+/// runs out.
+///
+/// The compose window is a different window from the one with the banner, so without the event
+/// the Undo Send banner appeared only once the hold was over, which is the whole of the time it
+/// exists for. And without the wake the message left at the sender's next idle tick, up to
+/// thirty seconds after its hold: Undo Send's timer should decide when it goes.
+fn held(
+    events: &dyn crate::sync::events::Events,
+    sender: crate::sync::sender::Sender,
+    id: i64,
+    account_id: i64,
+    hold: i64,
+) {
+    events.emit(
+        "outbox:progress",
+        crate::sync::events::payload(&crate::sync::sender::Progress {
+            id,
+            account_id,
+            state: "holding".to_string(),
+            error: None,
+        }),
+    );
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(hold.max(0) as u64)).await;
+        sender.poke();
+    });
 }
 
 /// The current moment as RFC 5322 asks for it.
@@ -354,12 +391,20 @@ fn attach_original(
     )?;
 
     let name = attachment_name(subject);
-    let path = std::env::temp_dir().join(format!("halcyon-fwd-{message_id}-{name}"));
 
-    std::fs::write(&path, &bytes).map_err(|error| AppError {
-        code: "write-failed".into(),
-        message: format!("The message could not be prepared for forwarding: {error}"),
-    })?;
+    // In a folder of its own, so the *file* can carry the clean name. `compose_send` names an
+    // attachment after its file, and this used to write `halcyon-fwd-<id>-<subject>.eml`
+    // straight into the temp folder — which is the name recipients saw (L6, 2026-11-14 audit).
+    // The folder keeps two forwards of messages with the same subject apart.
+    let folder = std::env::temp_dir().join(format!("halcyon-fwd-{message_id}"));
+    let path = folder.join(&name);
+
+    std::fs::create_dir_all(&folder)
+        .and_then(|()| std::fs::write(&path, &bytes))
+        .map_err(|error| AppError {
+            code: "write-failed".into(),
+            message: format!("The message could not be prepared for forwarding: {error}"),
+        })?;
 
     Ok(PickedFile {
         path: path.to_string_lossy().to_string(),
@@ -430,6 +475,7 @@ pub async fn compose_send(
     db: State<'_, Db>,
     sender: State<'_, Sender>,
     message: OutgoingMessage,
+    draft_message_id: Option<String>,
 ) -> Result<i64, AppError> {
     let account = db
         .read({
@@ -537,31 +583,24 @@ pub async fn compose_send(
     )
     .await?;
 
-    // Told to the main window immediately, not when the sender picks it up. The compose window
-    // is a *different* window, so without this the Undo Send banner would not appear until the
-    // hold had already expired — which is the entire period it exists to cover.
-    {
-        use crate::sync::events::{payload, Events};
-        let events: &dyn Events = &app;
-        events.emit(
-            "outbox:progress",
-            payload(&crate::sync::sender::Progress {
-                id,
-                account_id: message.account_id,
-                state: "holding".to_string(),
-                error: None,
-            }),
-        );
+    // The draft this message was written as, so the sender lets it go once the message has gone
+    // — not now: Undo Send deletes the outbox copy, and the draft is then all that is left of it.
+    // Nothing let it go before, so a sent message stayed in Drafts everywhere (H4).
+    if let Some(draft) = draft_message_id.filter(|id| !drafts::bare(id).is_empty()) {
+        db.write(move |tx| {
+            tx.execute(
+                "UPDATE outbox SET draft_message_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, drafts::bracketed(&draft)],
+            )?;
+            Ok(())
+        })
+        .await?;
     }
 
-    // Wake the sender when the hold expires, rather than leaving it to the idle tick. Undo
-    // Send's timer should decide when a message goes, not a polling interval.
-    let sender = sender.inner().clone();
+    // Told to the main window now, not when the sender picks it up, and the sender woken when
+    // the hold runs out. See `held`.
     let hold = hold_seconds(db.inner()).await;
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(hold.max(0) as u64)).await;
-        sender.poke();
-    });
+    held(&app, sender.inner().clone(), id, message.account_id, hold);
 
     Ok(id)
 }
@@ -652,16 +691,6 @@ pub async fn compose_open(
     kind: Option<String>,
     mailto: Option<crate::platform::links::MailtoRequest>,
 ) -> Result<String, AppError> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder};
-
-    // Monotonic per process. A label that collided would return the existing window instead of
-    // opening a second draft, which is a confusing way to lose what someone just typed.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let label = format!(
-        "compose-{}",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    );
-
     let mut url = String::from("index.html?compose=1");
     if let Some(id) = message_id {
         url.push_str(&format!("&message={id}"));
@@ -689,6 +718,21 @@ pub async fn compose_open(
         }
     }
 
+    open_compose_window(&app, url)
+}
+
+/// Opens a compose window on `url`, and returns its label.
+fn open_compose_window(app: &tauri::AppHandle, url: String) -> Result<String, AppError> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Monotonic per process. A label that collided would return the existing window instead of
+    // opening a second draft, which is a confusing way to lose what someone just typed.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let label = format!(
+        "compose-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+
     // Tauri's native drag-and-drop handler stays ON for compose windows, and that is deliberate
     // — the opposite of the main window, which turns it off in tauri.conf.json.
     //
@@ -699,7 +743,7 @@ pub async fn compose_open(
     // `File` from an HTML5 drop has no path at all. So: do not call
     // `.disable_drag_drop_handler()` here. `ComposeWindow` listens for the drop through
     // `ipc.onFileDrop`.
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+    WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
         .title("New Message")
         // docs/01 §6 — 700x560 default, and the size is remembered by the window-state plugin.
         .inner_size(700.0, 560.0)
@@ -759,10 +803,29 @@ pub async fn outbox_retry(
 /// evening where the user is, and the core has no business guessing at a timezone the window
 /// already knows.
 #[tauri::command]
-pub async fn outbox_schedule(db: State<'_, Db>, id: i64, send_at: i64) -> Result<bool, AppError> {
-    Ok(db
+pub async fn outbox_schedule(
+    db: State<'_, Db>,
+    sender: State<'_, Sender>,
+    id: i64,
+    send_at: i64,
+) -> Result<bool, AppError> {
+    let moved = db
         .write(move |tx| outbox::reschedule(tx, id, send_at))
-        .await?)
+        .await?;
+
+    // Woken when the new time comes, if it is soon — as `compose_send` does for the first hold.
+    // Send Later's Cancel puts a paused hold back a few seconds out, and without this the message
+    // waited for the sender's next idle tick, up to thirty seconds after the countdown said zero.
+    let wait = send_at - now_seconds();
+    if moved && wait <= 60 * 60 {
+        let sender = sender.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(wait.max(0) as u64)).await;
+            sender.poke();
+        });
+    }
+
+    Ok(moved)
 }
 
 /// Guesses a content type from a filename.
@@ -1005,6 +1068,12 @@ fn escape(value: &str) -> String {
 /// headers — who it was from, when, to whom, what it was about — because the recipient of a
 /// forward was never part of the conversation and needs all four.
 fn quoted_block(source: &crate::db::query::ReplySource, kind: reply::Kind) -> String {
+    // The original travels as the attachment, and that is all. It used to fall through to the
+    // reply quote below as well, so the recipient got the message twice (L6, 2026-11-14 audit).
+    if kind == reply::Kind::ForwardAsAttachment {
+        return "<p><br></p>".to_string();
+    }
+
     let when = attribution_date(source.envelope.date_sent);
     let sender = source.envelope.from.first();
 
@@ -1133,12 +1202,25 @@ fn now_seconds() -> i64 {
 /// thirty seconds while someone is typing; if it waited for a round trip, writing a message
 /// would become a stream of network stalls, and a draft written with no connection would be no
 /// draft at all. The server copy goes through `pending_op`, which already knows how to carry an
-/// intent across a lost connection.
+/// intent across a lost connection — and is pushed now rather than at the next sync, so the
+/// draft is in the Drafts mailbox, where it can be reopened, within seconds.
 ///
 /// `message_id` is stable across saves. It is what lets the tenth save recognise the ninth as
 /// the same draft, both here and on the server.
+///
+/// What changed, and why (2026-11-14 audit):
+///
+/// * **Every draft is filed on the server**, recipients or not, and with its attachments and
+///   Bcc. A draft with nobody in To was kept only as a local row nothing read, so Save as Draft
+///   lost it, and no draft ever kept a file (C3). See `outgoing::build_draft`.
+/// * **A draft moved to another account starts again.** Changing From kept the identity, so
+///   the old account's copy was orphaned and the next save named its UID in the *new*
+///   account's Drafts — deleting whatever unrelated draft held that number there (H6).
+/// * **A new draft's identity is random**, not `draft-<seconds>`, which two windows saving in
+///   the same second shared (L7).
 #[tauri::command]
 pub async fn compose_save_draft(
+    app: tauri::AppHandle,
     db: State<'_, Db>,
     message: OutgoingMessage,
     message_id: Option<String>,
@@ -1154,19 +1236,69 @@ pub async fn compose_save_draft(
             message: "That account no longer exists.".into(),
         })?;
 
+    let account_id = message.account_id;
+    let root = db.folder().to_path_buf();
+
+    // A draft that has changed account is let go of where it was, and starts again here.
+    let message_id = match message_id.filter(|id| !drafts::bare(id).is_empty()) {
+        Some(id) => {
+            let keyed = drafts::bracketed(&id);
+            let lookup = keyed.clone();
+            let owner: Option<i64> = db
+                .read(move |conn| {
+                    Ok(conn
+                        .query_row(
+                            "SELECT account_id FROM draft WHERE message_id = ?1",
+                            rusqlite::params![lookup],
+                            |row| row.get(0),
+                        )
+                        .ok())
+                })
+                .await?;
+
+            if owner.is_some_and(|owner| owner != account_id) {
+                let root = root.clone();
+                let files = db.write(move |tx| drafts::discard(tx, &root, &id)).await?;
+                for file in files {
+                    let _ = std::fs::remove_file(file);
+                }
+                None
+            } else {
+                Some(keyed)
+            }
+        }
+        None => None,
+    };
+
     let from = Address {
         name: Some(account.display_name.clone()),
         email: account.email.clone(),
     };
 
-    // A draft with no recipients is the normal case — people type the body first. The builder
-    // refuses those, so bytes are only produced once there is somewhere to send it; until then
-    // the draft lives locally and is restored from the columns below.
-    let has_recipients =
-        !message.to.is_empty() || !message.cc.is_empty() || !message.bcc.is_empty();
+    // The files themselves, so the server copy carries them and a draft reopened on another
+    // machine has them. A file that has gone since it was attached is left out of this save
+    // rather than failing it: the user is typing, and a save is not the moment to stop them.
+    let mut files = Vec::with_capacity(message.attachments.len());
+    for path in &message.attachments {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                let filename = std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "attachment".to_string());
+                files.push(crate::mail::outgoing::Attachment {
+                    mime: mime_for(&filename),
+                    filename,
+                    bytes,
+                    content_id: None,
+                });
+            }
+            Err(error) => tracing::debug!(%error, "draft: an attachment could not be read"),
+        }
+    }
 
     let draft = Draft {
-        from,
+        from: from.clone(),
         to: message.to.iter().map(Address::from).collect(),
         cc: message.cc.iter().map(Address::from).collect(),
         bcc: message.bcc.iter().map(Address::from).collect(),
@@ -1175,29 +1307,27 @@ pub async fn compose_save_draft(
         text: message.text.clone(),
         references: message.references.clone(),
         in_reply_to: message.in_reply_to.clone(),
-        attachments: Vec::new(),
+        attachments: files,
         message_id: message_id.clone(),
     };
 
-    let built = if has_recipients {
-        outgoing::build(&draft).ok()
-    } else {
-        None
-    };
+    // Fails only on an address that cannot be written into a header — one still being typed. The
+    // draft is kept here regardless, and filed on the server by the next save that builds.
+    let built = outgoing::build_draft(&draft).ok();
 
     let identity = built
         .as_ref()
         .map(|b| b.message_id.clone())
         .or(message_id)
-        .unwrap_or_else(|| format!("<draft-{}@halcyon.invalid>", now_seconds()));
-
-    let account_id = message.account_id;
+        .unwrap_or_else(|| outgoing::new_message_id(&from));
 
     let stored = {
         let identity = identity.clone();
         let to = serde_json::to_string(&message.to).unwrap_or_else(|_| "[]".into());
         let cc = serde_json::to_string(&message.cc).unwrap_or_else(|_| "[]".into());
         let bcc = serde_json::to_string(&message.bcc).unwrap_or_else(|_| "[]".into());
+        let attachments =
+            serde_json::to_string(&message.attachments).unwrap_or_else(|_| "[]".into());
         let subject = message.subject.clone();
         let html = message.html.clone();
         let text = message.text.clone().unwrap_or_default();
@@ -1208,8 +1338,8 @@ pub async fn compose_save_draft(
             tx.execute(
                 "INSERT INTO draft (
                      account_id, message_id, to_json, cc_json, bcc_json,
-                     subject, html, text, in_reply_to, references_, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     subject, html, text, in_reply_to, references_, updated_at, attachments_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(message_id) DO UPDATE SET
                      to_json = excluded.to_json,
                      cc_json = excluded.cc_json,
@@ -1219,7 +1349,8 @@ pub async fn compose_save_draft(
                      text = excluded.text,
                      in_reply_to = excluded.in_reply_to,
                      references_ = excluded.references_,
-                     updated_at = excluded.updated_at",
+                     updated_at = excluded.updated_at,
+                     attachments_json = excluded.attachments_json",
                 rusqlite::params![
                     account_id,
                     identity,
@@ -1231,7 +1362,8 @@ pub async fn compose_save_draft(
                     text,
                     in_reply_to,
                     references,
-                    now_seconds()
+                    now_seconds(),
+                    attachments
                 ],
             )?;
 
@@ -1246,65 +1378,42 @@ pub async fn compose_save_draft(
         .await?
     };
 
-    // The server copy, queued. Only once the message can actually be built: a draft with no
-    // recipients has no valid MIME to append.
+    // The server copy, queued. `replaces` is left for the drain to read from the row when the
+    // append actually runs — see `ops::drain`.
     if let Some(built) = built {
-        let root = crate::db::default_path()
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-
-        let path = root.join("drafts").join(format!("{stored}.eml"));
+        let path = drafts::eml_path(&root, stored);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
         if std::fs::write(&path, &built.bytes).is_ok() {
-            let mailbox = db
-                .read(move |conn| {
-                    Ok(conn
-                        .query_row(
-                            "SELECT remote_path FROM mailbox
-                              WHERE account_id = ?1 AND role = 'drafts'",
-                            rusqlite::params![account_id],
-                            |row| row.get::<_, String>(0),
-                        )
-                        .ok())
-                })
-                .await?
-                .unwrap_or_else(|| "Drafts".to_string());
-
-            let replaces: Option<u32> = db
-                .read(move |conn| {
-                    Ok(conn
-                        .query_row(
-                            "SELECT remote_uid FROM draft WHERE id = ?1",
-                            rusqlite::params![stored],
-                            |row| row.get::<_, Option<i64>>(0),
-                        )
-                        .ok()
-                        .flatten()
-                        .map(|uid| uid as u32))
-                })
-                .await?;
-
             let eml_path = path.to_string_lossy().to_string();
-            // The draft's stable identity, so the drain can tell our own copy on the server
-            // from one another device wrote.
             let message_id_for_op = built.message_id.clone();
+
             db.write(move |tx| {
+                let mailbox = tx
+                    .query_row(
+                        "SELECT remote_path FROM mailbox
+                          WHERE account_id = ?1 AND role = 'drafts'",
+                        rusqlite::params![account_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap_or_else(|_| "Drafts".to_string());
+
                 crate::sync::ops::enqueue(
                     tx,
                     account_id,
                     &crate::sync::ops::Op::AppendDraft {
                         mailbox,
                         eml_path,
-                        replaces,
+                        replaces: None,
                         message_id: message_id_for_op,
                     },
                 )
             })
             .await?;
+
+            super::sync::push_soon(&app);
         }
     }
 
@@ -1341,16 +1450,330 @@ pub async fn compose_save_draft(
     })
 }
 
-/// Removes a draft once its message has been sent or thrown away.
+/// Throws a draft away: Delete in the compose window's close sheet.
+///
+/// Everywhere, not only here — see `sync::drafts::discard`. It removed only the local row, and
+/// nothing called it (H4, 2026-11-14 audit).
 #[tauri::command]
-pub async fn compose_discard_draft(db: State<'_, Db>, id: i64) -> Result<(), AppError> {
-    db.write(move |tx| {
-        tx.execute("DELETE FROM draft WHERE id = ?1", rusqlite::params![id])?;
-        Ok(())
-    })
-    .await?;
+pub async fn compose_discard_draft(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    message_id: String,
+) -> Result<(), AppError> {
+    let root = db.folder().to_path_buf();
+    let files = db
+        .write(move |tx| drafts::discard(tx, &root, &message_id))
+        .await?;
 
+    for file in files {
+        let _ = std::fs::remove_file(file);
+    }
+
+    super::sync::push_soon(&app);
+    let _ = tauri::Emitter::emit(&app, "mailbox:changed", ());
     Ok(())
+}
+
+/// A draft, as a compose window opens with it.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedDraft {
+    #[ts(type = "number")]
+    pub account_id: i64,
+    /// The draft's identity. The window saves under it, so each save replaces this draft rather
+    /// than starting another beside it.
+    pub message_id: String,
+    pub to: Vec<ComposeAddress>,
+    pub cc: Vec<ComposeAddress>,
+    pub bcc: Vec<ComposeAddress>,
+    pub subject: String,
+    pub html: String,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub attachments: Vec<PickedFile>,
+}
+
+/// Opens a compose window on a draft in a Drafts mailbox. Edit Draft.
+///
+/// Drafts could be saved and never opened again, anywhere in the app (C3, 2026-11-14 audit).
+#[tauri::command]
+pub async fn compose_open_draft(
+    app: tauri::AppHandle,
+    message_id: i64,
+) -> Result<String, AppError> {
+    open_compose_window(&app, format!("index.html?compose=1&draft={message_id}"))
+}
+
+/// What the compose window opened by [`compose_open_draft`] starts with.
+///
+/// This machine's own copy when it has one — it is the newest, and it knows where the attached
+/// files are. Otherwise the message itself, downloaded if need be: a draft written on another
+/// device, or saved here before drafts were kept. Either way the draft is remembered here with
+/// the UID of the server copy it came from, so the first save *replaces* that copy instead of
+/// filing a second one beside it.
+#[tauri::command]
+pub async fn compose_load_draft(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    message_id: i64,
+) -> Result<LoadedDraft, AppError> {
+    type Row = (i64, Option<String>, i64, Option<String>);
+
+    let row: Row = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT message.account_id, message.message_id, message.uid, mailbox.role
+                       FROM message JOIN mailbox ON mailbox.id = message.mailbox_id
+                      WHERE message.id = ?1",
+                    rusqlite::params![message_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .ok())
+        })
+        .await?
+        .ok_or_else(|| AppError {
+            code: "no-message".into(),
+            message: "That draft is no longer in the mailbox.".into(),
+        })?;
+
+    let (account_id, header_id, uid, role) = row;
+    let identity = header_id
+        .filter(|id| !drafts::bare(id).is_empty())
+        .map(|id| drafts::bracketed(&id));
+
+    if let Some(identity) = identity.clone() {
+        let local = db
+            .read(move |conn| Ok(local_draft(conn, &identity)))
+            .await?;
+        if let Some(local) = local {
+            return Ok(local);
+        }
+    }
+
+    // The source, downloaded first if it has not been. A draft is opened to be edited, and the
+    // only alternative to fetching it is refusing.
+    let mut raw_path = db
+        .read(move |conn| Ok(recorded_source(conn, message_id)))
+        .await?;
+    if raw_path.is_none() {
+        if let Err(error) =
+            crate::sync::engine::fetch_body(&app, db.inner(), account_id, vec![message_id]).await
+        {
+            tracing::warn!(%error, "draft: its source could not be downloaded");
+        }
+        raw_path = db
+            .read(move |conn| Ok(recorded_source(conn, message_id)))
+            .await?;
+    }
+
+    let raw = read_source(
+        raw_path.as_deref(),
+        "This draft has not been downloaded yet. Try again once the account is back online.",
+    )?;
+
+    let folder = std::env::temp_dir().join(format!("halcyon-fwd-draft-{message_id}"));
+    let loaded = draft_from_source(&raw, account_id, identity, &folder)?;
+
+    // Remembered as a draft, with the server copy it came from, so the next save replaces it.
+    {
+        let loaded = loaded.clone();
+        let remote_uid = (role.as_deref() == Some("drafts") && uid > 0).then_some(uid);
+        db.write(move |tx| {
+            let attachments: Vec<&str> =
+                loaded.attachments.iter().map(|f| f.path.as_str()).collect();
+            tx.execute(
+                "INSERT INTO draft (
+                     account_id, message_id, remote_uid, to_json, cc_json, bcc_json, subject,
+                     html, in_reply_to, references_, updated_at, attachments_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(message_id) DO NOTHING",
+                rusqlite::params![
+                    loaded.account_id,
+                    loaded.message_id,
+                    remote_uid,
+                    serde_json::to_string(&loaded.to).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&loaded.cc).unwrap_or_else(|_| "[]".into()),
+                    serde_json::to_string(&loaded.bcc).unwrap_or_else(|_| "[]".into()),
+                    loaded.subject,
+                    loaded.html,
+                    loaded.in_reply_to,
+                    loaded.references.join(" "),
+                    now_seconds(),
+                    serde_json::to_string(&attachments).unwrap_or_else(|_| "[]".into()),
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+    }
+
+    Ok(loaded)
+}
+
+/// This machine's copy of a draft, if it has one.
+fn local_draft(conn: &rusqlite::Connection, identity: &str) -> Option<LoadedDraft> {
+    type Stored = (
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    );
+
+    let row: Stored = conn
+        .query_row(
+            "SELECT account_id, to_json, cc_json, bcc_json, subject, html, in_reply_to,
+                    references_, attachments_json
+               FROM draft WHERE message_id = ?1",
+            rusqlite::params![identity],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .ok()?;
+
+    let (account_id, to, cc, bcc, subject, html, in_reply_to, references, attachments) = row;
+    let addresses =
+        |json: &str| serde_json::from_str::<Vec<ComposeAddress>>(json).unwrap_or_default();
+    let paths = serde_json::from_str::<Vec<String>>(&attachments).unwrap_or_default();
+
+    Some(LoadedDraft {
+        account_id,
+        message_id: identity.to_string(),
+        to: addresses(&to),
+        cc: addresses(&cc),
+        bcc: addresses(&bcc),
+        subject,
+        html,
+        in_reply_to,
+        references: references
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        // Files moved or deleted since are left off rather than failing the open.
+        attachments: paths
+            .iter()
+            .filter_map(|path| describe_file(std::path::Path::new(path)).ok())
+            .collect(),
+    })
+}
+
+/// A draft read from its source: recipients, Bcc included, the body, threading, and its files
+/// written out to `folder` so they can be attached again.
+fn draft_from_source(
+    raw: &[u8],
+    account_id: i64,
+    identity: Option<String>,
+    folder: &std::path::Path,
+) -> Result<LoadedDraft, AppError> {
+    use mailparse::MailHeaderMap;
+
+    let unreadable = || AppError {
+        code: "unreadable".into(),
+        message: "This draft could not be read.".into(),
+    };
+
+    let parsed = crate::mail::mime::parse(raw).map_err(|_| unreadable())?;
+    let envelope = crate::sync::envelope::from_headers(&parsed.headers);
+
+    let mut html: Option<String> = None;
+    let mut text: Option<String> = None;
+    let mut files: Vec<PickedFile> = Vec::new();
+
+    let mut pending = vec![&parsed];
+    while let Some(part) = pending.pop() {
+        if !part.subparts.is_empty() {
+            // Reversed so the parts are visited in the order they were written.
+            pending.extend(part.subparts.iter().rev());
+            continue;
+        }
+
+        let disposition = part.get_content_disposition();
+        let filename = disposition
+            .params
+            .get("filename")
+            .or_else(|| part.ctype.params.get("name"))
+            .cloned();
+        let mime = part.ctype.mimetype.to_ascii_lowercase();
+
+        if let Some(name) = filename {
+            let Ok(bytes) = part.get_body_raw() else {
+                continue;
+            };
+            let name = crate::platform::files::safe_file_name(&name);
+            let path = folder.join(&name);
+
+            if std::fs::create_dir_all(folder)
+                .and_then(|()| std::fs::write(&path, &bytes))
+                .is_ok()
+            {
+                files.push(PickedFile {
+                    path: path.to_string_lossy().to_string(),
+                    filename: name,
+                    size: bytes.len() as i64,
+                });
+            }
+            continue;
+        }
+
+        match mime.as_str() {
+            "text/html" if html.is_none() => html = part.get_body().ok(),
+            "text/plain" if text.is_none() => text = part.get_body().ok(),
+            _ => {}
+        }
+    }
+
+    // Sanitised like anything else read from a mailbox: a draft from another device is markup
+    // nobody here has looked at, and it is about to be edited and sent under the user's name.
+    let html = match (html, text) {
+        (Some(html), _) => crate::mail::render::sanitise_for_enumeration(&html),
+        (None, Some(text)) => text
+            .replace("\r\n", "\n")
+            .split("\n\n")
+            .map(|paragraph| format!("<p>{}</p>", escape(paragraph).replace('\n', "<br>")))
+            .collect(),
+        (None, None) => String::new(),
+    };
+
+    let identity = identity
+        .or_else(|| envelope.message_id.as_deref().map(drafts::bracketed))
+        .ok_or_else(unreadable)?;
+
+    let references = parsed
+        .headers
+        .get_first_value("References")
+        .map(|value| crate::sync::envelope::parse_references(&value))
+        .unwrap_or_default();
+
+    Ok(LoadedDraft {
+        account_id,
+        message_id: identity,
+        to: envelope.to.iter().map(ComposeAddress::from).collect(),
+        cc: envelope.cc.iter().map(ComposeAddress::from).collect(),
+        bcc: envelope.bcc.iter().map(ComposeAddress::from).collect(),
+        subject: envelope.subject,
+        html,
+        in_reply_to: envelope.in_reply_to,
+        references,
+        attachments: files,
+    })
 }
 
 /// One suggested recipient.
@@ -1473,6 +1896,35 @@ mod describe_tests {
 }
 
 #[cfg(test)]
+mod held_tests {
+    use super::*;
+
+    struct Recorder(std::sync::Mutex<Vec<(String, serde_json::Value)>>);
+
+    impl crate::sync::events::Events for Recorder {
+        fn emit(&self, event: &str, payload: serde_json::Value) {
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push((event.to_string(), payload));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_held_message_is_announced_to_the_main_window() {
+        // The redirect's half of Undo Send was missing: no banner (L10).
+        let recorder = Recorder(std::sync::Mutex::new(Vec::new()));
+
+        held(&recorder, crate::sync::sender::Sender::new(), 7, 2, 0);
+
+        let seen = recorder.0.lock().expect("lock");
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "outbox:progress");
+        assert_eq!(seen[0].1["id"], 7);
+        assert_eq!(seen[0].1["state"], "holding");
+    }
+}
+
+#[cfg(test)]
 mod source_tests {
     use super::*;
 
@@ -1544,5 +1996,172 @@ mod source_tests {
         assert_eq!(std::fs::read(&attached.path).expect("copy"), SOURCE);
 
         let _ = std::fs::remove_file(&attached.path);
+    }
+
+    /// L6 in the 2026-11-14 audit. `compose_send` names an attachment after its file, and the
+    /// copy was written as `halcyon-fwd-<id>-<subject>.eml`, so that is what recipients saw —
+    /// the app's name and an internal id, in the name of a file in someone else's inbox.
+    #[test]
+    fn a_forwarded_message_reaches_the_recipient_named_after_its_subject() {
+        const SOURCE: &[u8] = b"Subject: Hi\r\n\r\nbody";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = crate::sync::bodies::write_cache(dir.path(), 1, 7, SOURCE).expect("write");
+        let path = source.to_string_lossy().to_string();
+
+        let attached = attach_original(Some(&path), 7, "Quarterly figures").expect("attached");
+
+        let on_disk = std::path::Path::new(&attached.path)
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string());
+        assert_eq!(on_disk.as_deref(), Some("Quarterly figures.eml"));
+        assert_eq!(attached.filename, "Quarterly figures.eml");
+
+        let _ =
+            std::fs::remove_dir_all(std::path::Path::new(&attached.path).parent().expect("dir"));
+    }
+
+    /// L6 again: Forward as Attachment fell through to the reply quote, so the original went
+    /// twice — as the attachment, and quoted in full in the body above it.
+    #[test]
+    fn forward_as_attachment_does_not_also_quote_the_original() {
+        let source = crate::db::query::ReplySource {
+            account_id: 1,
+            envelope: crate::sync::envelope::Envelope {
+                subject: "Quarterly figures".into(),
+                ..Default::default()
+            },
+            references: Vec::new(),
+            quoted_html: "<p>THE ORIGINAL BODY</p>".into(),
+        };
+
+        let body = quoted_block(&source, reply::Kind::ForwardAsAttachment);
+        assert!(!body.contains("THE ORIGINAL BODY"), "{body}");
+
+        // The ordinary kinds still quote it.
+        assert!(quoted_block(&source, reply::Kind::Forward).contains("THE ORIGINAL BODY"));
+        assert!(quoted_block(&source, reply::Kind::Reply).contains("THE ORIGINAL BODY"));
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+
+    fn address(name: Option<&str>, email: &str) -> Address {
+        Address {
+            name: name.map(str::to_string),
+            email: email.to_string(),
+        }
+    }
+
+    /// C3 in the 2026-11-14 audit: a saved draft could not be opened again anywhere. What it is
+    /// opened from, when this machine has no copy of its own, is its source — so everything the
+    /// draft held has to come back out of it: recipients, the blind ones too, the body, the
+    /// threading and the files.
+    #[test]
+    fn a_draft_reopens_with_everything_it_was_saved_with() {
+        let draft = Draft {
+            from: address(Some("Me"), "me@halcyon.test"),
+            to: vec![address(Some("Ada Lovelace"), "ada@example.test")],
+            cc: vec![address(None, "grace@example.test")],
+            bcc: vec![address(None, "secret@example.test")],
+            subject: "Quarterly figures".into(),
+            html: "<p>The numbers are <b>attached</b>.</p>".into(),
+            text: None,
+            references: vec!["<root@example.test>".into(), "<parent@example.test>".into()],
+            in_reply_to: Some("<parent@example.test>".into()),
+            attachments: vec![crate::mail::outgoing::Attachment {
+                filename: "figures.csv".into(),
+                mime: "text/csv".into(),
+                bytes: b"q1,q2\r\n10,20\r\n".to_vec(),
+                content_id: None,
+            }],
+            message_id: Some("<draft-1@halcyon.test>".into()),
+        };
+
+        let built = crate::mail::outgoing::build_draft(&draft).expect("built");
+        let folder = tempfile::tempdir().expect("folder");
+
+        let loaded = draft_from_source(&built.bytes, 1, None, folder.path()).expect("loaded");
+
+        assert_eq!(loaded.message_id, "<draft-1@halcyon.test>");
+        assert_eq!(loaded.to.len(), 1);
+        assert_eq!(loaded.to[0].email, "ada@example.test");
+        assert_eq!(loaded.to[0].name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(loaded.cc[0].email, "grace@example.test");
+        assert_eq!(loaded.bcc.len(), 1, "the blind copy was lost");
+        assert_eq!(loaded.bcc[0].email, "secret@example.test");
+        assert_eq!(loaded.subject, "Quarterly figures");
+        assert!(loaded.html.contains("attached"), "{}", loaded.html);
+        assert_eq!(loaded.in_reply_to.as_deref(), Some("parent@example.test"));
+        assert_eq!(loaded.references.len(), 2);
+
+        assert_eq!(loaded.attachments.len(), 1, "the file was lost");
+        let file = &loaded.attachments[0];
+        assert_eq!(file.filename, "figures.csv");
+        assert_eq!(
+            std::fs::read(&file.path).expect("written"),
+            b"q1,q2\r\n10,20\r\n"
+        );
+    }
+
+    #[test]
+    fn a_draft_written_as_plain_text_reopens_as_paragraphs() {
+        let raw = b"From: me@halcyon.test\r\nMessage-ID: <p@x>\r\nSubject: s\r\n\r\nFirst line\r\n<not a tag>\r\n\r\nSecond";
+        let folder = tempfile::tempdir().expect("folder");
+
+        let loaded = draft_from_source(raw, 1, None, folder.path()).expect("loaded");
+
+        assert_eq!(
+            loaded.html,
+            "<p>First line<br>&lt;not a tag&gt;</p><p>Second</p>"
+        );
+        assert_eq!(loaded.message_id, "<p@x>");
+    }
+
+    #[test]
+    fn this_machines_own_copy_is_preferred_and_keeps_its_files() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+            [],
+        )
+        .expect("account");
+
+        let dir = tempfile::tempdir().expect("dir");
+        let kept = dir.path().join("plan.pdf");
+        std::fs::write(&kept, b"pdf").expect("file");
+        let gone = dir.path().join("moved-away.txt");
+
+        conn.execute(
+            "INSERT INTO draft (account_id, message_id, to_json, bcc_json, subject, html,
+                                references_, attachments_json, updated_at)
+             VALUES (1, '<d@x>', '[{\"name\":null,\"email\":\"ada@example.test\"}]',
+                     '[{\"name\":null,\"email\":\"b@example.test\"}]', 'Plan', '<p>hi</p>',
+                     '<a@x> <b@x>', ?1, 0)",
+            rusqlite::params![serde_json::to_string(&[
+                kept.to_string_lossy(),
+                gone.to_string_lossy()
+            ])
+            .expect("json")],
+        )
+        .expect("draft");
+
+        let loaded = local_draft(&conn, "<d@x>").expect("found");
+
+        assert_eq!(loaded.to[0].email, "ada@example.test");
+        assert_eq!(loaded.bcc[0].email, "b@example.test");
+        assert_eq!(loaded.references, vec!["<a@x>", "<b@x>"]);
+        assert_eq!(
+            loaded
+                .attachments
+                .iter()
+                .map(|f| f.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["plan.pdf"],
+            "a file that has gone is left off rather than failing the open"
+        );
     }
 }

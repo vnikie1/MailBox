@@ -56,6 +56,7 @@ import {
   buildSidebar,
   canOpenMailboxMenu,
   selectionForNode,
+  tabStopRow,
   visibleRows,
   type SidebarNode,
 } from './model'
@@ -93,6 +94,8 @@ interface RowReorder {
 interface SidebarRowProps {
   node: SidebarNode
   selected: boolean
+  /** Holds the tree's one Tab stop. See `tabStopRow`. */
+  tabbable: boolean
   collapsed: boolean
   dropTarget: boolean
   onSelect: (node: SidebarNode) => void
@@ -107,6 +110,7 @@ interface SidebarRowProps {
 function SidebarRow({
   node,
   selected,
+  tabbable,
   collapsed,
   dropTarget,
   onSelect,
@@ -182,8 +186,8 @@ function SidebarRow({
       return
     }
 
-    // docs/01 §14 — Right and Left expand and collapse, matching the message list's
-    // thread expansion and every other tree on both platforms.
+    // docs/01 §14 — Right and Left expand and collapse, as in every other tree on both
+    // platforms.
     if (event.key === 'ArrowRight' && hasChildren && collapsed) {
       event.preventDefault()
       onToggle(node.id)
@@ -202,7 +206,7 @@ function SidebarRow({
       aria-selected={selected}
       {...(hasChildren ? { 'aria-expanded': !collapsed } : {})}
       aria-level={node.depth + 1}
-      tabIndex={selected ? 0 : -1}
+      tabIndex={tabbable ? 0 : -1}
       className={cx(styles.row, selected && styles.selected, dropTarget && styles.dropTarget)}
       // Read by the tree's context menu, which is mounted once around every row rather than
       // once per row and so has only the event target to work out what was clicked.
@@ -414,6 +418,10 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
     [accounts, mailboxes, smart, flagNames, vips, favourites],
   )
   const collapsed = useMemo(() => new Set(collapsedSections), [collapsedSections])
+  const tabStop = useMemo(
+    () => tabStopRow(sections, collapsed, selectedNodeId),
+    [sections, collapsed, selectedNodeId],
+  )
 
   const favouriteRows = useMemo(
     () => sections.find((section) => section.id === 'favourites')?.nodes ?? NONE,
@@ -652,6 +660,7 @@ export function Sidebar({ onOpenSettings, contextMenu }: SidebarProps) {
                       key={node.id}
                       node={node}
                       selected={node.id === selectedNodeId}
+                      tabbable={node.id === tabStop}
                       collapsed={collapsed.has(node.id)}
                       dropTarget={node.id === dropTargetId}
                       onSelect={onSelect}

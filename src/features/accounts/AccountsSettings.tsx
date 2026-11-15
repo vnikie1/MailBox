@@ -6,6 +6,7 @@ import type { OAuthClientStatus } from '@/lib/generated/OAuthClientStatus'
 import {
   accountReauth,
   accountRemove,
+  accountSetPassword,
   accountUpdate,
   accountsReorder,
   oauthClientSet,
@@ -170,6 +171,7 @@ function AccountRow({
   // The browser sign-in takes as long as the user takes, so the button has to say it is busy
   // or it reads as not having worked.
   const [signingIn, setSigningIn] = useState(false)
+  const [changingPassword, setChangingPassword] = useState(false)
   const toast = useToast()
   const accountsChanged = useAccountsChanged()
 
@@ -183,8 +185,18 @@ function AccountRow({
    * move; this one shows an answer that is not true, which is worse.
    */
   const commit = useCallback(() => {
-    if (name.trim() === account.displayName) return
-    accountUpdate(account.id, { displayName: name.trim() })
+    const trimmed = name.trim()
+
+    // A description cleared out is put back, not saved. Saved, it blanked the account's heading
+    // in the sidebar and its entry in From, and nothing asked for a new one (L26, 2026-11-14
+    // audit). The field is how a name is changed, not removed.
+    if (trimmed === '') {
+      setName(account.displayName)
+      return
+    }
+
+    if (trimmed === account.displayName) return
+    accountUpdate(account.id, { displayName: trimmed })
       .then(() => {
         accountsChanged()
       })
@@ -294,9 +306,107 @@ function AccountRow({
               {signingIn ? 'Signing in…' : 'Sign in again'}
             </Button>
           )}
+
+          {/* The password counterpart, which did not exist: the refusal banner said "update it in
+              its settings", and there was no setting, so a password changed at the provider
+              could not be fixed short of removing the account (H16, 2026-11-14 audit). */}
+          {account.authKind === 'password' && (
+            <Button
+              variant="plain"
+              className={account.hasCredential ? styles.signIn : styles.reauth}
+              onClick={() => {
+                setChangingPassword(true)
+              }}
+            >
+              {!account.hasCredential && (
+                <AlertTriangle className={styles.reauthIcon} aria-hidden />
+              )}
+              Change Password…
+            </Button>
+          )}
         </div>
       </div>
+
+      <PasswordSheet account={account} open={changingPassword} onOpenChange={setChangingPassword} />
     </li>
+  )
+}
+
+/**
+ * Change Password. Checked with the account's own server before it is stored, so a mistyped
+ * password is refused here rather than saved over the old one; once it is in, the account syncs
+ * again at once.
+ */
+function PasswordSheet({
+  account,
+  open,
+  onOpenChange,
+}: {
+  account: AccountDetail
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const [password, setPassword] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const toast = useToast()
+
+  const close = () => {
+    setPassword('')
+    setProblem(null)
+    onOpenChange(false)
+  }
+
+  const save = () => {
+    setSaving(true)
+    setProblem(null)
+    accountSetPassword(account.id, password)
+      .then(() => {
+        toast.show({ title: `Password updated for ${account.email}` })
+        close()
+      })
+      .catch((cause: unknown) => {
+        setProblem(reasonFor(cause))
+      })
+      .finally(() => {
+        setSaving(false)
+      })
+  }
+
+  return (
+    <Sheet
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) close()
+      }}
+      title="Change Password"
+      description={`The password ${account.email} signs in with. Halcyon checks it with the server before saving it.`}
+      footer={
+        <>
+          <Button variant="bordered" onClick={close}>
+            Cancel
+          </Button>
+          <Button variant="filled" disabled={saving || password === ''} onClick={save}>
+            {saving ? 'Checking…' : 'Save'}
+          </Button>
+        </>
+      }
+    >
+      <TextField
+        label="Password"
+        type="password"
+        autoComplete="current-password"
+        value={password}
+        onChange={(event) => {
+          setPassword(event.currentTarget.value)
+          setProblem(null)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && password !== '' && !saving) save()
+        }}
+        {...(problem === null ? {} : { invalid: true, hint: problem })}
+      />
+    </Sheet>
   )
 }
 

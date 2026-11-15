@@ -38,6 +38,13 @@ import styles from './OutboxBanner.module.css'
 /** Redraw the countdown at this rate. Nothing depends on it; it is a clock face. */
 const TICK_MS = 250
 
+/** How far "Later…" moves a held message while a time is chosen. Replaced, or put back. */
+const PAUSE_SECONDS = 24 * 60 * 60
+
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000)
+}
+
 function secondsLeft(row: OutboxRow): number {
   return Math.max(0, Math.ceil(row.sendAfter - Date.now() / 1000))
 }
@@ -78,6 +85,45 @@ export function OutboxBanner() {
   }, [])
 
   /**
+   * The hold "Later…" paused, and when it would have ended, to put back if no time is chosen.
+   *
+   * A ref, because the sheet reports a choice and then its own closing in the same click, and the
+   * close must know the choice has already been made rather than restore the hold over it.
+   */
+  const paused = useRef<{ id: number; resumeAt: number } | null>(null)
+
+  /**
+   * Moves a held message's send time, and says so when it cannot.
+   *
+   * The core refuses once the message has left `holding`, and that answer was thrown away: the
+   * banner refreshed, the row was gone because the message had gone, and Schedule looked as
+   * though it had worked (H17, 2026-11-14 audit).
+   */
+  const schedule = useCallback(
+    (id: number, sendAfter: number): Promise<boolean> =>
+      outboxSchedule(id, sendAfter)
+        .then((moved) => {
+          if (!moved) {
+            toast.show({
+              title: 'Too late to send later',
+              description: 'The message had already started sending and is on its way.',
+            })
+          }
+          refresh()
+          return moved
+        })
+        .catch((cause: unknown) => {
+          toast.show({
+            title: 'The message could not be rescheduled',
+            description: reasonFor(cause),
+          })
+          refresh()
+          return false
+        }),
+    [refresh, toast],
+  )
+
+  /**
    * Undo Send, and the one case where it does not work.
    *
    * `compose_undo` returns false when the message has already left `holding` — the sender
@@ -106,7 +152,7 @@ export function OutboxBanner() {
           // one that worked, because nothing on screen changed either way.
           toast.show({
             title: 'The message could not be recalled',
-            description: cause instanceof Error ? cause.message : String(cause),
+            description: reasonFor(cause),
           })
           refresh()
         })
@@ -181,7 +227,7 @@ export function OutboxBanner() {
               <Button
                 variant="bordered"
                 onClick={() => {
-                  void outboxSchedule(row.id, tonight()).then(refresh)
+                  void schedule(row.id, tonight())
                 }}
               >
                 Tonight
@@ -189,7 +235,7 @@ export function OutboxBanner() {
               <Button
                 variant="bordered"
                 onClick={() => {
-                  void outboxSchedule(row.id, tomorrowMorning()).then(refresh)
+                  void schedule(row.id, tomorrowMorning())
                 }}
               >
                 Tomorrow
@@ -197,7 +243,16 @@ export function OutboxBanner() {
               <Button
                 variant="bordered"
                 onClick={() => {
-                  setScheduling(row.id)
+                  // The hold is stopped *before* the sheet opens. It went on counting under the
+                  // sheet, and choosing a time takes longer than the ten seconds it had, so the
+                  // message had usually gone by the time Schedule was pressed (H17). Stopped by
+                  // moving it a day out, which the sheet then replaces or Cancel puts back.
+                  const resumeAt = nowSeconds() + secondsLeft(row)
+                  void schedule(row.id, nowSeconds() + PAUSE_SECONDS).then((moved) => {
+                    if (!moved) return
+                    paused.current = { id: row.id, resumeAt }
+                    setScheduling(row.id)
+                  })
                 }}
               >
                 Later…
@@ -309,12 +364,19 @@ export function OutboxBanner() {
       <SendLaterSheet
         open={scheduling !== null}
         onOpenChange={(next) => {
-          if (!next) setScheduling(null)
+          if (next) return
+          setScheduling(null)
+
+          // Closed without a time: the message carries on with the hold it had left.
+          const held = paused.current
+          paused.current = null
+          if (held !== null) void schedule(held.id, Math.max(held.resumeAt, nowSeconds()))
         }}
         onChoose={(sendAfter) => {
+          // Cleared first, so the close that follows does not restore the hold over this.
+          paused.current = null
           if (scheduling === null) return
-          void outboxSchedule(scheduling, sendAfter).then(refresh)
-          setScheduling(null)
+          void schedule(scheduling, sendAfter)
         }}
       />
     </div>

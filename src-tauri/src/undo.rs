@@ -40,16 +40,11 @@ const DEPTH: usize = 50;
 /// The prior state of one message, for one field.
 #[derive(Debug, Clone)]
 enum Prior {
+    /// Where it was. No UID: the one it had there is only still right if the server has not
+    /// moved it since, and `ops::queue_move` is what knows that. See `restore`.
     Mailbox {
         id: i64,
         mailbox_id: i64,
-        /// The UID the message had in that mailbox.
-        ///
-        /// Restored with it, because `move_to` parks a moved row at a negative placeholder — a
-        /// UID belongs to one mailbox and means nothing in another. Putting the message back
-        /// without its UID would leave it in its original folder looking like something that
-        /// had never been on the server.
-        uid: i64,
     },
     Seen {
         id: i64,
@@ -82,6 +77,24 @@ pub struct Step {
     /// the caller knows whether this was a move, a rule run or a swipe.
     pub label: String,
     priors: Vec<Prior>,
+}
+
+#[cfg(test)]
+impl Step {
+    /// The messages this step would restore, for tests that check what a command captured.
+    pub(crate) fn message_ids(&self) -> Vec<i64> {
+        self.priors
+            .iter()
+            .filter_map(|prior| match prior {
+                Prior::Mailbox { id, .. }
+                | Prior::Seen { id, .. }
+                | Prior::Flagged { id, .. }
+                | Prior::Junk { id, .. }
+                | Prior::Snooze { id, .. } => Some(*id),
+                Prior::Muted { .. } => None,
+            })
+            .collect()
+    }
 }
 
 /// What the UI needs to draw the menu item.
@@ -181,7 +194,7 @@ pub fn capture(
     for &id in ids {
         let row = tx.query_row(
             "SELECT mailbox_id, flag_seen, flag_flagged, flag_color, is_junk, junk_by_user,
-                    snooze_until, thread_id, uid
+                    snooze_until, thread_id
                FROM message WHERE id = ?1",
             params![id],
             |row| {
@@ -194,13 +207,11 @@ pub fn capture(
                     row.get::<_, i64>(5)? != 0,
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, Option<i64>>(7)?,
-                    row.get::<_, i64>(8)?,
                 ))
             },
         );
 
-        let Ok((mailbox_id, seen, flagged, color, junk, by_user, snooze, thread_id, uid)) = row
-        else {
+        let Ok((mailbox_id, seen, flagged, color, junk, by_user, snooze, thread_id)) = row else {
             // Gone between the click and the write. Skipping it is right: there is nothing to
             // restore, and failing the whole operation because one message vanished would make
             // undo less reliable rather than more.
@@ -209,11 +220,7 @@ pub fn capture(
 
         for field in fields {
             priors.push(match field {
-                Field::Mailbox => Prior::Mailbox {
-                    id,
-                    mailbox_id,
-                    uid,
-                },
+                Field::Mailbox => Prior::Mailbox { id, mailbox_id },
                 Field::Seen => Prior::Seen { id, seen },
                 Field::Flagged => Prior::Flagged {
                     id,
@@ -272,85 +279,27 @@ impl Stack {
 /// The inverse is captured *before* restoring, from the same rows, so redo is exact rather than
 /// a re-run of the original command. Re-running would be wrong for anything whose effect
 /// depends on when it happens — a rule, a snooze, a filter verdict.
-/// Queues the server side of an undone move, before the local row is rewritten.
-///
-/// ## Why undo needs this at all
-///
-/// Undo put the local row back and told the server nothing. Archiving a message and pressing
-/// Ctrl+Z returned it to the Inbox here and left it in the Archive everywhere else, and the next
-/// sync of the Archive — which still lists it — would put it back, so the undo silently came
-/// apart a minute later.
-///
-/// The commands that *make* these changes all queue an operation (see `ipc::mail`); the code
-/// that reverses them did not, which is the same omission the rules engine had.
-fn queue_move(tx: &Transaction<'_>, id: i64, destination: i64) -> Result<(), DbError> {
-    let Some(to) = crate::sync::ops::mailbox_path(tx, destination)? else {
-        return Ok(());
-    };
-
-    // Located before the write: afterwards the row names the destination, and the operation
-    // would ask the server to move it out of where it had just been put.
-    for group in crate::sync::ops::locate(tx, &[id])? {
-        if group.mailbox == to {
-            continue;
-        }
-
-        crate::sync::ops::enqueue(
-            tx,
-            group.account_id,
-            &crate::sync::ops::Op::Move {
-                from: group.mailbox,
-                to: to.clone(),
-                uids: group.uids,
-            },
-        )?;
-    }
-
-    Ok(())
-}
-
-/// Queues the server side of an undone flag change. See `queue_move`.
-fn queue_flags(
-    tx: &Transaction<'_>,
-    id: i64,
-    seen: Option<bool>,
-    flagged: Option<bool>,
-) -> Result<(), DbError> {
-    for group in crate::sync::ops::locate(tx, &[id])? {
-        crate::sync::ops::enqueue(
-            tx,
-            group.account_id,
-            &crate::sync::ops::Op::Flag {
-                mailbox: group.mailbox,
-                uids: group.uids,
-                seen,
-                flagged,
-            },
-        )?;
-    }
-
-    Ok(())
-}
-
 fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
     let mut inverse = Vec::with_capacity(step.priors.len());
 
+    // The server side of the flags put back. Undo used to restore the local row and tell the
+    // server nothing, so the next sync put the server's state back over it; then it queued one
+    // operation per message, which for a large undo held up the account's sync for minutes (L4).
+    // Batched, and queued before any move. See `FlagBatch`.
+    let mut flags = crate::sync::ops::FlagBatch::default();
+
     for prior in &step.priors {
         match prior {
-            Prior::Mailbox {
-                id,
-                mailbox_id,
-                uid,
-            } => {
-                let current: Option<(i64, i64)> = tx
+            Prior::Mailbox { id, mailbox_id } => {
+                let current: Option<i64> = tx
                     .query_row(
-                        "SELECT mailbox_id, uid FROM message WHERE id = ?1",
+                        "SELECT mailbox_id FROM message WHERE id = ?1",
                         params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| row.get(0),
                     )
                     .ok();
 
-                let Some((current, current_uid)) = current else {
+                let Some(current) = current else {
                     continue;
                 };
 
@@ -364,21 +313,20 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                 inverse.push(Prior::Mailbox {
                     id: *id,
                     mailbox_id: current,
-                    uid: current_uid,
                 });
 
-                queue_move(tx, *id, *mailbox_id)?;
+                // The server side through the one function every move uses. This used to queue
+                // its own move from `locate`, which named the message's *original* place — so it
+                // queued nothing when undo returned the message there, and the archive still
+                // waiting in the queue ran anyway; and once the archive had run, it named a UID
+                // the server no longer had. Either way the next sync reversed the undo (H7).
+                //
+                // The UID it gets back is the server's, when the server still has it there; the
+                // one recorded before the move was trusted here, and is wrong once the move ran.
+                flags.queue(tx)?;
+                let homecoming = crate::sync::ops::queue_move(tx, &[*id], *mailbox_id)?;
                 crate::db::write::move_to(tx, &[*id], *mailbox_id)?;
-
-                // `move_to` parks it at a placeholder; this is where it gets its real UID back.
-                // Only when it had one: a message that had never reached the server keeps the
-                // placeholder it already had.
-                if *uid > 0 {
-                    tx.execute(
-                        "UPDATE message SET uid = ?2 WHERE id = ?1",
-                        params![id, uid],
-                    )?;
-                }
+                crate::sync::ops::settle(tx, &homecoming)?;
             }
             Prior::Seen { id, seen } => {
                 let current: Option<i64> = tx
@@ -396,11 +344,18 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     seen: current != 0,
                 });
 
-                queue_flags(tx, *id, Some(*seen), None)?;
+                flags.add(*id, Some(*seen), None);
 
-                tx.execute(
-                    "UPDATE message SET flag_seen = ?2 WHERE id = ?1",
-                    params![id, i64::from(*seen)],
+                // Through `set_flags`, which keeps the mailbox's cached unread count in step. A
+                // bare UPDATE left the sidebar's count where the undone action had put it, until
+                // the next sync recounted (M20, 2026-11-14 audit).
+                crate::db::write::set_flags(
+                    tx,
+                    &[*id],
+                    crate::db::model::FlagPatch {
+                        seen: Some(*seen),
+                        flagged: None,
+                    },
                 )?;
             }
             Prior::Flagged { id, flagged, color } => {
@@ -422,7 +377,7 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                     color: current_color,
                 });
 
-                queue_flags(tx, *id, None, Some(*flagged))?;
+                flags.add(*id, None, Some(*flagged));
 
                 tx.execute(
                     "UPDATE message SET flag_flagged = ?2, flag_color = ?3 WHERE id = ?1",
@@ -471,11 +426,19 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
                 //
                 // Symmetric on purpose, so redo is this same arm run the other way: retract the
                 // judgement being undone, and reinstate the one being restored if there was one.
-                if current_by_user != 0 && (current_junk != 0) != *junk {
+                //
+                // Whenever the user's judgement changes, not only when the flag does. Marking as
+                // junk a message the filter had already put in Junk trains it too — the user's
+                // word is a label the filter's own verdict is not — and undo checked the flag
+                // alone, saw it unchanged, and left that example in the corpus (L17).
+                let same_judgement =
+                    current_by_user != 0 && *by_user && (current_junk != 0) == *junk;
+
+                if current_by_user != 0 && !same_judgement {
                     crate::rules::junk::untrain(tx, &from, &subject, &body, current_junk != 0)?;
                 }
 
-                if *by_user && (current_junk != 0) != *junk {
+                if *by_user && !same_judgement {
                     crate::rules::junk::train(tx, &from, &subject, &body, *junk)?;
                 }
 
@@ -528,6 +491,8 @@ fn restore(tx: &Transaction<'_>, step: &Step) -> Result<Step, DbError> {
             }
         }
     }
+
+    flags.queue(tx)?;
 
     Ok(Step {
         label: step.label.clone(),
@@ -631,6 +596,155 @@ mod tests {
         .expect("mailbox")
     }
 
+    /// Archives message 1 the way `msg_archive` does, server side included.
+    fn archive(tx: &Transaction<'_>, stack: &Stack) {
+        let step = capture(tx, "Archive", &[1], &[Field::Mailbox]).expect("capture");
+        let homecoming = crate::sync::ops::queue_move(tx, &[1], 2).expect("queue");
+        crate::db::write::move_to(tx, &[1], 2).expect("move");
+        crate::sync::ops::settle(tx, &homecoming).expect("settle");
+        stack.record(step);
+    }
+
+    fn queued(tx: &Transaction<'_>) -> Vec<crate::sync::ops::Op> {
+        crate::sync::ops::queued(tx, 1)
+            .expect("queue")
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect()
+    }
+
+    /// `(mailbox, uid, origin mailbox, origin uid)`.
+    fn row(tx: &Transaction<'_>) -> (i64, i64, Option<i64>, Option<i64>) {
+        tx.query_row(
+            "SELECT mailbox_id, uid, origin_mailbox_id, origin_uid FROM message WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("row")
+    }
+
+    /// H7 in the 2026-11-14 audit, before the archive has reached the server.
+    ///
+    /// Undo's own move named the message's original place, saw it was already "there", and queued
+    /// nothing — leaving the archive itself queued. Two seconds later it ran, and the next sync
+    /// took the message back out of the Inbox the user had just restored it to.
+    #[test]
+    fn undo_before_the_archive_reaches_the_server_cancels_it() {
+        let mut conn = store();
+        let stack = Stack::new();
+        let tx = conn.transaction().expect("tx");
+
+        archive(&tx, &stack);
+        assert_eq!(queued(&tx).len(), 1, "the archive is queued");
+
+        undo(&stack, &tx).expect("undo");
+
+        assert!(
+            queued(&tx).is_empty(),
+            "the archive is still queued: {:?}",
+            queued(&tx)
+        );
+        assert_eq!(
+            row(&tx),
+            (1, 1, None, None),
+            "back exactly as it was, UID and all"
+        );
+    }
+
+    /// H7, after the archive has reached the server — the usual case, since the queue is pushed
+    /// two seconds after a change and Undo is pressed from a toast that stays for longer.
+    ///
+    /// The message is then in the Archive under a UID the app has not learned, and the old undo
+    /// asked the server to move the UID it used to have in the Inbox, which no longer exists.
+    #[test]
+    fn undo_after_the_archive_reached_the_server_moves_it_back_by_message_id() {
+        let mut conn = store();
+        conn.execute(
+            "UPDATE message SET message_id = 'one@example.test' WHERE id = 1",
+            [],
+        )
+        .expect("message id");
+        let stack = Stack::new();
+        let tx = conn.transaction().expect("tx");
+
+        archive(&tx, &stack);
+        // The drain ran it.
+        tx.execute("DELETE FROM pending_op", []).expect("pushed");
+
+        undo(&stack, &tx).expect("undo");
+
+        assert_eq!(
+            queued(&tx),
+            vec![crate::sync::ops::Op::MoveByMessageId {
+                from: "Archive".into(),
+                to: "INBOX".into(),
+                message_id: "one@example.test".into(),
+            }]
+        );
+
+        let (mailbox, uid, origin, origin_uid) = row(&tx);
+        assert_eq!(mailbox, 1, "shown in the Inbox at once");
+        assert!(uid < 0, "parked until the server gives it a UID here");
+        assert_eq!(
+            (origin, origin_uid),
+            (Some(2), None),
+            "the server has it in the Archive, UID unknown"
+        );
+
+        // And redo before that move runs takes it off the queue again: the server never moved
+        // the message back, so there is nothing to send.
+        redo(&stack, &tx).expect("redo");
+        assert!(queued(&tx).is_empty(), "{:?}", queued(&tx));
+        assert_eq!(mailbox_of(&tx, 1), 2);
+    }
+
+    #[test]
+    fn dragging_a_message_straight_back_cancels_the_first_move() {
+        // The same bug reached without Undo: Move to Archive, then drag it back to the Inbox.
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+
+        for destination in [2, 1] {
+            let homecoming = crate::sync::ops::queue_move(&tx, &[1], destination).expect("queue");
+            crate::db::write::move_to(&tx, &[1], destination).expect("move");
+            crate::sync::ops::settle(&tx, &homecoming).expect("settle");
+        }
+
+        assert!(queued(&tx).is_empty(), "{:?}", queued(&tx));
+        assert_eq!(row(&tx), (1, 1, None, None));
+    }
+
+    #[test]
+    fn a_move_of_several_messages_is_still_one_command() {
+        // Deciding per message must not cost a command per message: archiving fifty is one
+        // `UID MOVE`, as it was.
+        let mut conn = store();
+        for (id, uid) in [(2, 7), (3, 9)] {
+            conn.execute(
+                "INSERT INTO message (
+                     id, account_id, mailbox_id, thread_id, uid, subject, date_sent,
+                     date_received, size, from_all, to_all, body_text, has_attachment,
+                     flag_seen, flag_flagged, is_junk, junk_by_user
+                 ) VALUES (?1, 1, 1, 1, ?2, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0, 0)",
+                params![id, uid],
+            )
+            .expect("message");
+        }
+        let tx = conn.transaction().expect("tx");
+
+        let homecoming = crate::sync::ops::queue_move(&tx, &[1, 2, 3], 2).expect("queue");
+        crate::sync::ops::settle(&tx, &homecoming).expect("settle");
+
+        assert_eq!(
+            queued(&tx),
+            vec![crate::sync::ops::Op::Move {
+                from: "INBOX".into(),
+                to: "Archive".into(),
+                uids: vec![1, 7, 9],
+            }]
+        );
+    }
+
     #[test]
     fn a_move_is_undone_to_where_it_actually_was() {
         // Not "to the Inbox" — to wherever it was. The usual answer is the Inbox and the usual
@@ -720,6 +834,42 @@ mod tests {
             stack.available().redo.is_none(),
             "redo survived a new action"
         );
+    }
+
+    #[test]
+    fn undoing_mark_as_read_puts_the_unread_count_back() {
+        // M20. The sidebar shows the count cached on the mailbox, and undo changed the message
+        // without it, so the count stayed one too low until the next sync.
+        let mut conn = store();
+        let stack = Stack::new();
+        let tx = conn.transaction().expect("tx");
+        crate::db::write::recount_mailboxes(&tx, &[1]).expect("recount");
+        let count = |tx: &Transaction<'_>| -> i64 {
+            tx.query_row("SELECT unread_count FROM mailbox WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("read")
+        };
+        let before = count(&tx);
+
+        let step = capture(&tx, "Mark as Read", &[1], &[Field::Seen]).expect("capture");
+        crate::db::write::set_flags(
+            &tx,
+            &[1],
+            crate::db::model::FlagPatch {
+                seen: Some(true),
+                flagged: None,
+            },
+        )
+        .expect("read");
+        stack.record(step);
+        assert_eq!(count(&tx), before - 1);
+
+        undo(&stack, &tx).expect("undo");
+        assert_eq!(count(&tx), before, "undo restored the count");
+
+        redo(&stack, &tx).expect("redo");
+        assert_eq!(count(&tx), before - 1, "and redo took it away again");
     }
 
     #[test]
@@ -896,5 +1046,106 @@ mod tests {
             0,
             "the training example survived the undo, so the filter still believes it"
         );
+    }
+
+    #[test]
+    fn undoing_a_change_to_many_messages_queues_one_change_for_the_server() {
+        // Undo queued one operation per message, sent one STORE at a time; undoing a Mark All as
+        // Read over 5,000 messages held up the account's sync for minutes (L4). Redo too.
+        let mut conn = store();
+        for id in 2..=6 {
+            conn.execute(
+                "INSERT INTO message (id, account_id, mailbox_id, uid, date_sent, date_received,
+                                      flag_seen)
+                 VALUES (?1, 1, 1, ?1, 0, 0, 0)",
+                params![id],
+            )
+            .expect("message");
+        }
+        let ids = [1, 2, 3, 4, 5, 6];
+        let stack = Stack::new();
+        let tx = conn.transaction().expect("tx");
+
+        let step = capture(&tx, "Mark All as Read", &ids, &[Field::Seen]).expect("capture");
+        crate::db::write::set_flags(
+            &tx,
+            &ids,
+            crate::db::model::FlagPatch {
+                seen: Some(true),
+                flagged: None,
+            },
+        )
+        .expect("read");
+        stack.record(step);
+
+        let queued = |tx: &Transaction<'_>| -> i64 {
+            tx.query_row("SELECT COUNT(*) FROM pending_op", [], |row| row.get(0))
+                .expect("count")
+        };
+
+        undo(&stack, &tx).expect("undo");
+        assert_eq!(queued(&tx), 1, "one operation per message");
+
+        redo(&stack, &tx).expect("redo");
+        assert_eq!(queued(&tx), 2);
+    }
+
+    #[test]
+    fn undoing_agreement_with_the_filter_untrains_it_too() {
+        // The filter had put it in Junk and the user said so too. `junk_mark` trains on that,
+        // since the user's word is a label and the filter's verdict is not; undo saw the junk
+        // flag unchanged and left the example in (L17). Redo has to put it back.
+        let mut conn = store();
+        let stack = Stack::new();
+        conn.execute(
+            "UPDATE message
+                SET from_all = 'spammer@example.test', subject = 'Cheap pills now',
+                    body_text = 'buy cheap pills today', is_junk = 1, junk_by_user = 0
+              WHERE id = 1",
+            [],
+        )
+        .expect("the filter's verdict");
+
+        let corpus = |tx: &Transaction<'_>| -> (i64, i64) {
+            let tokens = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(count), 0) FROM junk_token",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let messages = tx
+                .query_row(
+                    "SELECT COALESCE(SUM(messages), 0) FROM junk_corpus",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            (tokens, messages)
+        };
+
+        let tx = conn.transaction().expect("tx");
+
+        // As `junk_mark` does it for a message the user had not judged before.
+        let step = capture(&tx, "Mark as Junk", &[1], &[Field::Junk]).expect("capture");
+        crate::rules::junk::train(
+            &tx,
+            "spammer@example.test",
+            "Cheap pills now",
+            "buy cheap pills today",
+            true,
+        )
+        .expect("train");
+        tx.execute("UPDATE message SET junk_by_user = 1 WHERE id = 1", [])
+            .expect("mark");
+        stack.record(step);
+        let trained = corpus(&tx);
+        assert_eq!(trained.1, 1);
+
+        undo(&stack, &tx).expect("undo");
+        assert_eq!(corpus(&tx), (0, 0), "the example outlived its undo");
+
+        redo(&stack, &tx).expect("redo");
+        assert_eq!(corpus(&tx), trained, "redo did not put it back");
     }
 }

@@ -18,6 +18,7 @@ import {
   accountAddPassword,
   accountDiscover,
   accountTest,
+  oauthCancel,
   providerOpenSetup,
   settingsOpen,
 } from '@/lib/ipc'
@@ -60,15 +61,25 @@ export function AccountAssistant({ open, onOpenChange, firstRun = false }: Accou
   const providers = useProviders()
   const toast = useToast()
 
+  /**
+   * The address whose lookup has answered. Recorded when the answer arrives, not when the lookup
+   * starts: it was recorded at the start, so moving on before the answer — Continue within half a
+   * second of typing the address — cancelled the lookup and still marked it done, and going back
+   * to the address, or closing the assistant and starting again, never looked it up (L23,
+   * 2026-11-14 audit).
+   */
+  const lookedUp = useRef('')
+
   // Cleared on close rather than on open, so a reopened sheet never flashes the last
   // attempt's password or diagnostic report before resetting.
   useEffect(() => {
-    if (!open) dispatch({ type: 'reset' })
+    if (!open) {
+      dispatch({ type: 'reset' })
+      lookedUp.current = ''
+    }
   }, [open])
 
   /* --------------------------------------------------------------- autodiscovery */
-
-  const lookedUp = useRef('')
 
   useEffect(() => {
     if (state.step !== 'identity') return
@@ -76,7 +87,6 @@ export function AccountAssistant({ open, onOpenChange, firstRun = false }: Accou
 
     const email = state.email.trim().toLowerCase()
     if (lookedUp.current === email) return
-    lookedUp.current = email
 
     let cancelled = false
 
@@ -85,7 +95,9 @@ export function AccountAssistant({ open, onOpenChange, firstRun = false }: Accou
     // up on the way to "example.com".
     const timer = window.setTimeout(() => {
       void accountDiscover(email).then((discovery) => {
-        if (cancelled || discovery === null) return
+        if (cancelled) return
+        lookedUp.current = email
+        if (discovery === null) return
 
         // A domain fronting Google or Microsoft is switched to that provider: offering a
         // password box for an account whose provider rejects passwords fails with no
@@ -165,6 +177,10 @@ export function AccountAssistant({ open, onOpenChange, firstRun = false }: Accou
       toast.show({ title: `${added.email} added` })
       onOpenChange(false)
     } catch (error) {
+      if (codeOf(error) === 'cancelled') {
+        dispatch({ type: 'cancelled' })
+        return
+      }
       dispatch({ type: 'failed', message: messageOf(error) })
     }
   }, [
@@ -200,6 +216,19 @@ export function AccountAssistant({ open, onOpenChange, firstRun = false }: Accou
       )}
 
       <div className={styles.actions}>
+        {state.step === 'testing' && provider?.authKind === 'oAuth2' && (
+          // Even on first run. The wait for the browser was five minutes with nothing to end it,
+          // and a sign-in abandoned there left only the spinner (L30).
+          <Button
+            variant="bordered"
+            onClick={() => {
+              void oauthCancel()
+            }}
+          >
+            Cancel
+          </Button>
+        )}
+
         {!firstRun && state.step !== 'testing' && (
           <Button
             variant="bordered"
@@ -569,6 +598,15 @@ const SECURITY_OPTIONS: readonly SelectOption<'tls' | 'starttls'>[] = [
  * thrown `Error`, whose message is not — so it gets a generic line rather than being shown
  * raw.
  */
+/** The core's error code, when the error is one of the core's. */
+function codeOf(error: unknown): string | null {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const { code } = error
+    if (typeof code === 'string') return code
+  }
+  return null
+}
+
 function messageOf(error: unknown): string {
   if (typeof error === 'object' && error !== null && 'message' in error) {
     const { message } = error

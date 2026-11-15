@@ -72,6 +72,12 @@ reqwest = { version = "0.12", features = ["json"] }
 async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
 async-native-tls = { version = "0.5", default-features = false, features = ["runtime-tokio"] }
 futures = "0.3"
+# TCP keepalive on IMAP connections (H3). Already in the tree through tokio.
+socket2 = "0.6"
+# The Public Suffix List, compiled in: which part of a host its owner registered. The link check
+# compares those, so `links.example.com` is not taken for a different site from `example.com`, and
+# `bank.co.uk` is not taken for the same one as `evil.co.uk` (H15).
+psl = "2"
 hickory-resolver = "0.24"
 
 # MIME and RFC 2047 decoding. Envelopes arrive from IMAP with encoded words in every
@@ -87,6 +93,8 @@ ammonia = "4"
 
 # This is a Windows application; the platform layer is not conditional.
 windows = { version = "0.61", features = [
+  # StartupTask, which is how a packaged app starts at sign-in (M31, 2026-11-14 audit).
+  "ApplicationModel",
   "Foundation",
   "UI",
   "UI_ViewManagement",
@@ -100,6 +108,8 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell_PropertiesSystem",
   "Win32_System_ProcessStatus",
   "Win32_System_StationsAndDesktops",
+  # GetCurrentApplicationUserModelId: whether this is the Store package, and its app ID (H22).
+  "Win32_Storage_Packaging_Appx",
   "Win32_UI_Controls",
   "Win32_UI_Controls_Dialogs",
   "Win32_UI_HiDpi",
@@ -119,7 +129,8 @@ lettre = { version = "0.11", default-features = false, features = [
   "tokio1",
   "tokio1-native-tls",
   "smtp-transport",
-  "hostname",
+  # No "hostname": it lets lettre greet the server with the computer's name, which Gmail then
+  # shows every recipient. `sync::smtp::hello_name` sets the greeting explicitly (M10).
 ] }
 # Only for formatting the attribution line above a quoted reply. Apple Mail's exact shape is
 # "On 27 Aug 2026, at 09:34, Ada <ada@x> wrote:", which needs a local-time conversion and a
@@ -138,6 +149,10 @@ tauri-winrt-notification = "0.7.3"
 tauri-plugin-autostart = "2.5.1"
 tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-single-instance = "2.4.3"
+# The native WebView2 settings Tauri does not expose: here, turning off the browser's own F5,
+# Ctrl+R and the rest, which reloaded a compose window and lost the draft (M39). The version
+# Tauri itself uses, so the types are the ones its webview hands back; nothing new is downloaded.
+webview2-com = "0.38.2"
 tauri-plugin-updater = { version = "2", optional = true }
 # Outlook .pst import. A clean-room MS-PST implementation published by Microsoft: it reads the
 # object store — the B-trees, the heap, the property and table contexts — and hands back MAPI

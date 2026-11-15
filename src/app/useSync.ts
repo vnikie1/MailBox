@@ -94,6 +94,9 @@ export function useSync(): SyncState {
       timer = window.setTimeout(() => {
         void client.invalidateQueries({ queryKey: ['messages'] })
         void client.invalidateQueries({ queryKey: ['mailboxes'] })
+        // Search results too: mail that arrives, or is read or deleted on another device,
+        // changes them as much as it changes a mailbox (M35).
+        void client.invalidateQueries({ queryKey: ['search'] })
       }, INVALIDATE_DEBOUNCE_MS)
     }
 

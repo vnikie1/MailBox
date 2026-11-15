@@ -50,16 +50,24 @@ impl DiscoverySource {
             DiscoverySource::Known => "Halcyon knows this provider's servers.",
             DiscoverySource::Ispdb => "Found in Mozilla's provider database.",
             DiscoverySource::Autoconfig => "Published by the mail domain itself.",
-            DiscoverySource::SrvRecord => "Found in the domain's DNS records.",
+            DiscoverySource::SrvRecord => {
+                "Found in the domain's DNS records. Check it is right before signing in."
+            }
             DiscoverySource::Probe => {
                 "Guessed from the domain name — the server answered, but check it is right."
             }
         }
     }
 
-    /// Whether the user should look before accepting. Only probing is a guess.
+    /// Whether the user should look before accepting.
+    ///
+    /// A probe is a guess. A DNS answer is not a guess, but nothing vouches for it either: plain
+    /// DNS is unauthenticated, so whoever answers the lookup — a hostile network, a hijacked
+    /// domain — chose the host the password would be sent to, and it was used without the user
+    /// seeing it (M26, 2026-11-14 audit). The provider database and the domain's own autoconfig
+    /// come over HTTPS.
     pub fn needs_confirmation(self) -> bool {
-        self == DiscoverySource::Probe
+        matches!(self, DiscoverySource::Probe | DiscoverySource::SrvRecord)
     }
 }
 
@@ -483,10 +491,13 @@ mod tests {
     }
 
     #[test]
-    fn only_a_probed_result_asks_the_user_to_check_it() {
+    fn a_guessed_or_unauthenticated_result_asks_the_user_to_check_it() {
         assert!(DiscoverySource::Probe.needs_confirmation());
+        // M26: plain DNS vouches for nothing, and the password goes where it points.
+        assert!(DiscoverySource::SrvRecord.needs_confirmation());
         assert!(!DiscoverySource::Ispdb.needs_confirmation());
         assert!(!DiscoverySource::Autoconfig.needs_confirmation());
+        assert!(!DiscoverySource::Known.needs_confirmation());
 
         for source in [
             DiscoverySource::Known,

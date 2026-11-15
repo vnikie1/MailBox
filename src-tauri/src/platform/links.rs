@@ -12,7 +12,7 @@
 //! is dropped rather than passed through.
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use ts_rs::TS;
 
 /// What a `mailto:` asked for, after everything unsafe has been dropped.
@@ -104,16 +104,20 @@ pub fn parse_mailto(input: &str) -> Option<MailtoRequest> {
             continue;
         };
 
-        let value = decode(value, true);
+        // `+` is a space only in text. In an address it is itself: `bill+ietf@` is an address
+        // and `bill ietf@` is not one, and a `to=` or `cc=` decoded as text turned the first
+        // into the second (L41). The path above was always read this way.
+        let text = || decode(value, true);
+        let list = || addresses(&decode(value, false));
 
         // An allow-list, not a deny-list. RFC 6068 permits arbitrary headers, and a link that
         // could set `Bcc` would let any web page open a compose window that silently copies
         // somebody — which the sender would only discover from the reply.
         match name.trim().to_ascii_lowercase().as_str() {
-            "to" => request.to.extend(addresses(&value)),
-            "cc" => request.cc.extend(addresses(&value)),
-            "subject" => request.subject = value.replace(['\r', '\n'], " "),
-            "body" => request.body = value,
+            "to" => request.to.extend(list()),
+            "cc" => request.cc.extend(list()),
+            "subject" => request.subject = text().replace(['\r', '\n'], " "),
+            "body" => request.body = text(),
             _ => {}
         }
     }
@@ -128,7 +132,12 @@ pub fn is_eml(argument: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("eml"))
 }
 
-/// Acts on whatever the shell passed in.
+/// Acts on whatever the shell passed in: at launch, from `setup`, or later, handed over from a
+/// second launch by the single-instance plugin.
+///
+/// Only the second used to be read. A `mailto:` link, a `.eml` file or a Jump List task that
+/// started the app opened the main window and nothing else, because the arguments of the process
+/// that was actually running were never looked at (H19, 2026-11-14 audit).
 ///
 /// The compose window is opened here rather than by emitting to the UI, because the sanitised
 /// fields have to reach it and the window is created from Rust anyway — routing them through the
@@ -158,8 +167,15 @@ pub fn handle_arguments(app: &AppHandle, argv: &[String]) {
                         }
                     });
                 }
+                // Held until the main window is listening, which at launch it is not yet (H19).
                 other => {
-                    let _ = app.emit("jumplist:task", other.to_string());
+                    use tauri::Manager;
+
+                    app.state::<super::handoff::Handoff>().send(
+                        app,
+                        "jumplist:task",
+                        serde_json::Value::String(other.to_string()),
+                    );
                 }
             }
 
@@ -235,6 +251,19 @@ mod tests {
 
         assert_eq!(request.to, vec!["a@x.test", "b@x.test"]);
         assert_eq!(request.cc, vec!["c@x.test"]);
+    }
+
+    #[test]
+    fn a_plus_in_an_address_stays_a_plus() {
+        // `bill+ietf@` became `bill ietf@` in a `to=` or `cc=`, an address nobody has (L41).
+        let request = parse_mailto(
+            "mailto:bill+lists@x.test?to=ann+news@x.test&cc=c+d@x.test&subject=Hi+there",
+        )
+        .expect("parsed");
+
+        assert_eq!(request.to, vec!["bill+lists@x.test", "ann+news@x.test"]);
+        assert_eq!(request.cc, vec!["c+d@x.test"]);
+        assert_eq!(request.subject, "Hi there", "text still reads + as a space");
     }
 
     #[test]

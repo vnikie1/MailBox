@@ -82,6 +82,22 @@ describe('what it leaves alone', () => {
   })
 })
 
+describe('a table too big to count with a spread', () => {
+  it('is repaired without throwing', () => {
+    // M23. The column count was `Math.max(...widths)`, one function argument per row, and V8
+    // refuses a call with more than about 120,000 arguments: "Maximum call stack size
+    // exceeded". It ran during render with nothing to catch it, so one message with a long
+    // enough table — a log export, a CSV pasted as HTML — blanked the whole window.
+    const rows = 130_000
+    const html =
+      '<table><tr><td>a</td><td>b</td></tr>' + '<tr><td>c</td></tr>'.repeat(rows - 1) + '</table>'
+
+    const out = repairShortRows(html)
+
+    expect(row(out, 1)).toEqual(['c:2'])
+  }, 60_000)
+})
+
 describe('the reported message', () => {
   it('lets the body escape the column the logo pinned', () => {
     // The shape of the real thing: three columns declared by the logo row, two supplied by the

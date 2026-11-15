@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::accounts::credentials::{self, Kind};
-use crate::accounts::provider::{AuthKind, Provider};
+use crate::accounts::provider::{AuthKind, Provider, ServerSettings};
 use crate::accounts::store::AccountDetail;
 use crate::accounts::{self};
 use crate::db::Db;
@@ -86,6 +86,14 @@ pub struct SyncEngine {
     locks: Arc<Mutex<HashMap<i64, Arc<Mutex<()>>>>>,
     /// Whether a push is already waiting to go. See [`SyncEngine::push_soon`].
     push_waiting: Arc<std::sync::atomic::AtomicBool>,
+    /// Accounts whose sign-in the server has refused, left alone until it changes.
+    ///
+    /// A refused password used to be tried again every five minutes — by the safety net, by
+    /// IDLE resuming, by every manual sync — and repeated failed sign-ins are exactly how a
+    /// provider locks an account (H16, 2026-11-14 audit). Held here rather than stored: after a
+    /// restart the account is tried once, which is one attempt a launch, not one every five
+    /// minutes. A new password or a new sign-in clears it.
+    refused: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
 }
 
 /// How long a push waits for more changes before it goes.
@@ -106,7 +114,24 @@ impl SyncEngine {
         Self {
             locks: Arc::new(Mutex::new(HashMap::new())),
             push_waiting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            refused: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    fn refusals(&self) -> std::sync::MutexGuard<'_, std::collections::HashSet<i64>> {
+        self.refused
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Records that the server refused this account's sign-in. See `refused`.
+    pub fn mark_refused(&self, account_id: i64) {
+        self.refusals().insert(account_id);
+    }
+
+    /// Lets the account be tried again: its password, or its sign-in, has changed.
+    pub fn clear_refusal(&self, account_id: i64) {
+        self.refusals().remove(&account_id);
     }
 
     /// Sends what the user has changed, shortly, without a whole sync.
@@ -208,6 +233,19 @@ impl SyncEngine {
         let lock = self.lock_for(account_id).await;
         let _guard = lock.lock().await;
 
+        // Refused before, and nothing has changed since: not asked again. The window already
+        // shows the refusal and its way out, so nothing new is announced either.
+        if self.refusals().contains(&account_id) {
+            tracing::debug!(
+                account_id,
+                "sync skipped: the sign-in was refused and has not changed"
+            );
+            return Err(SyncError::Rejected {
+                host: String::new(),
+                detail: "waiting for a new password or sign-in".into(),
+            });
+        }
+
         let mut backoff = Backoff::new();
 
         loop {
@@ -219,6 +257,10 @@ impl SyncEngine {
 
                 Err(error) if !error.is_retryable() => {
                     tracing::warn!(account_id, %error, "sync stopped: not retryable");
+
+                    if matches!(error, SyncError::Rejected { .. }) {
+                        self.mark_refused(account_id);
+                    }
 
                     app.emit(
                         "account:error",
@@ -309,10 +351,19 @@ fn oauth_failure(
         }
         // The provider answered, and said no. `invalid_grant` is a revoked or expired refresh
         // token, and no amount of retrying turns that into a yes.
-        accounts::oauth::OAuthError::Refused { .. } => SyncError::Rejected {
-            host: email.to_string(),
-            detail: error.to_string(),
-        },
+        //
+        // **Only** `invalid_grant`. Every refusal used to land here, including a token endpoint
+        // answering 500, 503 or 429 — a bad minute, not a dead grant — so the account stopped
+        // with "Signing in again will fix it" and a message being sent at that moment was failed
+        // for good (M27, 2026-11-14 audit). Those fall through to the arm below and are retried.
+        accounts::oauth::OAuthError::Refused { .. }
+            if accounts::oauth::requires_reauthentication(error) =>
+        {
+            SyncError::Rejected {
+                host: email.to_string(),
+                detail: error.to_string(),
+            }
+        }
         // The provider did not answer, or not usefully. The stored credential may be perfectly
         // good, so keep the account alive and try again rather than blaming the user for it.
         _ => SyncError::AuthUnavailable {
@@ -438,16 +489,42 @@ pub(crate) async fn credential_for(
                 });
             }
 
-            let (expiry, signed_in) = {
+            let (expiry, signed_in, issuer) = {
                 let reference = reference.clone();
                 db.read(move |conn| {
                     Ok((
                         accounts::read_expiry(conn, &reference),
                         accounts::read_signed_in(conn, &reference),
+                        accounts::read_issuer(conn, &reference),
                     ))
                 })
                 .await?
             };
+
+            // A token issued to another sign-in application cannot be refreshed by this one, and
+            // the provider's refusal of it reads as a broken registration — "signing in again
+            // will not help". It will: that is the only thing that will (M28, 2026-11-14 audit).
+            // Said before asking, as the refusal signing in again cures. The access token still
+            // works until it expires, so only a refresh is refused.
+            if accounts::oauth::needs_refresh(expiry)
+                && accounts::client_changed(issuer.as_deref(), &client.client_id)
+            {
+                tracing::warn!(
+                    account_id = account.id,
+                    "the sign-in application changed since this account signed in; it has to sign in again"
+                );
+                return Err(oauth_failure(
+                    provider,
+                    &account.email,
+                    &accounts::oauth::OAuthError::Refused {
+                        provider: provider.id().to_string(),
+                        error: "invalid_grant".into(),
+                        description: Some(
+                            "the token was issued to a different sign-in application".into(),
+                        ),
+                    },
+                ));
+            }
 
             let (token, refreshed) = accounts::access_token(expiry, provider, &client, &reference)
                 .await
@@ -477,8 +554,17 @@ pub(crate) async fn credential_for(
 
             if let Some(expires_at) = refreshed {
                 let reference = reference.clone();
+                // A refresh this client could make proves the token is this client's, which is
+                // how a sign-in from before the issuer was recorded comes to have one.
+                let client_id = issuer.is_none().then(|| client.client_id.clone());
                 let _ = db
-                    .write(move |tx| accounts::write_expiry(tx, &reference, expires_at))
+                    .write(move |tx| {
+                        accounts::write_expiry(tx, &reference, expires_at)?;
+                        if let Some(client_id) = client_id {
+                            accounts::write_issuer(tx, &reference, &client_id)?;
+                        }
+                        Ok(())
+                    })
                     .await;
             }
 
@@ -582,10 +668,16 @@ async fn run_some(
         }
 
         let backfill = role.as_deref() == Some(mailboxes::Role::Inbox.as_str());
-        sync_mailbox(
+        let reopen = Reopen {
+            imap: &imap,
+            email: &account.email,
+            credential: &credential,
+        };
+        sync_mailbox_readably(
             app,
             db,
             &mut session,
+            &reopen,
             caps,
             account_id,
             mailbox_id,
@@ -704,22 +796,16 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
     let mut synced = 0usize;
     let mut failed = 0usize;
 
-    if let Some((path, mailbox_id)) = inbox {
-        inserted_total += sync_mailbox(
-            app,
-            db,
-            &mut session,
-            caps,
-            account_id,
-            mailbox_id,
-            &path,
-            true,
-        )
-        .await?;
-        synced += 1;
-    }
-
     // ---- 3. everything else, newest 200 each -------------------------------------------
+    //
+    // In one loop with the Inbox, which goes first. The Inbox used to be synced on its own with
+    // `?`, so anything that failed it — one message the parser could not read was enough —
+    // ended the account's pass before a single other folder was read, on every pass (M2,
+    // 2026-11-14 audit). Now it fails like any other mailbox: counted, and the pass goes on.
+    let mut order: Vec<(String, i64, bool)> = Vec::new();
+    if let Some((path, mailbox_id)) = inbox {
+        order.push((path, mailbox_id, true));
+    }
     for (mailbox, mailbox_id) in &targets {
         if mailbox.role == Some(mailboxes::Role::Inbox) {
             continue;
@@ -732,29 +818,59 @@ async fn run_once(app: &dyn Events, db: &Db, account_id: i64) -> Result<(), Sync
             continue;
         }
 
-        match sync_mailbox(
-            app,
-            db,
-            &mut session,
-            caps,
-            account_id,
-            *mailbox_id,
-            &mailbox.remote_path,
-            false,
-        )
-        .await
-        {
-            Ok(inserted) => {
-                inserted_total += inserted;
-                synced += 1;
-            }
+        order.push((mailbox.remote_path.clone(), *mailbox_id, false));
+    }
 
-            // One unreadable mailbox must not abort the account. A shared folder whose
-            // permissions changed is common, and losing the Inbox because of it is not.
-            Err(error) => {
-                failed += 1;
-                tracing::warn!(path = %mailbox.remote_path, %error, "mailbox sync failed; continuing");
+    // One reconnect per pass. A dropped connection used to fail every remaining mailbox in the
+    // pass at once, over the dead session — 29 of 31 Yahoo folders in four milliseconds, from
+    // one drop (M1, 2026-11-14 audit). Now the session is opened again and the mailbox it failed
+    // on is tried once more; a second drop ends the pass, and the next sync starts afresh.
+    let mut reconnected = false;
+    let reopen = Reopen {
+        imap: &imap,
+        email: &account.email,
+        credential: &credential,
+    };
+
+    for (path, mailbox_id, backfill) in &order {
+        loop {
+            let result = sync_mailbox_readably(
+                app,
+                db,
+                &mut session,
+                &reopen,
+                caps,
+                account_id,
+                *mailbox_id,
+                path,
+                *backfill,
+            )
+            .await;
+
+            match result {
+                Ok(inserted) => {
+                    inserted_total += inserted;
+                    synced += 1;
+                }
+
+                Err(error) if error.connection_lost() && !reconnected => {
+                    tracing::warn!(path, %error, "the connection dropped; reconnecting once");
+                    reconnected = true;
+                    session = reopen.open().await?;
+                    continue;
+                }
+
+                // Gone again. Every mailbox after this would fail the same way, instantly.
+                Err(error) if error.connection_lost() => return Err(error),
+
+                // One unreadable mailbox must not abort the account. A shared folder whose
+                // permissions changed is common, and losing the Inbox because of it is not.
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(path, %error, "mailbox sync failed; continuing");
+                }
             }
+            break;
         }
     }
 
@@ -907,6 +1023,10 @@ async fn sync_mailbox(
         Err(error) => return Err(error),
     };
 
+    // From here on, what this mailbox can be asked: a server with CONDSTORE can still keep no
+    // modification sequences for one mailbox, and asking it for them fails every fetch (L2).
+    let caps = caps.for_mailbox(selected.highest_modseq);
+
     if selected.uid_next == 0 && selected.exists == 0 {
         tracing::debug!(path, "mailbox is empty");
 
@@ -989,6 +1109,22 @@ async fn sync_mailbox(
     let first_page = if backfill { FIRST_PAGE } else { 200 };
     let range = fetch::newest_range(selected.uid_next, first_page);
 
+    // Arrivals the page will not reach (M5), fetched after it. The Inbox only: every other folder
+    // is held to its newest page by design. Until they are in, the last sync's `uid_next` stays
+    // recorded, so a pass interrupted part-way asks for them again instead of forgetting them.
+    let missed = if backfill {
+        stored_uid_next
+            .and_then(|previous| fetch::missed_range(previous, selected.uid_next, first_page))
+    } else {
+        None
+    };
+    let recorded_uid_next = match (missed, stored_uid_next) {
+        (Some(_), Some(previous)) => previous,
+        _ => selected.uid_next,
+    };
+    let recorded_modseq =
+        modseq_to_record(backfill_outstanding, stored_modseq, selected.highest_modseq);
+
     // Timed separately because "the mailbox took thirty seconds" says nothing about whether
     // the server, the network or our own writer is responsible — and the answer decided what
     // to fix. Cheap enough to leave in: two clock reads per mailbox.
@@ -1010,8 +1146,8 @@ async fn sync_mailbox(
                 tx,
                 mailbox_id,
                 selected.uid_validity,
-                selected.uid_next,
-                selected.highest_modseq,
+                recorded_uid_next,
+                recorded_modseq,
             )?;
             let count_ms = started.elapsed().as_millis() as u64;
 
@@ -1050,6 +1186,48 @@ async fn sync_mailbox(
         "newest page stored"
     );
 
+    // ---- arrivals below the newest page (M5) ------------------------------------------------
+    let mut inserted_ids = written.inserted_ids.clone();
+    let mut missed_inserted = 0usize;
+
+    if let Some((lowest, highest)) = missed {
+        let uids = fetch::uids_between(session, lowest, highest).await?;
+        tracing::debug!(
+            path,
+            lowest,
+            highest,
+            found = uids.len(),
+            "fetching arrivals below the newest page"
+        );
+
+        let mut cursor = highest.saturating_add(1);
+        while let Some((set, bottom)) = fetch::backfill_window(&uids, cursor, BACKFILL_BATCH) {
+            let batch = fetch::envelopes(session, &set, caps).await?;
+            let more = db
+                .write(move |tx| {
+                    let written =
+                        persist::write_batch_as(tx, account_id, mailbox_id, &batch, refresh)?;
+                    persist::recount(tx, mailbox_id)?;
+                    persist::rethread(tx, account_id, RETHREAD_WINDOW)?;
+                    Ok(written)
+                })
+                .await?;
+
+            missed_inserted += more.inserted;
+            inserted_ids.extend(more.inserted_ids);
+            cursor = bottom;
+        }
+
+        // All in, so the next sync may start from here. MODSEQ is left as the page recorded it.
+        let (validity, uid_next) = (selected.uid_validity, selected.uid_next);
+        db.write(move |tx| persist::record_mailbox_state(tx, mailbox_id, validity, uid_next, None))
+            .await?;
+
+        if missed_inserted > 0 {
+            app.emit("messages:added", payload(&mailbox_id));
+        }
+    }
+
     // ---- arrivals and departures, for a server that cannot tell us ----------------------
     //
     // `incremental` does this and is unreachable without CONDSTORE or QRESYNC: it needs a
@@ -1068,7 +1246,7 @@ async fn sync_mailbox(
     // long backfill deserves its rules and its notification just as much.
     if let Some(previous_uid_next) = stored_uid_next.filter(|next| *next > 0) {
         let arrived = {
-            let ids = written.inserted_ids.clone();
+            let ids = inserted_ids.clone();
             db.read(move |conn| new_since(conn, mailbox_id, previous_uid_next, &ids))
                 .await?
         };
@@ -1084,14 +1262,22 @@ async fn sync_mailbox(
     // also makes it safe during an initial sync or a backfill, when this side is behind rather
     // than ahead. A rebuild asks every time: a message the server lost and another it gained
     // leave the counts agreeing and the copy wrong about both.
-    let expunged =
-        reconcile_expunged(db, session, mailbox_id, path, selected.exists, rebuilding).await?;
+    let expunged = reconcile_expunged(
+        db,
+        session,
+        mailbox_id,
+        path,
+        selected.exists,
+        stored_uid_next != Some(selected.uid_next),
+        rebuilding,
+    )
+    .await?;
     if expunged > 0 {
         db.write(move |tx| persist::recount(tx, mailbox_id)).await?;
         app.emit("mailbox:changed", payload(&mailbox_id));
     }
 
-    let mut total = written.inserted;
+    let mut total = written.inserted + missed_inserted;
 
     if !backfill {
         if rebuilding {
@@ -1328,6 +1514,97 @@ async fn finish_rebuild(
     Ok(())
 }
 
+/// What it takes to open the account's connection again.
+struct Reopen<'a> {
+    imap: &'a ServerSettings,
+    email: &'a str,
+    credential: &'a Credential,
+}
+
+impl Reopen<'_> {
+    async fn open(&self) -> Result<ImapSession, SyncError> {
+        Ok(session::connect(self.imap, self.email, self.credential)
+            .await?
+            .0)
+    }
+}
+
+/// [`sync_mailbox`], read again from plain headers when the server's answer could not be parsed.
+///
+/// A message whose `ENVELOPE` the IMAP parser cannot read failed its whole batch, and the same
+/// batch was asked for on every pass, so the mailbox never got past it (M2, 2026-11-14 audit).
+/// The session is replaced either way: async-imap keeps the unreadable bytes at the front of its
+/// buffer, and nothing more can be read on it. See `Caps::headers_only`.
+#[allow(clippy::too_many_arguments)]
+async fn sync_mailbox_readably(
+    app: &dyn Events,
+    db: &Db,
+    session: &mut ImapSession,
+    reopen: &Reopen<'_>,
+    caps: Caps,
+    account_id: i64,
+    mailbox_id: i64,
+    path: &str,
+    backfill: bool,
+) -> Result<usize, SyncError> {
+    let result = sync_mailbox(
+        app, db, session, caps, account_id, mailbox_id, path, backfill,
+    )
+    .await;
+
+    let Err(error) = &result else {
+        return result;
+    };
+    if !error.unparseable() {
+        return result;
+    }
+
+    tracing::warn!(
+        path,
+        %error,
+        "the server sent something the IMAP parser cannot read; reading this mailbox from its \
+         plain headers instead"
+    );
+    *session = reopen.open().await?;
+
+    let plain = Caps {
+        headers_only: true,
+        ..caps
+    };
+    let result = sync_mailbox(
+        app, db, session, plain, account_id, mailbox_id, path, backfill,
+    )
+    .await;
+
+    // Still unreadable — the flags, say, rather than an envelope. The mailbox has failed, and the
+    // next one needs a session that can still read.
+    if result.as_ref().is_err_and(SyncError::unparseable) {
+        *session = reopen.open().await?;
+    }
+
+    result
+}
+
+/// The MODSEQ a newest-page pass records, or `None` to keep the one stored.
+///
+/// Held while the Inbox's first download is unfinished (M6, 2026-11-14 audit). The incremental
+/// pass that takes over afterwards asks the server for every flag changed since this value, so
+/// it has to be no later than the moment the oldest message here was read. Each interrupted pass
+/// recorded the server's newest instead, and a message read on a phone after the backfill had
+/// stored it — but before that pass — was never asked about again: its flags stayed as the
+/// backfill found them. Holding the first value makes the eventual question cover the lot.
+fn modseq_to_record(
+    backfill_outstanding: bool,
+    stored: Option<u64>,
+    server: Option<u64>,
+) -> Option<u64> {
+    if backfill_outstanding && stored.is_some() {
+        None
+    } else {
+        server
+    }
+}
+
 /// Where the backfill walk should start, given what is stored and what the newest page found.
 ///
 /// `newest_lowest` is 0 when the newest page came back **empty**, and that is the case this
@@ -1433,59 +1710,182 @@ impl StoredState {
 /// believed without a search: that is an answer rather than a fault, and a Bin emptied in webmail
 /// used to keep every message here, because the search came back empty and an empty search is
 /// (rightly) not trusted.
+/// What this store holds of one mailbox, for [`expunge_check`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Held {
+    /// Every row, parked moves included.
+    all: i64,
+    /// Rows with a server UID.
+    numbered: i64,
+    /// The lowest server UID held.
+    lowest: Option<u32>,
+}
+
+/// Whether, and over what, to ask the server which messages it still has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpungeCheck {
+    /// Nothing can have gone that this store would notice.
+    Skip,
+    /// The server says the mailbox is empty.
+    Empty,
+    /// Ask about every UID.
+    All,
+    /// Ask about this UID and everything above it: the range this store holds.
+    From(u32),
+}
+
+/// Decides [`ExpungeCheck`]. Separated so it can be tested without a server.
+///
+/// A mailbox held **in full** keeps the old test: more here than there means something went.
+///
+/// A mailbox held **in part** — every folder but the Inbox past its newest 200 — can never have
+/// more here than there, so the old test never fired and a message deleted elsewhere stayed here
+/// for ever as a row that opened blank (H2, 2026-11-14 audit). For those the server is asked about
+/// the range this store holds, and only when something has changed since the last look: its
+/// count, or its `UIDNEXT`. A count never recorded — every folder the first time this version
+/// runs — counts as changed, which clears the ghosts already there.
+fn expunge_check(
+    held: Held,
+    server_exists: u32,
+    last_exists: Option<u32>,
+    arrived: bool,
+    force: bool,
+) -> ExpungeCheck {
+    if server_exists == 0 {
+        return if force || held.all > 0 {
+            ExpungeCheck::Empty
+        } else {
+            ExpungeCheck::Skip
+        };
+    }
+
+    let in_part = held.numbered < i64::from(server_exists);
+
+    if force {
+        return ExpungeCheck::All;
+    }
+
+    if !in_part {
+        return if held.all > i64::from(server_exists) {
+            ExpungeCheck::All
+        } else {
+            ExpungeCheck::Skip
+        };
+    }
+
+    let changed = arrived || last_exists != Some(server_exists);
+    match (changed, held.lowest) {
+        (true, Some(lowest)) => ExpungeCheck::From(lowest),
+        _ => ExpungeCheck::Skip,
+    }
+}
+
 async fn reconcile_expunged(
     db: &Db,
     session: &mut ImapSession,
     mailbox_id: i64,
     path: &str,
     server_exists: u32,
+    arrived: bool,
     force: bool,
 ) -> Result<usize, SyncError> {
-    let local: i64 = db
+    let (held, last_exists) = db
         .read(move |conn| {
-            Ok(conn
+            let held = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM message WHERE mailbox_id = ?1",
+                    "SELECT COUNT(*), COUNT(CASE WHEN uid > 0 THEN 1 END),
+                            MIN(CASE WHEN uid > 0 THEN uid END)
+                       FROM message WHERE mailbox_id = ?1",
                     rusqlite::params![mailbox_id],
-                    |row| row.get(0),
+                    |row| {
+                        Ok(Held {
+                            all: row.get(0)?,
+                            numbered: row.get(1)?,
+                            lowest: row
+                                .get::<_, Option<i64>>(2)?
+                                .and_then(|uid| u32::try_from(uid).ok()),
+                        })
+                    },
                 )
-                .unwrap_or(0))
+                .unwrap_or(Held {
+                    all: 0,
+                    numbered: 0,
+                    lowest: None,
+                });
+
+            let last: Option<u32> = conn
+                .query_row(
+                    "SELECT server_exists FROM mailbox WHERE id = ?1",
+                    rusqlite::params![mailbox_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .ok()
+                .flatten()
+                .and_then(|count| u32::try_from(count).ok());
+
+            Ok((held, last))
         })
         .await?;
 
-    tracing::debug!(path, local, server = server_exists, "expunge check");
-
-    // The common case, and the reason this is affordable: nothing has been removed, so there is
-    // nothing to ask the server.
-    if !force && local <= i64::from(server_exists) {
-        return Ok(0);
-    }
-
-    if server_exists == 0 {
-        let removed = db
-            .write(move |tx| persist::remove_all_numbered(tx, mailbox_id))
-            .await?;
-
-        if removed > 0 {
-            tracing::info!(
-                path,
-                removed,
-                "the server's copy is empty; removed them here"
-            );
-        }
-        return Ok(removed);
-    }
+    let check = expunge_check(held, server_exists, last_exists, arrived, force);
 
     tracing::debug!(
         path,
-        local,
+        local = held.all,
         server = server_exists,
-        force,
-        "more messages here than on the server; reconciling"
+        ?check,
+        "expunge check"
     );
 
-    let present = fetch::all_uids(session).await?;
+    let removed = match check {
+        ExpungeCheck::Skip => 0,
+        ExpungeCheck::Empty => {
+            let removed = db
+                .write(move |tx| persist::remove_all_numbered(tx, mailbox_id))
+                .await?;
 
+            if removed > 0 {
+                tracing::info!(
+                    path,
+                    removed,
+                    "the server's copy is empty; removed them here"
+                );
+            }
+            removed
+        }
+        ExpungeCheck::All | ExpungeCheck::From(_) => {
+            let present = match check {
+                ExpungeCheck::From(lowest) => fetch::uids_from(session, lowest).await?,
+                _ => fetch::all_uids(session).await?,
+            };
+            reconcile_against(db, mailbox_id, path, server_exists, present).await?
+        }
+    };
+
+    // Remembered once the check has been made, so the next pass can tell whether anything
+    // changed. Written only when it did: on most passes it has not.
+    if last_exists != Some(server_exists) {
+        db.write(move |tx| {
+            tx.execute(
+                "UPDATE mailbox SET server_exists = ?2 WHERE id = ?1",
+                rusqlite::params![mailbox_id, i64::from(server_exists)],
+            )?;
+            Ok(())
+        })
+        .await?;
+    }
+
+    Ok(removed)
+}
+
+/// Removes the rows whose UIDs the server no longer lists in `present`.
+async fn reconcile_against(
+    db: &Db,
+    mailbox_id: i64,
+    path: &str,
+    server_exists: u32,
+    present: Vec<u32>,
+) -> Result<usize, SyncError> {
     // A mailbox that reports messages but returns no UIDs is a server being strange, not a
     // mailbox that emptied. Deleting everything on that answer would destroy the local copy of
     // a mailbox over a transient fault, which is the one outcome worth being paranoid about.
@@ -1537,6 +1937,16 @@ fn new_since(
         return Ok(Vec::new());
     }
 
+    // In pieces past SQLite's parameter limit (M7): a long time offline can mean more arrivals
+    // than one statement takes. See `db::write::CHUNK`.
+    if inserted.len() > crate::db::write::CHUNK {
+        let mut arrived = Vec::new();
+        for chunk in inserted.chunks(crate::db::write::CHUNK) {
+            arrived.extend(new_since(conn, mailbox_id, previous_uid_next, chunk)?);
+        }
+        return Ok(arrived);
+    }
+
     let placeholders = (0..inserted.len())
         .map(|index| format!("?{}", index + 3))
         .collect::<Vec<_>>()
@@ -1557,6 +1967,22 @@ fn new_since(
         .collect::<rusqlite::Result<Vec<i64>>>()?;
 
     Ok(rows)
+}
+
+/// Whether Inbox arrivals need their bodies before the rules and the junk filter run: when an
+/// enabled rule has a condition on the body or the attachments, or the classifier has enough
+/// mail to score with and would read the body.
+fn arrivals_need_bodies(conn: &rusqlite::Connection) -> Result<bool, crate::db::DbError> {
+    let rules = crate::rules::engine::rules_list(conn)?;
+    if rules
+        .iter()
+        .any(|rule| rule.enabled && rule.predicate.needs_body())
+    {
+        return Ok(true);
+    }
+
+    let (ham, junk) = crate::rules::junk::corpus_size(conn)?;
+    Ok(ham >= crate::rules::junk::MIN_CORPUS && junk >= crate::rules::junk::MIN_CORPUS)
 }
 
 /// Everything that happens because mail **arrived**: rules, the junk filter, the toast.
@@ -1584,6 +2010,59 @@ async fn on_arrival(
 ) {
     if arrived.is_empty() {
         return;
+    }
+
+    // **Inbox only.** New in Trash, Sent, Drafts, Spam, Gmail's All Mail or a folder a server
+    // filter files into is not new mail, and this ran for all of them (H8, 2026-11-14 audit): a
+    // message deleted on a phone arrived in Trash and went through the rules — so a rule moving
+    // that sender's mail pulled it straight back out — the junk filter scored Sent, and Gmail's
+    // spam raised toasts. Mail runs its rules on, and announces, what arrives in the Inbox.
+    let role = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT role FROM mailbox WHERE id = ?1",
+                    rusqlite::params![mailbox_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .ok()
+                .flatten())
+        })
+        .await
+        .ok()
+        .flatten();
+
+    if role.as_deref() != Some("inbox") {
+        tracing::debug!(
+            path,
+            arrived = arrived.len(),
+            "arrivals outside the Inbox: no rules, junk scoring or notification"
+        );
+        return;
+    }
+
+    // The bodies, when a rule or the junk filter will read them. Bodies are otherwise fetched
+    // when a message is opened, so on arrival every one was empty: a rule on the body or the
+    // attachments never matched new mail, and the classifier scored subjects alone (H9,
+    // 2026-11-14 audit). Fetched here, before either runs, and only when one of them needs it.
+    // If the fetch fails, the rules engine still refuses to judge a body it does not have.
+    let needs_bodies = db.read(arrivals_need_bodies).await.unwrap_or(false);
+    if needs_bodies {
+        if let Err(error) = fetch_body(app, db, account_id, arrived.to_vec()).await {
+            tracing::warn!(%error, path, "bodies for arrival rules could not be fetched");
+        }
+    }
+
+    // Blocked senders first: the user has said so in as many words, which outranks a rule. A
+    // message marked junk here is skipped by the classifier and raises no toast.
+    let ids = arrived.to_vec();
+    match db
+        .write(move |tx| crate::rules::vip::mark_blocked_arrivals(tx, &ids))
+        .await
+    {
+        Ok(0) => {}
+        Ok(blocked) => tracing::debug!(path, blocked, "blocked senders marked junk on arrival"),
+        Err(error) => tracing::warn!(%error, path, "blocked senders not checked on arrival"),
     }
 
     match crate::rules::engine::run_on_arrival(db, arrived.to_vec()).await {
@@ -1653,7 +2132,8 @@ async fn incremental(
         // condition looks at. Skipping the check here would leave those accounts with exactly
         // the bug this whole function exists to fix.
         let expunged =
-            reconcile_expunged(db, session, mailbox_id, path, selected.exists, false).await?;
+            reconcile_expunged(db, session, mailbox_id, path, selected.exists, false, false)
+                .await?;
 
         if expunged > 0 {
             app.emit("messages:added", payload(&mailbox_id));
@@ -1703,7 +2183,9 @@ async fn incremental(
     // nothing ever removed a message that vanished from the server, and an Inbox used alongside
     // a phone filled up with mail the user had already dealt with elsewhere.
     let expunged =
-        reconcile_expunged(db, session, mailbox_id, path, selected.exists, false).await?;
+        // Something changed — a modseq or UIDNEXT moved — so a mailbox held in part is asked
+        // about the range it holds. See `expunge_check` (H2).
+        reconcile_expunged(db, session, mailbox_id, path, selected.exists, true, false).await?;
 
     // Counts and state last, and in the same order as the full path: the badge is a cache of
     // rows that have now all been written.
@@ -1734,6 +2216,89 @@ async fn incremental(
     Ok(inserted)
 }
 
+/// Which of these messages still need a body, as `(id, uid, mailbox path)`, in the order asked.
+///
+/// Only the ones we do not already hold. The prefetch calls this with the next three rows every
+/// time the selection moves, and re-fetching a cached body would turn an arrow-key press into
+/// three round trips.
+///
+/// **Only this account's messages.** The query used to select by message id alone, and the
+/// session it fed is the account's. So an id belonging to another account — which the reader's
+/// prefetch sent whenever All Inboxes, a smart mailbox or a search put two accounts' rows next
+/// to each other — was looked up by *its* UID in *its* folder path on *this* account's server.
+/// Folder paths like `INBOX` exist everywhere and UIDs are small integers, so that usually found
+/// a message: a different one, belonging to someone else's mailbox, which was then stored as
+/// this row's body. The reader showed it, Reply quoted it, and Forward as Attachment sent it.
+/// An id from another account is now skipped here and logged, whatever the caller does.
+fn bodies_wanted(conn: &rusqlite::Connection, account_id: i64, ids: &[i64]) -> Vec<Wanted> {
+    let mut out = Vec::new();
+
+    for &id in ids {
+        let row = conn
+            .query_row(
+                "SELECT m.account_id, m.uid, m.body_state, b.remote_path, m.size, b.uid_validity
+                   FROM message m
+                   JOIN mailbox b ON b.id = m.mailbox_id
+                  WHERE m.id = ?1",
+                rusqlite::params![id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(5)?,
+                    ))
+                },
+            )
+            .ok();
+
+        let Some((owner, uid, state, path, size, validity)) = row else {
+            continue;
+        };
+
+        if owner != account_id {
+            tracing::warn!(
+                message_id = id,
+                asked_for = account_id,
+                belongs_to = owner,
+                "body fetch: message belongs to another account; not fetched"
+            );
+            continue;
+        }
+
+        if state != "full" {
+            out.push(Wanted {
+                id,
+                uid: uid as u32,
+                path,
+                size,
+                validity: validity.and_then(|v| u32::try_from(v).ok()),
+            });
+        }
+    }
+
+    out
+}
+
+/// A message whose body is still to be fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wanted {
+    id: i64,
+    uid: u32,
+    path: String,
+    /// What the server said the message's size was, for refusing one too large to fetch.
+    size: i64,
+    /// The mailbox's `UIDVALIDITY` when `uid` was learned.
+    ///
+    /// A UID means nothing without it. After a server resets a mailbox, the same number names a
+    /// different message, and the body fetched for it was stored under this one (M3, 2026-11-14
+    /// audit). The sync drops and re-reads such a mailbox the next time it reaches it; until then
+    /// its bodies are not fetched.
+    validity: Option<u32>,
+}
+
 /// Fetches one message's body, caches the `.eml`, and stores what was parsed out of it.
 ///
 /// docs/06 Phase 5 §3. Opens its own connection rather than borrowing the sync session: the
@@ -1761,36 +2326,10 @@ pub async fn fetch_body(
             email: account.email.clone(),
         })?;
 
-    // Only the ones we do not already hold. The prefetch calls this with the next three rows
-    // every time the selection moves, and re-fetching a cached body would turn an arrow-key
-    // press into three round trips.
     let wanted = {
         let ids = message_ids.clone();
-        db.read(move |conn| {
-            let mut out = Vec::new();
-
-            for id in ids {
-                let row: Option<(i64, String, String)> = conn
-                    .query_row(
-                        "SELECT m.uid, m.body_state, b.remote_path
-                           FROM message m
-                           JOIN mailbox b ON b.id = m.mailbox_id
-                          WHERE m.id = ?1",
-                        rusqlite::params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .ok();
-
-                if let Some((uid, state, path)) = row {
-                    if state != "full" {
-                        out.push((id, uid as u32, path));
-                    }
-                }
-            }
-
-            Ok(out)
-        })
-        .await?
+        db.read(move |conn| Ok(bodies_wanted(conn, account_id, &ids)))
+            .await?
     };
 
     // Logged before the connect, for the reason the module header gives: a call that hangs or
@@ -1802,8 +2341,21 @@ pub async fn fetch_body(
         "body fetch: starting"
     );
 
+    // Refused by size before a byte is fetched, and before connecting at all. A message over the
+    // cap used to be downloaded in full on every open and refused afterwards, and was never shown
+    // (M8, 2026-11-14 audit). A sentence saying so is stored in its place, which also stops it
+    // being asked for again.
+    let (oversize, wanted): (Vec<Wanted>, Vec<Wanted>) =
+        wanted.into_iter().partition(|w| bodies::too_large(w.size));
+    let refused = oversize.len();
+    for w in oversize {
+        let body = bodies::too_large_body(w.size);
+        db.write(move |tx| bodies::persist(tx, w.id, &body, None))
+            .await?;
+    }
+
     if wanted.is_empty() {
-        return Ok(0);
+        return Ok(refused);
     }
 
     let credential = credential_for(db, &account).await?;
@@ -1817,14 +2369,21 @@ pub async fn fetch_body(
     let mut stored = 0usize;
     let mut current_mailbox = String::new();
 
-    for (message_id, uid, path) in wanted {
+    for Wanted {
+        id: message_id,
+        uid,
+        path,
+        validity,
+        ..
+    } in wanted
+    {
         // SELECT only when the mailbox changes. A thread whose messages are all in the Inbox
         // is the common case, and re-selecting per message would triple the round trips.
         if path != current_mailbox {
             // Logged rather than skipped in silence. A failed SELECT skips every message in
             // that mailbox, and without a line here the symptom is a message that renders
             // blank for ever with nothing anywhere to say why — which is exactly what it did.
-            if let Err(error) = fetch::select(&mut session, &path, None, caps).await {
+            if let Err(error) = fetch::select(&mut session, &path, validity, caps).await {
                 tracing::warn!(message_id, path, %error, "body fetch: cannot select the mailbox");
                 continue;
             }
@@ -1956,6 +2515,65 @@ mod tests {
         assert!(described.contains("keep trying"), "{described}");
     }
 
+    /// H16 in the 2026-11-14 audit: a password the server had refused was tried again every five
+    /// minutes, by the safety net, by IDLE and by every manual sync — which is how a provider
+    /// locks an account. A refused account is now left alone until its sign-in changes.
+    #[tokio::test]
+    async fn a_refused_sign_in_is_not_tried_again_until_it_changes() {
+        let dir = tempfile::tempdir().expect("dir");
+        let db = Db::open(&dir.path().join("halcyon.db")).expect("open");
+        let engine = SyncEngine::new();
+
+        engine.mark_refused(7);
+        let error = engine
+            .sync_account(&Recorder::default(), &db, 7)
+            .await
+            .expect_err("refused");
+        assert!(
+            matches!(error, SyncError::Rejected { .. }),
+            "it tried to connect: {error:?}"
+        );
+
+        // A new password or a new sign-in clears it, and the next pass really runs — here it
+        // finds no such account, which is the proof that it got past the refusal.
+        engine.clear_refusal(7);
+        let error = engine
+            .sync_account(&Recorder::default(), &db, 7)
+            .await
+            .expect_err("no such account");
+        assert!(matches!(error, SyncError::ShuttingDown), "{error:?}");
+    }
+
+    /// M27 in the 2026-11-14 audit: a token endpoint having a bad minute — a 500, a 503, a 429
+    /// rate limit — was read as a dead sign-in. The account stopped with "Signing in again will
+    /// fix it", and a message being sent at that moment was failed for good.
+    #[test]
+    fn a_token_endpoint_having_a_bad_minute_is_not_a_dead_sign_in() {
+        for code in [
+            "http_500",
+            "http_503",
+            "http_429",
+            "temporarily_unavailable",
+            "server_error",
+        ] {
+            let error = oauth_failure(
+                Provider::Google,
+                "me@gmail.com",
+                &accounts::oauth::OAuthError::Refused {
+                    provider: "google".into(),
+                    error: code.into(),
+                    description: None,
+                },
+            );
+
+            assert!(
+                matches!(error, SyncError::AuthUnavailable { .. }),
+                "{code} stopped the account: {error:?}"
+            );
+            assert!(error.is_retryable(), "{code}");
+        }
+    }
+
     #[test]
     fn a_rejected_sign_in_application_is_never_reported_as_a_dead_credential() {
         // Both routes to the same wrong sentence, closed together.
@@ -2061,7 +2679,6 @@ mod tests {
         // it rather than only on the sentence.
         for error in [
             accounts::oauth::OAuthError::TimedOut,
-            accounts::oauth::OAuthError::StateMismatch,
             accounts::oauth::OAuthError::NoClient {
                 provider: "google".into(),
             },
@@ -2154,6 +2771,20 @@ mod tests {
     }
 
     #[test]
+    fn the_modseq_is_held_until_the_inbox_has_been_read_to_the_bottom() {
+        // M6: a pass during an unfinished backfill used to record the server's newest MODSEQ,
+        // so flag changes to messages the backfill had already stored were never asked about.
+        assert_eq!(modseq_to_record(true, Some(100), Some(250)), None, "held");
+        assert_eq!(
+            modseq_to_record(true, None, Some(250)),
+            Some(250),
+            "the first page of a first sync is where the held value comes from"
+        );
+        assert_eq!(modseq_to_record(false, Some(100), Some(250)), Some(250));
+        assert_eq!(modseq_to_record(false, None, None), None);
+    }
+
+    #[test]
     fn an_empty_newest_page_does_not_end_the_backfill() {
         // The bug, in one assertion. The newest page is a numeric UID range, and on a mailbox
         // archived from for years it can hold nothing live -- 214 messages across 106,287
@@ -2232,6 +2863,337 @@ mod tests {
         }
 
         conn
+    }
+
+    /// Records what was emitted, by name.
+    #[derive(Default)]
+    struct Recorder(std::sync::Mutex<Vec<String>>);
+
+    impl Events for Recorder {
+        fn emit(&self, event: &str, _payload: serde_json::Value) {
+            self.0.lock().expect("lock").push(event.to_string());
+        }
+    }
+
+    /// H8 in the 2026-11-14 audit: arrival handling ran for every mailbox.
+    ///
+    /// So a message deleted on a phone arrived in Trash and went through the rules — one that
+    /// moves mail from a sender pulled it straight back out — the junk filter scored Sent, and
+    /// Gmail's spam folder raised new-mail toasts. Mail runs rules on, and announces, mail that
+    /// arrives in the Inbox.
+    #[tokio::test]
+    async fn only_an_inbox_arrival_is_treated_as_new_mail() {
+        let dir = tempfile::tempdir().expect("dir");
+        let db = Db::open(&dir.path().join("halcyon.db")).expect("open");
+
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+                 VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+                [],
+            )?;
+            for (id, path, role) in [
+                (1, "INBOX", Some("inbox")),
+                (2, "Trash", Some("trash")),
+                (3, "Sent", Some("sent")),
+                (4, "[Gmail]/Spam", Some("junk")),
+                (5, "Projects", None),
+            ] {
+                tx.execute(
+                    "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+                     VALUES (?1, 1, ?2, ?2, ?3)",
+                    rusqlite::params![id, path, role],
+                )?;
+                tx.execute(
+                    "INSERT INTO message (
+                         id, account_id, mailbox_id, uid, subject, date_sent, date_received,
+                         size, from_all, to_all, body_text, has_attachment, flag_seen,
+                         flag_flagged, is_junk
+                     ) VALUES (?1, 1, ?1, 10, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+                    rusqlite::params![id],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        for (mailbox, path) in [
+            (2, "Trash"),
+            (3, "Sent"),
+            (4, "[Gmail]/Spam"),
+            (5, "Projects"),
+        ] {
+            let events = Recorder::default();
+            on_arrival(&events, &db, 1, mailbox, path, &[mailbox]).await;
+
+            assert!(
+                !events
+                    .0
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .any(|e| e == "mail:arrived"),
+                "an arrival in {path} was announced as new mail"
+            );
+        }
+
+        let events = Recorder::default();
+        on_arrival(&events, &db, 1, 1, "INBOX", &[1]).await;
+        assert!(
+            events
+                .0
+                .lock()
+                .expect("lock")
+                .iter()
+                .any(|e| e == "mail:arrived"),
+            "an arrival in the Inbox must still be announced"
+        );
+    }
+
+    /// H2 in the 2026-11-14 audit, from the user's own log: Gmail's Sent Mail held 225 of 518
+    /// messages, two of those 225 were deleted elsewhere, and they stayed here for hours as rows
+    /// that opened blank. The only check was "more here than on the server", which a folder held
+    /// in part can never be.
+    #[test]
+    fn a_folder_held_in_part_is_checked_over_the_range_it_holds() {
+        let held = Held {
+            all: 225,
+            numbered: 225,
+            lowest: Some(294),
+        };
+
+        // Something changed on the server since the last look: ask about UIDs 294 and up.
+        assert_eq!(
+            expunge_check(held, 516, Some(518), false, false),
+            ExpungeCheck::From(294)
+        );
+        // Something arrived (UIDNEXT moved) though the count happens to be the same.
+        assert_eq!(
+            expunge_check(held, 518, Some(518), true, false),
+            ExpungeCheck::From(294)
+        );
+        // Nothing changed at all: no round trip.
+        assert_eq!(
+            expunge_check(held, 518, Some(518), false, false),
+            ExpungeCheck::Skip
+        );
+        // Never recorded, which is every folder the first time after this version arrives:
+        // checked once, which clears the ghosts already there.
+        assert_eq!(
+            expunge_check(held, 518, None, false, false),
+            ExpungeCheck::From(294)
+        );
+    }
+
+    #[test]
+    fn a_folder_held_in_full_keeps_the_old_cheap_test() {
+        let held = Held {
+            all: 40,
+            numbered: 40,
+            lowest: Some(1),
+        };
+
+        assert_eq!(
+            expunge_check(held, 40, Some(41), false, false),
+            ExpungeCheck::Skip,
+            "as many here as there: nothing removed"
+        );
+        assert_eq!(
+            expunge_check(held, 39, Some(40), false, false),
+            ExpungeCheck::All,
+            "more here than there"
+        );
+        assert_eq!(
+            expunge_check(held, 0, Some(40), false, false),
+            ExpungeCheck::Empty
+        );
+        assert_eq!(
+            expunge_check(held, 40, Some(40), false, true),
+            ExpungeCheck::All,
+            "a rebuild always asks"
+        );
+    }
+
+    #[test]
+    fn arrivals_fetch_their_bodies_only_when_something_will_read_them() {
+        use crate::rules::engine::{rule_save, Action};
+        use crate::rules::predicate::{Condition, Field, Op, Predicate};
+
+        let mut conn = mailbox_with_uids(&[]);
+        let rule = |field: Field| {
+            Predicate::Is(Condition {
+                field,
+                op: Op::Contains,
+                value: "x".into(),
+            })
+        };
+
+        // Nothing reads a body: no download on arrival, as before.
+        assert!(!arrivals_need_bodies(&conn).expect("check"));
+
+        let tx = conn.transaction().expect("tx");
+        rule_save(
+            &tx,
+            None,
+            "sender",
+            true,
+            &rule(Field::From),
+            &[Action::Flag],
+        )
+        .expect("save");
+        tx.commit().expect("commit");
+        assert!(
+            !arrivals_need_bodies(&conn).expect("check"),
+            "a header rule needs no body"
+        );
+
+        let tx = conn.transaction().expect("tx");
+        let id = rule_save(
+            &tx,
+            None,
+            "body",
+            false,
+            &rule(Field::Body),
+            &[Action::Flag],
+        )
+        .expect("save");
+        tx.commit().expect("commit");
+        assert!(
+            !arrivals_need_bodies(&conn).expect("check"),
+            "a disabled body rule needs no body"
+        );
+
+        let tx = conn.transaction().expect("tx");
+        rule_save(
+            &tx,
+            Some(id),
+            "body",
+            true,
+            &rule(Field::Body),
+            &[Action::Flag],
+        )
+        .expect("save");
+        tx.commit().expect("commit");
+        assert!(arrivals_need_bodies(&conn).expect("check"));
+
+        // And for the classifier, once it has enough mail to score with.
+        let fresh = mailbox_with_uids(&[]);
+        let corpus = crate::rules::junk::MIN_CORPUS;
+        fresh
+            .execute(
+                "INSERT INTO junk_corpus (is_junk, messages) VALUES (0, ?1), (1, ?1)",
+                rusqlite::params![corpus],
+            )
+            .expect("corpus");
+        assert!(arrivals_need_bodies(&fresh).expect("check"));
+    }
+
+    /// H10 in the 2026-11-14 audit: Block Sender did nothing to future mail.
+    ///
+    /// Blocking marked the mail already here as junk, and nothing ever looked at the blocked list
+    /// again — `vip::is_blocked` had no callers. The next message from that sender arrived in the
+    /// Inbox like any other and raised a toast.
+    #[tokio::test]
+    async fn mail_from_a_blocked_sender_arrives_as_junk() {
+        let dir = tempfile::tempdir().expect("dir");
+        let db = Db::open(&dir.path().join("halcyon.db")).expect("open");
+
+        db.write(|tx| {
+            tx.execute(
+                "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+                 VALUES (1, 'T', 'me@t.test', 'other', 'password', 'halcyon:me')",
+                [],
+            )?;
+            tx.execute(
+                "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+                 VALUES (1, 1, 'INBOX', 'Inbox', 'inbox')",
+                [],
+            )?;
+            for (id, name, address) in [
+                (1, "Pest Co", "Offers@Pest.example"),
+                (2, "Ada", "ada@example.test"),
+                // Contains the blocked address without being it.
+                (3, "Not a pest", "notoffers@pest.example"),
+            ] {
+                tx.execute(
+                    "INSERT INTO message (
+                         id, account_id, mailbox_id, uid, subject, date_sent, date_received,
+                         size, from_name, from_addr, from_all, to_all, body_text,
+                         has_attachment, flag_seen, flag_flagged, is_junk
+                     ) VALUES (?1, 1, 1, ?1, 'S', 0, 0, 10, ?2, ?3, ?2 || ' ' || ?3, '', '',
+                               0, 0, 0, 0)",
+                    rusqlite::params![id, name, address],
+                )?;
+            }
+            crate::rules::vip::block_sender(tx, "offers@pest.example", 0)?;
+            // Blocking is retroactive; start from mail that arrives after it.
+            tx.execute("UPDATE message SET is_junk = 0, junk_by_user = 0", [])?;
+            Ok(())
+        })
+        .await
+        .expect("seed");
+
+        on_arrival(&Recorder::default(), &db, 1, 1, "INBOX", &[1, 2, 3]).await;
+
+        let junk: Vec<(i64, i64)> = db
+            .read(|conn| {
+                let mut statement = conn.prepare("SELECT id, is_junk FROM message ORDER BY id")?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+            .expect("read");
+
+        assert_eq!(junk, vec![(1, 1), (2, 0), (3, 0)]);
+    }
+
+    #[test]
+    fn a_body_fetch_never_takes_another_accounts_message() {
+        // All Inboxes puts two accounts' rows side by side, and the prefetch used to send the
+        // next three ids under the selected row's account. Each was then fetched by its own UID
+        // and folder path from the wrong server, and whatever that server had at that UID was
+        // stored as its body.
+        let conn = mailbox_with_uids(&[10, 11]);
+
+        conn.execute(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref)
+             VALUES (2, 'U', 'other@t.test', 'other', 'password', 'halcyon:other')",
+            [],
+        )
+        .expect("account");
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, role)
+             VALUES (2, 2, 'INBOX', 'Inbox', 'inbox')",
+            [],
+        )
+        .expect("mailbox");
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                 from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged, is_junk
+             ) VALUES (3, 2, 2, 10, 'S', 0, 0, 10, 'a@b.test', '', '', 0, 0, 0, 0)",
+            [],
+        )
+        .expect("message");
+
+        // Same UID, same folder name, different account: exactly the case that matched.
+        let wanted = bodies_wanted(&conn, 1, &[1, 3, 2]);
+
+        assert_eq!(
+            wanted.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![1, 2],
+            "message 3 belongs to account 2 and must not be fetched through account 1"
+        );
+        assert_eq!(
+            bodies_wanted(&conn, 2, &[1, 3, 2])
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
     }
 
     #[test]

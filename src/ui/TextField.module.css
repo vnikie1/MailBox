@@ -30,9 +30,13 @@
 }
 
 /* docs/02 §6.6 — collapsed 200 wide, focused expands to 320 over --dur-base. The only
- * width animation in the app, and the doc asks for it explicitly. */
+ * width animation in the app, and the doc asks for it explicitly.
+ *
+ * Never wider than what holds it, though: the focused width is a request. The toolbar's search
+ * field asked for it regardless of the room it had and ran off the window (M43). */
 .search {
   width: var(--search-width);
+  max-width: 100%;
 }
 
 .leading {

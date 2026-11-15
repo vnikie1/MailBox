@@ -35,9 +35,9 @@ fn the_title_does_not_become_the_first_line_of_the_message() {
     let rendered = render(
         Some(NEWSLETTER),
         None,
-        &HashMap::new(),
+        HashMap::new(),
         false,
-        &HashMap::new(),
+        HashMap::new(),
     );
 
     assert!(
@@ -53,9 +53,9 @@ fn the_message_itself_still_arrives() {
     let rendered = render(
         Some(NEWSLETTER),
         None,
-        &HashMap::new(),
+        HashMap::new(),
         false,
-        &HashMap::new(),
+        HashMap::new(),
     );
 
     assert!(
@@ -81,7 +81,7 @@ fn head_metadata_leaves_no_text_behind() {
         <body><p>The actual message.</p><noscript>Turn on scripts.</noscript></body>
       </html>"#;
 
-    let rendered = render(Some(source), None, &HashMap::new(), false, &HashMap::new());
+    let rendered = render(Some(source), None, HashMap::new(), false, HashMap::new());
 
     assert!(rendered.html.contains("The actual message."));
     assert!(!rendered.html.contains("SUBJECT LINE"), "{}", rendered.html);

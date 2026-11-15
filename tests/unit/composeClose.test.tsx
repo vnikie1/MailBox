@@ -35,7 +35,7 @@ let requestClose: (() => boolean) | null = null
 
 const closeThisWindow = vi.fn(() => Promise.resolve())
 const saveDraft = vi.fn(() => Promise.resolve({ id: 1, messageId: 'm1' }))
-const discardDraft = vi.fn(() => Promise.resolve())
+const discardDraft = vi.fn<(messageId: string) => Promise<void>>(() => Promise.resolve())
 const send = vi.fn(() => Promise.resolve(1))
 
 // The real module, with only the pieces this test drives replaced. Listing exports by hand
@@ -63,7 +63,7 @@ vi.mock('@/lib/ipc', async (importOriginal) => ({
       attachments: [],
     }),
   composeSaveDraft: () => saveDraft(),
-  composeDiscardDraft: () => discardDraft(),
+  composeDiscardDraft: (messageId: string) => discardDraft(messageId),
   composeSend: () => send(),
   composeUndoSeconds: () => Promise.resolve(10),
   composePickFiles: () => Promise.resolve([]),
@@ -134,8 +134,28 @@ describe('closing a compose window with something in it', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
 
-    expect(closeThisWindow).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(closeThisWindow).toHaveBeenCalled()
+    })
     expect(requestClose?.()).toBe(true)
+  })
+
+  it('throws away a draft it had already saved when Delete is pressed', async () => {
+    // H4 in the 2026-11-14 audit: Delete closed the window and left the autosaved copy in
+    // Drafts, here and on every other device.
+    await openComposeWithContent()
+    window.dispatchEvent(new Event('blur'))
+    await waitFor(() => {
+      expect(saveDraft).toHaveBeenCalled()
+    })
+
+    requestClose?.()
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(discardDraft).toHaveBeenCalledWith('m1')
+    })
+    expect(closeThisWindow).toHaveBeenCalled()
   })
 
   it('closes when Save as Draft is pressed, and saves', async () => {
@@ -144,8 +164,24 @@ describe('closing a compose window with something in it', () => {
 
     await userEvent.click(await screen.findByRole('button', { name: 'Save as Draft' }))
 
-    expect(closeThisWindow).toHaveBeenCalled()
+    await waitFor(() => {
+      expect(closeThisWindow).toHaveBeenCalled()
+    })
+    expect(saveDraft).toHaveBeenCalled()
     expect(requestClose?.()).toBe(true)
+  })
+
+  it('stays open when the draft could not be saved, and says so', async () => {
+    // Save as Draft closed at once, whether or not the save had landed — or could. A save that
+    // failed took the message with the window.
+    saveDraft.mockImplementationOnce(() => Promise.reject(new Error('disk full')))
+    await openComposeWithContent()
+    requestClose?.()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Save as Draft' }))
+
+    expect(await screen.findByText(/could not be saved/)).toBeTruthy()
+    expect(closeThisWindow).not.toHaveBeenCalled()
   })
 
   it('keeps asking after Cancel, because nothing was decided', async () => {

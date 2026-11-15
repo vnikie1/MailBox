@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, Eye, EyeOff, ImageOff } from 'lucide-react'
 
 import { useMessageBody } from '@/app/queries'
-import { remoteImagesEnabled, setRemoteImagesEnabled } from '@/lib/ipc'
+import { reasonFor, remoteImagesEnabled, setRemoteImagesEnabled } from '@/lib/ipc'
 import { Button, EmptyState } from '@/ui'
 
 import { MessageFrame } from './MessageFrame'
@@ -83,7 +83,9 @@ export function MessageBody({ messageId, className }: MessageBodyProps) {
           icon={AlertTriangle}
           tone="error"
           title="This message could not be loaded"
-          description={error instanceof Error ? error.message : undefined}
+          // The core's words, which a rejection carries as `{ code, message }` rather than as an
+          // Error: read as an Error, every one of them came out as no description at all (M41).
+          description={reasonFor(error)}
           action={
             <Button
               variant="bordered"

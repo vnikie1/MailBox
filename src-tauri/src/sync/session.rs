@@ -33,7 +33,143 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub type TlsStream = async_native_tls::TlsStream<TcpStream>;
-pub type ImapSession = Session<TlsStream>;
+pub type ImapSession = Session<Watchdog<TlsStream>>;
+
+/// A mailbox name as async-imap 0.10's `append` needs it: escaped, but not quoted.
+///
+/// `append` writes `APPEND "{mailbox}"`, quoting the name without escaping it, where SELECT,
+/// CREATE, DELETE and MOVE quote and escape. So a draft saved, or a sent message filed, into a
+/// folder with a quote or a backslash in its name ended the quoted string early and was refused.
+/// Found by the rig's `audit_gate`, after L3 of the 2026-11-14 audit.
+pub fn append_name(mailbox: &str) -> String {
+    escape_quoted(mailbox)
+}
+
+/// A mailbox name as async-imap 0.10's `uid_copy` needs it: quoted and escaped.
+///
+/// `uid_copy` writes the name as given, with no quotes at all. COPY is how a message moves on a
+/// server without MOVE, so a move into any folder with a space in its name — "Deleted Items",
+/// which is where Delete sends mail on Exchange, whose IMAP has no MOVE — was a syntax error the
+/// server read as a move into "Deleted". Found by the rig's `audit_gate`.
+pub fn copy_name(mailbox: &str) -> String {
+    format!("\"{}\"", escape_quoted(mailbox))
+}
+
+/// The inside of an IMAP quoted string (RFC 3501 §4.3): `\` and `"` escaped.
+fn escape_quoted(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// How long an ordinary session waits for the server to say anything before giving up.
+///
+/// Every command after sign-in used to wait for ever (H3, 2026-11-14 audit). A connection that
+/// died while a laptop slept, or a server that stopped answering, held the account's sync lock
+/// until the app was restarted; two hung body downloads took both body-fetch slots and stopped
+/// bodies loading for every account. Two minutes is far longer than any command takes to start
+/// answering, and short enough that the next sync tick finds the account free.
+pub const READ_LIMIT: Duration = Duration::from_secs(120);
+
+/// The same for a session that waits in IDLE, which is silent by design for up to
+/// `idle::IDLE_REISSUE` (29 minutes) and is given two minutes beyond it.
+pub const IDLE_READ_LIMIT: Duration = Duration::from_secs(31 * 60);
+
+/// A stream that fails a read the server has not answered within a limit.
+///
+/// The limit is on *silence*, not on a conversation's length: it is counted from when a read
+/// starts waiting and reset whenever data arrives, so a 40 MB body that keeps arriving is never
+/// cut off, and a server that has gone quiet is. Time between commands, when nothing is reading,
+/// does not count.
+pub struct Watchdog<S> {
+    inner: S,
+    limit: Duration,
+    deadline: std::pin::Pin<Box<tokio::time::Sleep>>,
+    waiting: bool,
+}
+
+impl<S> Watchdog<S> {
+    pub fn new(inner: S, limit: Duration) -> Self {
+        Self {
+            inner,
+            limit,
+            deadline: Box::pin(tokio::time::sleep(limit)),
+            waiting: false,
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Watchdog<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let this = self.get_mut();
+
+        match std::pin::Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(result) => {
+                this.waiting = false;
+                Poll::Ready(result)
+            }
+            Poll::Pending => {
+                if !this.waiting {
+                    this.waiting = true;
+                    let at = tokio::time::Instant::now() + this.limit;
+                    this.deadline.as_mut().reset(at);
+                }
+
+                match this.deadline.as_mut().poll(cx) {
+                    Poll::Ready(()) => {
+                        this.waiting = false;
+                        Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!(
+                                "the server sent nothing for {} seconds",
+                                this.limit.as_secs()
+                            ),
+                        )))
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Watchdog<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl<S: std::fmt::Debug> std::fmt::Debug for Watchdog<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Watchdog")
+            .field("inner", &self.inner)
+            .field("limit", &self.limit)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SyncError {
@@ -147,6 +283,44 @@ impl SyncError {
     /// a password it has already refused is how an account gets locked. Everything else —
     /// network, timeout, a server having a bad minute — is worth another attempt after a
     /// backoff.
+    /// Whether this means the connection itself is gone, rather than one command failing.
+    ///
+    /// After one of these every later command on the same session fails at once, which is how a
+    /// single dropped connection failed 29 of 31 Yahoo folders in four milliseconds (M1,
+    /// 2026-11-14 audit). The sync reconnects once on these instead.
+    pub fn connection_lost(&self) -> bool {
+        // Not a drop, and reconnecting to ask the same question gets the same answer. See below.
+        if self.unparseable() {
+            return false;
+        }
+
+        match self {
+            SyncError::Io(_) | SyncError::Timeout { .. } | SyncError::Unreachable { .. } => true,
+            SyncError::Imap(error) => matches!(
+                error,
+                async_imap::error::Error::Io(_) | async_imap::error::Error::ConnectionLost
+            ),
+            _ => false,
+        }
+    }
+
+    /// Whether the server sent something the IMAP parser could not read.
+    ///
+    /// async-imap reports it as an I/O error ("… during parsing of …") and keeps the bytes it
+    /// could not read at the front of its buffer, so every later read on the same session fails
+    /// on them again. The session is finished, but the connection was not lost, and asking the
+    /// same question on a new one gets the same answer: one such message used to fail its
+    /// mailbox on every pass, and in the Inbox it ended the whole account's pass before any other
+    /// folder was read (M2, 2026-11-14 audit). See `Caps::headers_only`.
+    pub fn unparseable(&self) -> bool {
+        let error = match self {
+            SyncError::Io(error) | SyncError::Imap(async_imap::error::Error::Io(error)) => error,
+            _ => return false,
+        };
+
+        error.kind() == std::io::ErrorKind::Other && error.to_string().contains("during parsing of")
+    }
+
     pub fn is_retryable(&self) -> bool {
         !matches!(
             self,
@@ -220,6 +394,14 @@ pub struct Caps {
     /// `UIDPLUS` — an APPEND that tells us the UID it landed on, which the outbox needs so a
     /// sent message is not fetched back as if it were new.
     pub uidplus: bool,
+    /// Not a capability of the server's: read envelopes from the raw header fields, never from
+    /// the server's `ENVELOPE`.
+    ///
+    /// Set for one mailbox after its answer could not be parsed. An `ENVELOPE` is a structure
+    /// the IMAP parser has to understand in full, and one malformed message in a batch fails the
+    /// whole batch; the header fields arrive as a literal the parser never looks inside, and are
+    /// read by the same code that reads an imported `.eml` (M2, 2026-11-14 audit).
+    pub headers_only: bool,
 }
 
 /// The wire name of one advertised capability.
@@ -255,12 +437,31 @@ impl Caps {
             compress: has("COMPRESS=DEFLATE"),
             objectid: has("OBJECTID"),
             uidplus: has("UIDPLUS"),
+            headers_only: false,
         }
     }
 
     /// Whether incremental sync can use modification sequences at all.
     pub fn has_modseq(self) -> bool {
         self.condstore || self.qresync
+    }
+
+    /// What can be asked of one mailbox, given what its SELECT reported.
+    ///
+    /// CONDSTORE is the server's, and a server can still keep no modification sequences for a
+    /// particular mailbox: it says `[NOMODSEQ]` and reports no HIGHESTMODSEQ (RFC 7162 §3.1.2.2),
+    /// and a FETCH there that asks for `MODSEQ` is an error. Every fetch of such a mailbox
+    /// asked, so it failed every time and the mailbox never synced (L2).
+    pub fn for_mailbox(self, highest_modseq: Option<u64>) -> Self {
+        if highest_modseq.is_some() {
+            return self;
+        }
+
+        Self {
+            condstore: false,
+            qresync: false,
+            ..self
+        }
     }
 }
 
@@ -322,19 +523,41 @@ pub async fn connect(
     email: &str,
     credential: &Credential,
 ) -> Result<(ImapSession, Caps), SyncError> {
+    connect_with_limit(server, email, credential, READ_LIMIT).await
+}
+
+/// `connect`, for a session that will wait in IDLE. See [`IDLE_READ_LIMIT`].
+pub async fn connect_for_idle(
+    server: &ServerSettings,
+    email: &str,
+    credential: &Credential,
+) -> Result<(ImapSession, Caps), SyncError> {
+    connect_with_limit(server, email, credential, IDLE_READ_LIMIT).await
+}
+
+async fn connect_with_limit(
+    server: &ServerSettings,
+    email: &str,
+    credential: &Credential,
+    read_limit: Duration,
+) -> Result<(ImapSession, Caps), SyncError> {
     // The whole handshake under one ceiling. Every individual step below can block, and one
     // of them provably blocks forever when a token is stale.
-    tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake(server, email, credential))
-        .await
-        .map_err(|_| SyncError::Timeout {
-            host: server.host.clone(),
-        })?
+    tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        handshake(server, email, credential, read_limit),
+    )
+    .await
+    .map_err(|_| SyncError::Timeout {
+        host: server.host.clone(),
+    })?
 }
 
 async fn handshake(
     server: &ServerSettings,
     email: &str,
     credential: &Credential,
+    read_limit: Duration,
 ) -> Result<(ImapSession, Caps), SyncError> {
     let tcp = tokio::time::timeout(
         CONNECT_TIMEOUT,
@@ -354,6 +577,16 @@ async fn handshake(
     // 20-byte FETCH with the next one adds latency to every round trip in a backfill.
     let _ = tcp.set_nodelay(true);
 
+    // Keepalive, so a connection that died while the machine slept — the server long gone, a
+    // router's mapping dropped — is found out by the operating system rather than waited on. An
+    // IDLE session is silent for up to 29 minutes, and without probes nothing on this side can
+    // tell silence from a dead peer (H3, 2026-11-14 audit). Best effort: a socket that refuses
+    // the option still works, and the read limit below still applies.
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10));
+    let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
+
     if server.security != Security::Tls {
         // Only 993/implicit TLS is supported. Phase 4's connection test says the same thing
         // in the same words, and none of the five providers needs anything else.
@@ -371,7 +604,7 @@ async fn handshake(
             source,
         })?;
 
-    let mut client = async_imap::Client::new(tls);
+    let mut client = async_imap::Client::new(Watchdog::new(tls, read_limit));
 
     // **Consume the greeting.** `Client::new` does not read it, and nothing in the crate's
     // API hints that you must — but every server opens with `* OK ... ready` before it will
@@ -438,6 +671,20 @@ mod tests {
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// What reaches the server is async-imap's frame around these: `UID COPY 1 {name}` and
+    /// `APPEND "{name}"`. The rig's `audit_gate` shows Dovecot reading them as the folder meant.
+    #[test]
+    fn a_mailbox_name_is_quoted_for_copy_and_escaped_for_append() {
+        assert_eq!(copy_name("Deleted Items"), "\"Deleted Items\"");
+        assert_eq!(copy_name("Archive"), "\"Archive\"");
+        assert_eq!(copy_name(r#""Q4" plans"#), r#""\"Q4\" plans""#);
+        assert_eq!(copy_name(r"back\slash"), r#""back\\slash""#);
+
+        assert_eq!(append_name("Sent Items"), "Sent Items");
+        assert_eq!(append_name(r#""Q4" plans"#), r#"\"Q4\" plans"#);
+        assert_eq!(append_name(r"back\slash"), r"back\\slash");
     }
 
     #[test]
@@ -719,5 +966,111 @@ mod tests {
             }
             other => panic!("expected Unreachable, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod watchdog_tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::Watchdog;
+
+    /// H3 in the 2026-11-14 audit: no IMAP command had a timeout once signed in. A connection
+    /// that died while the laptop slept, or a server that stopped answering, held the account's
+    /// lock until the app was restarted — and two hung body downloads stopped bodies loading for
+    /// every account. A read that waits too long now fails, and the sync can start again.
+    #[tokio::test]
+    async fn a_read_that_hears_nothing_gives_up() {
+        let (client, _server) = tokio::io::duplex(64);
+        let mut guarded = Watchdog::new(client, Duration::from_millis(50));
+
+        let mut buffer = [0u8; 8];
+        let started = std::time::Instant::now();
+        let error = guarded
+            .read(&mut buffer)
+            .await
+            .expect_err("a silent server must not be waited for for ever");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_answers_in_time_is_not_cut_off() {
+        let (client, mut server) = tokio::io::duplex(64);
+        let mut guarded = Watchdog::new(client, Duration::from_millis(500));
+
+        tokio::spawn(async move {
+            // Two answers, each well inside the limit, together longer than it: the limit is
+            // on silence, not on the length of the conversation.
+            for _ in 0..2 {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let _ = server.write_all(b"* OK\r\n").await;
+            }
+        });
+
+        let mut buffer = [0u8; 6];
+        guarded.read_exact(&mut buffer).await.expect("first answer");
+        guarded
+            .read_exact(&mut buffer)
+            .await
+            .expect("second answer");
+        assert_eq!(&buffer, b"* OK\r\n");
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::SyncError;
+
+    #[test]
+    fn a_dropped_connection_is_told_apart_from_a_refused_command() {
+        let dropped = [
+            SyncError::Imap(async_imap::error::Error::ConnectionLost),
+            SyncError::Imap(async_imap::error::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "reset",
+            ))),
+            SyncError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "silent")),
+            SyncError::Timeout {
+                host: "imap.example.test".into(),
+            },
+        ];
+        for error in &dropped {
+            assert!(error.connection_lost(), "{error:?}");
+        }
+
+        // A folder the server will not open is that folder's problem; the session is fine.
+        let refused = SyncError::Imap(async_imap::error::Error::No("[NONEXISTENT]".into()));
+        assert!(!refused.connection_lost());
+        assert!(!SyncError::ShuttingDown.connection_lost());
+    }
+
+    #[test]
+    fn a_response_the_parser_cannot_read_is_not_a_dropped_connection() {
+        // M2. async-imap's own wording, from `ImapStream::decode`: the bytes stay in its buffer,
+        // so reconnecting to ask again gets the same answer. It is retried from plain headers.
+        let unreadable = || {
+            std::io::Error::other(
+                "Error(Error { input: [..], code: Tag }) during parsing of \"* 4 FETCH (UID 9 ENVELOPE (\"",
+            )
+        };
+
+        for error in [
+            SyncError::Io(unreadable()),
+            SyncError::Imap(async_imap::error::Error::Io(unreadable())),
+        ] {
+            assert!(error.unparseable(), "{error:?}");
+            assert!(!error.connection_lost(), "{error:?}");
+        }
+
+        let reset = SyncError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(!reset.unparseable());
+        assert!(reset.connection_lost());
     }
 }

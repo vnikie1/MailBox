@@ -1,6 +1,9 @@
+import { AlertTriangle } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { openExternal } from '@/lib/ipc'
+import type { HostMismatch } from '@/lib/generated/HostMismatch'
+import { openExternal, openExternalConfirmed } from '@/lib/ipc'
+import { Button, EmptyState, ErrorBoundary, Sheet } from '@/ui'
 
 import { frameDocument } from './frameDocument'
 import { repairShortRows } from './repairTables'
@@ -49,7 +52,34 @@ export interface MessageFrameProps {
   hideBlockedImages?: boolean | undefined
 }
 
-export function MessageFrame({
+/**
+ * The frame, behind an error boundary.
+ *
+ * Preparing a message for the frame runs code over the sender's markup during render — the
+ * table repair parses it — and an error there used to unmount the whole window, because nothing
+ * above caught it. A message that cannot be shown now says so in its own pane, and the next one
+ * selected gets a fresh attempt.
+ */
+export function MessageFrame(props: MessageFrameProps) {
+  return (
+    <ErrorBoundary
+      label="message frame"
+      resetKey={props.resetKey}
+      fallback={
+        <EmptyState
+          tone="error"
+          icon={AlertTriangle}
+          title="This message could not be shown"
+          description="Something in its formatting stopped the reader. Other messages are not affected."
+        />
+      }
+    >
+      <Frame {...props} />
+    </ErrorBoundary>
+  )
+}
+
+function Frame({
   html,
   css,
   fromPlainText,
@@ -69,6 +99,9 @@ export function MessageFrame({
   /** The observer watching the document currently in the frame, so it can be replaced. */
   const observers = useRef<ResizeObserver | null>(null)
   const [height, setHeight] = useState(0)
+
+  /** A link the core held back because its text names a different site. See `LinkCheck`. */
+  const [mismatch, setMismatch] = useState<HostMismatch | null>(null)
 
   // A new message starts from nothing. Keeping the previous height would leave the frame the
   // size of the message before it, which is visible as a jump on every selection.
@@ -157,8 +190,20 @@ export function MessageFrame({
         return
       }
 
-      if (/^https?:/i.test(href) || href.startsWith('mailto:')) {
-        void openExternal(href, anchor?.textContent ?? '')
+      // Trimmed, and the scheme in any case: a link written `HTTPS://`, or `MAILTO:`, or with
+      // a space before it, did nothing at all (L33, 2026-11-14 audit). The core decides what may
+      // open; this only leaves out what is not a link out of the message, like a `#section`.
+      const target = href.trim()
+      if (/^(https?|mailto):/i.test(target)) {
+        openExternal(target, anchor?.textContent ?? '')
+          .then((outcome) => {
+            // The core held it back: the text names one site and the link goes to another.
+            // This was dropped, so most newsletter links did nothing when clicked (H15).
+            if (outcome.mismatch) setMismatch(outcome.mismatch)
+          })
+          // The browser not opening is the browser's message to give. There is no toast here:
+          // the `.eml` window has no toast provider.
+          .catch(() => undefined)
       }
     })
 
@@ -186,15 +231,72 @@ export function MessageFrame({
   )
 
   return (
-    <iframe
-      ref={frameRef}
-      title="Message content"
-      className={styles.frame}
-      // No allow-scripts, no allow-popups, no allow-top-navigation. docs/03 §6.1.
-      sandbox="allow-same-origin"
-      srcDoc={frameDocument(repaired, fromPlainText, css, hideBlockedImages)}
-      style={height > 0 ? { height: `${String(height)}px` } : undefined}
-      onLoad={onFrameLoad}
-    />
+    <>
+      <iframe
+        ref={frameRef}
+        title="Message content"
+        className={styles.frame}
+        // No allow-scripts, no allow-popups, no allow-top-navigation. docs/03 §6.1.
+        sandbox="allow-same-origin"
+        srcDoc={frameDocument(repaired, fromPlainText, css, hideBlockedImages)}
+        style={height > 0 ? { height: `${String(height)}px` } : undefined}
+        onLoad={onFrameLoad}
+      />
+      <LinkCheck
+        mismatch={mismatch}
+        onClose={() => {
+          setMismatch(null)
+        }}
+      />
+    </>
+  )
+}
+
+/**
+ * The phishing check docs/03 §6.6 asks for: a link whose text names one site and whose
+ * destination is another.
+ *
+ * The core compared them and held the link back, and nothing here was listening, so the click
+ * simply did nothing (H15, 2026-11-14 audit). Both sites are shown, and the whole address, so the
+ * choice is made on what the link really is. Cancel is the safe answer, and Escape gives it.
+ */
+export function LinkCheck({
+  mismatch,
+  onClose,
+}: {
+  mismatch: HostMismatch | null
+  onClose: () => void
+}) {
+  return (
+    <Sheet
+      open={mismatch !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose()
+      }}
+      title="Open this link?"
+      {...(mismatch
+        ? {
+            description: `The message shows ${mismatch.shown}, but this link goes to ${mismatch.actual}.`,
+          }
+        : {})}
+      footer={
+        <>
+          <Button variant="bordered" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="filled"
+            onClick={() => {
+              if (mismatch) void openExternalConfirmed(mismatch).catch(() => undefined)
+              onClose()
+            }}
+          >
+            Open Link
+          </Button>
+        </>
+      }
+    >
+      <p className={styles.linkAddress}>{mismatch?.url}</p>
+    </Sheet>
   )
 }

@@ -82,17 +82,57 @@ pub struct Activity {
     pub live: bool,
 }
 
+/// A stop that cannot be missed.
+///
+/// It was a bare `Notify`, and `notify_waiters` wakes only what is waiting at that moment. A
+/// watcher stopped while it was connecting, or in the middle of the sync a notification had
+/// started, missed it and ran on: syncing an account whose sync had been turned off, with nothing
+/// left in the registry that could stop it, and a second watcher beside it once the account was
+/// turned on again (M9, 2026-11-14 audit). This one remembers being stopped, so every wait for it
+/// from then on returns at once.
+#[derive(Debug, Default)]
+pub(crate) struct StopSignal {
+    stopped: std::sync::atomic::AtomicBool,
+    notify: Notify,
+}
+
+impl StopSignal {
+    pub(crate) fn stop(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Returns once stopped: at once, if that has already happened.
+    pub(crate) async fn stopped(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+
+        // Registered before the flag is read, so a stop landing between the two still wakes it.
+        notified.as_mut().enable();
+        if self.is_stopped() {
+            return;
+        }
+
+        notified.await;
+    }
+}
+
 /// A running watcher. Dropping it does not stop the task; `stop` does.
 pub struct Watcher {
-    stop: Arc<Notify>,
+    stop: Arc<StopSignal>,
     /// Wakes a watcher that has paused on a refused sign-in. See [`Watcher::resume`].
     resume: tokio::sync::watch::Sender<()>,
 }
 
 impl Watcher {
-    /// Asks the watcher to finish after its current wait.
+    /// Ends the watcher, whatever it is doing. See [`StopSignal`].
     pub fn stop(&self) {
-        self.stop.notify_waiters();
+        self.stop.stop();
     }
 
     /// Tells a watcher that has paused on a refused sign-in to try again.
@@ -121,12 +161,12 @@ impl Watcher {
 /// watcher that gave up on the first dropped connection would be worse than no watcher, because
 /// the app would look live and not be.
 pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) -> Watcher {
-    let stop = Arc::new(Notify::new());
+    let stop = Arc::new(StopSignal::default());
     let signal = Arc::clone(&stop);
     let (resume, mut resumed) = tokio::sync::watch::channel(());
 
     // The safety net, on its own task because the watcher below spends its life parked in a
-    // wait that only the server can end. `stop` uses `notify_waiters`, which wakes both.
+    // wait that only the server can end. One stop ends both.
     {
         let app = Arc::clone(&app);
         let db = db.clone();
@@ -138,20 +178,17 @@ pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) 
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(REFRESH_INTERVAL) => {}
-                    _ = signal.notified() => return,
+                    _ = signal.stopped() => return,
                 }
 
-                // The sync waits on `stop` too, and that is not belt and braces.
-                // `notify_waiters` wakes the waiters registered *at that moment*, so a stop
-                // arriving while this task was inside a sync would be dropped on the floor and
-                // the loop would go round again — re-syncing an account the user had just
-                // removed or turned off, for as long as the app ran.
+                // The sync waits on `stop` too, so a stop ends it rather than the pass running on
+                // for an account the user has just removed or turned off.
                 //
                 // Failures are the sync's business to report, not the watcher's: it has its
                 // own backoff and its own error events.
                 let synced = tokio::select! {
                     result = engine.sync_account(app.as_ref(), &db, account_id) => result.is_ok(),
-                    _ = signal.notified() => return,
+                    _ = signal.stopped() => return,
                 };
 
                 // A pass that got through has just proved the account can sign in, however that
@@ -179,15 +216,20 @@ pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) 
             // so only a resume that arrives from here on can wake a pause that follows it.
             resumed.mark_unchanged();
 
-            let outcome = run(
-                app.as_ref(),
-                &db,
-                &engine,
-                account_id,
-                &signal,
-                &mut last_sync,
-            )
-            .await;
+            // Raced against the stop as a whole. Connecting, selecting and the sync a
+            // notification starts are not waits on the stop, and a stop that landed in one of
+            // them used to be lost there (M9).
+            let outcome = tokio::select! {
+                outcome = run(
+                    app.as_ref(),
+                    &db,
+                    &engine,
+                    account_id,
+                    &signal,
+                    &mut last_sync,
+                ) => outcome,
+                _ = signal.stopped() => Ok(Stopped::Requested),
+            };
 
             match outcome {
                 // Asked to stop.
@@ -240,7 +282,7 @@ pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) 
 
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
-                        _ = signal.notified() => return,
+                        _ = signal.stopped() => return,
                     }
                 }
             }
@@ -255,10 +297,10 @@ pub fn watch(app: Arc<dyn Events>, db: Db, engine: SyncEngine, account_id: i64) 
 /// A resume sent since the receiver was last marked seen counts, even if it landed before this
 /// was called — that is the attempt-still-in-flight case [`Watcher::resume`] describes. Every
 /// sender gone counts as a stop: nothing is left that could ever resume it.
-async fn paused(resumed: &mut tokio::sync::watch::Receiver<()>, stop: &Notify) -> bool {
+async fn paused(resumed: &mut tokio::sync::watch::Receiver<()>, stop: &StopSignal) -> bool {
     tokio::select! {
         changed = resumed.changed() => changed.is_ok(),
-        _ = stop.notified() => false,
+        _ = stop.stopped() => false,
     }
 }
 
@@ -376,7 +418,7 @@ async fn run(
     db: &Db,
     engine: &SyncEngine,
     account_id: i64,
-    stop: &Notify,
+    stop: &StopSignal,
     last_sync: &mut Option<std::time::Instant>,
 ) -> Result<Stopped, SyncError> {
     let account = db
@@ -392,7 +434,8 @@ async fn run(
         })?;
 
     let credential = credential_for(db, &account).await?;
-    let (mut session, caps) = session::connect(&imap, &account.email, &credential).await?;
+    // The long read limit: this session is silent by design while it waits in IDLE.
+    let (mut session, caps) = session::connect_for_idle(&imap, &account.email, &credential).await?;
 
     if !caps.idle {
         // No IDLE. Close the connection rather than hold one open doing nothing, and fall
@@ -420,7 +463,7 @@ async fn run(
 
         let woke = tokio::select! {
             result = waiter => Some(result),
-            _ = stop.notified() => None,
+            _ = stop.stopped() => None,
         };
 
         // Ending the wait before taking the session back; the handle owns it until then.
@@ -446,12 +489,20 @@ async fn run(
                 // people's, so a drain of twenty flags arrives as twenty notifications.
                 tokio::select! {
                     _ = tokio::time::sleep(DEBOUNCE) => {}
-                    _ = stop.notified() => return Ok(Stopped::Requested),
+                    _ = stop.stopped() => return Ok(Stopped::Requested),
                 }
 
-                if last_sync.is_some_and(|at| at.elapsed() < MIN_INTERVAL) {
-                    tracing::debug!(account_id, "idle: change seen, still inside the quiet gap");
-                    continue;
+                // Inside the quiet gap the change waits for the gap to end and is synced then.
+                // It used to be dropped: the loop went back to idling, and the server, having
+                // told us once, does not tell us again — so new mail waited for the next
+                // notice or the five-minute refresh (L1).
+                let quiet = still_quiet(*last_sync, std::time::Instant::now());
+                if !quiet.is_zero() {
+                    tracing::debug!(account_id, ?quiet, "idle: change seen inside the quiet gap");
+                    tokio::select! {
+                        _ = tokio::time::sleep(quiet) => {}
+                        _ = stop.stopped() => return Ok(Stopped::Requested),
+                    }
                 }
                 *last_sync = Some(std::time::Instant::now());
 
@@ -478,18 +529,26 @@ async fn run(
     }
 }
 
+/// How much of the quiet gap after the last IDLE-triggered sync is still to run at `now`.
+/// Zero when there has been no such sync, or the gap is over.
+fn still_quiet(last_sync: Option<std::time::Instant>, now: std::time::Instant) -> Duration {
+    last_sync.map_or(Duration::ZERO, |at| {
+        MIN_INTERVAL.saturating_sub(now.saturating_duration_since(at))
+    })
+}
+
 /// The fallback for a server with no IDLE: look every so often.
 async fn poll(
     app: &dyn Events,
     db: &Db,
     engine: &SyncEngine,
     account_id: i64,
-    stop: &Notify,
+    stop: &StopSignal,
 ) -> Result<Stopped, SyncError> {
     loop {
         tokio::select! {
             _ = tokio::time::sleep(POLL_INTERVAL) => {}
-            _ = stop.notified() => return Ok(Stopped::Requested),
+            _ = stop.stopped() => return Ok(Stopped::Requested),
         }
 
         app.emit(
@@ -507,6 +566,29 @@ async fn poll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_inside_the_quiet_gap_waits_for_the_rest_of_it() {
+        // It was dropped, and the mail it announced waited up to five minutes (L1). Waited for
+        // instead: never longer than the gap, and not at all once the gap is over.
+        let synced = std::time::Instant::now();
+
+        assert_eq!(still_quiet(None, synced), Duration::ZERO);
+        assert_eq!(still_quiet(Some(synced), synced), MIN_INTERVAL);
+        assert_eq!(
+            still_quiet(Some(synced), synced + Duration::from_secs(4)),
+            MIN_INTERVAL - Duration::from_secs(4)
+        );
+        assert_eq!(
+            still_quiet(Some(synced), synced + MIN_INTERVAL),
+            Duration::ZERO
+        );
+        assert_eq!(
+            still_quiet(Some(synced), synced + REFRESH_INTERVAL),
+            Duration::ZERO
+        );
+        assert!(MIN_INTERVAL < REFRESH_INTERVAL);
+    }
 
     #[test]
     fn every_account_is_refreshed_well_inside_the_reissue_window() {
@@ -566,7 +648,7 @@ mod tests {
         // The race `Watcher::resume` exists to win: the sign-in finishes while the watcher is
         // still waiting on the refused token request that is about to pause it. With
         // `notify_waiters` that resume reached nobody, and IDLE stayed down.
-        let stop = Notify::new();
+        let stop = StopSignal::default();
         let (resume, mut resumed) = tokio::sync::watch::channel(());
 
         // The attempt begins; the user finishes signing in; then the attempt fails and the
@@ -583,7 +665,7 @@ mod tests {
         // The opposite mistake, and the reason this is not a `notify_one` permit. A resume sent
         // while the account was healthy — any `accounts:changed` sends one — must not make the
         // first refusal retry at once, spending a second request on a credential just refused.
-        let stop = Notify::new();
+        let stop = StopSignal::default();
         let (resume, mut resumed) = tokio::sync::watch::channel(());
 
         resume.send_replace(()); // an account was renamed, hours ago
@@ -596,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_paused_watcher_resumes_when_asked_and_ends_when_stopped() {
-        let stop = Arc::new(Notify::new());
+        let stop = Arc::new(StopSignal::default());
         let (resume, mut resumed) = tokio::sync::watch::channel(());
         resumed.mark_unchanged();
 
@@ -610,30 +692,54 @@ mod tests {
         );
 
         // Stopped while paused: removing an account, or turning its sync off.
-        let stop = Notify::new();
+        let stop = StopSignal::default();
         let (_resume, mut resumed) = tokio::sync::watch::channel(());
         resumed.mark_unchanged();
 
         let waiting = paused(&mut resumed, &stop);
         tokio::pin!(waiting);
-        // Polled once first, because `notify_waiters` wakes only what is already waiting. A
-        // zero timeout polls the future and then reports the deadline as passed.
+        // Polled once first, so the stop lands on a pause already waiting. A zero timeout polls
+        // the future and then reports the deadline as passed.
         assert!(
             tokio::time::timeout(Duration::ZERO, waiting.as_mut())
                 .await
                 .is_err(),
             "nothing has asked it to stop yet"
         );
-        stop.notify_waiters();
+        stop.stop();
 
         assert!(!waiting.await, "a stop must end the pause");
+    }
+
+    #[tokio::test]
+    async fn a_stop_given_while_nothing_was_waiting_for_it_still_counts() {
+        // M9. The watcher spends seconds at a time not waiting on the stop — connecting,
+        // selecting, inside the sync a notification started — and a stop given then was lost.
+        let stop = StopSignal::default();
+        stop.stop();
+
+        assert!(
+            tokio::time::timeout(STILL_WAITING, stop.stopped())
+                .await
+                .is_ok(),
+            "a stop given before anything waited must still end the wait"
+        );
+
+        let (_resume, mut resumed) = tokio::sync::watch::channel(());
+        resumed.mark_unchanged();
+        let woke = tokio::time::timeout(STILL_WAITING, paused(&mut resumed, &stop)).await;
+        assert_eq!(
+            woke.ok(),
+            Some(false),
+            "nor may a pause begun afterwards wait"
+        );
     }
 
     #[tokio::test]
     async fn a_paused_watcher_with_no_one_left_to_resume_it_ends() {
         // Once the registry entry and the safety net have both gone, nothing can ever send a
         // resume. Waiting on regardless would leave a task parked for the life of the process.
-        let stop = Notify::new();
+        let stop = StopSignal::default();
         let (resume, mut resumed) = tokio::sync::watch::channel(());
         resumed.mark_unchanged();
         drop(resume);
@@ -651,7 +757,7 @@ mod tests {
         watchers.running.lock().expect("registry").insert(
             account_id,
             Watcher {
-                stop: Arc::new(Notify::new()),
+                stop: Arc::new(StopSignal::default()),
                 resume,
             },
         );

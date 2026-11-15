@@ -408,6 +408,7 @@ describe('the browser store’s folder commands', () => {
       cursor: null,
       limit: 10,
       unreadOnly: false,
+      keepIds: [],
     })
     expect(page.items).toHaveLength(0)
   })

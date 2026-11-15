@@ -13,6 +13,14 @@ use rusqlite::Transaction;
 use super::model::FlagPatch;
 use super::DbError;
 
+/// The most ids put into one statement.
+///
+/// SQLite allows 32,766 parameters in a statement, and every function here used to put a whole
+/// selection into one — so Mark All as Read on a mailbox with more unread than that failed
+/// outright (M7, 2026-11-14 audit). Larger selections are taken in pieces of this size, inside the
+/// same transaction, so the change is still all or nothing.
+pub const CHUNK: usize = 500;
+
 /// `?1, ?2, ... ?n`, matching `query::placeholders`. Placeholders only, never values.
 fn placeholders(count: usize, start: usize) -> String {
     (0..count)
@@ -48,6 +56,16 @@ fn placeholders(count: usize, start: usize) -> String {
 pub fn mailboxes_of(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<i64>, DbError> {
     if ids.is_empty() {
         return Ok(Vec::new());
+    }
+
+    if ids.len() > CHUNK {
+        let mut all = Vec::new();
+        for chunk in ids.chunks(CHUNK) {
+            all.extend(mailboxes_of(tx, chunk)?);
+        }
+        all.sort_unstable();
+        all.dedup();
+        return Ok(all);
     }
 
     let in_list = placeholders(ids.len(), 1);
@@ -168,6 +186,14 @@ pub fn set_flags(tx: &Transaction<'_>, ids: &[i64], patch: FlagPatch) -> Result<
         return Ok(0);
     }
 
+    if ids.len() > CHUNK {
+        let mut changed = 0;
+        for chunk in ids.chunks(CHUNK) {
+            changed += set_flags(tx, chunk, patch)?;
+        }
+        return Ok(changed);
+    }
+
     let mut assignments: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -209,6 +235,14 @@ pub fn set_flags(tx: &Transaction<'_>, ids: &[i64], patch: FlagPatch) -> Result<
 pub fn move_to(tx: &Transaction<'_>, ids: &[i64], mailbox_id: i64) -> Result<usize, DbError> {
     if ids.is_empty() {
         return Ok(0);
+    }
+
+    if ids.len() > CHUNK {
+        let mut changed = 0;
+        for chunk in ids.chunks(CHUNK) {
+            changed += move_to(tx, chunk, mailbox_id)?;
+        }
+        return Ok(changed);
     }
 
     let before = snapshot(tx, ids)?;
@@ -273,6 +307,14 @@ pub fn delete(
 ) -> Result<usize, DbError> {
     if ids.is_empty() {
         return Ok(0);
+    }
+
+    if ids.len() > CHUNK {
+        let mut changed = 0;
+        for chunk in ids.chunks(CHUNK) {
+            changed += delete(tx, chunk, permanent, trash_mailbox_id)?;
+        }
+        return Ok(changed);
     }
 
     if !permanent {

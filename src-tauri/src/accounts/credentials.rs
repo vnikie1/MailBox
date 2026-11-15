@@ -112,18 +112,118 @@ fn entry(reference: &str, kind: Kind) -> Result<Entry, CredentialError> {
     })
 }
 
-pub fn store(reference: &str, kind: Kind, secret: &Secret) -> Result<(), CredentialError> {
-    entry(reference, kind)?
-        .set_password(secret.expose())
-        .map_err(|source| CredentialError::Store {
-            reference: reference.to_string(),
-            source,
-        })
+/// The longest secret one Credential Manager entry holds: 2,560 bytes, which keyring fills
+/// with UTF-16, so 1,280 characters.
+///
+/// A Microsoft access token is commonly longer, so it could not be stored at all: the sign-in
+/// failed with "Windows would not save the sign-in" (M29, 2026-11-14 audit). A longer secret is
+/// kept in parts, each in an entry of its own, and the main entry says how many there are.
+const ENTRY_CHARS: usize = 1280;
+
+/// The size of each part, under the limit with room to spare.
+const PART_CHARS: usize = 1000;
+
+/// What the main entry of a secret kept in parts holds, before the count. A NUL cannot be typed
+/// and appears in no token, so no real secret begins with it.
+const PARTS_MARKER: &str = "\0halcyon-parts:";
+
+/// More parts than any real secret needs. A count past this is not believed.
+const MAX_PARTS: usize = 32;
+
+fn part_entry(reference: &str, kind: Kind, index: usize) -> Result<Entry, CredentialError> {
+    let user = format!("{reference}:{}#{index}", kind.suffix());
+
+    Entry::new(SERVICE, &user).map_err(|source| CredentialError::Store {
+        reference: reference.to_string(),
+        source,
+    })
 }
 
-pub fn load(reference: &str, kind: Kind) -> Result<Secret, CredentialError> {
-    match entry(reference, kind)?.get_password() {
-        Ok(value) => Ok(Secret::new(value)),
+/// How many parts a main entry's value says there are, if it is a parts header at all.
+fn parts_of(value: &str) -> Option<usize> {
+    value
+        .strip_prefix(PARTS_MARKER)?
+        .parse()
+        .ok()
+        .filter(|count| (1..=MAX_PARTS).contains(count))
+}
+
+/// Splits a secret into parts of at most `size` UTF-16 units, never inside a character.
+fn split(value: &str, size: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut units = 0;
+
+    for character in value.chars() {
+        let width = character.len_utf16();
+        if units + width > size {
+            parts.push(std::mem::take(&mut current));
+            units = 0;
+        }
+        current.push(character);
+        units += width;
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// Deletes the parts a stored secret was kept in, if it was. Best effort.
+fn remove_parts(reference: &str, kind: Kind) {
+    let Some(count) = entry(reference, kind)
+        .ok()
+        .and_then(|main| main.get_password().ok())
+        .and_then(|value| parts_of(&value))
+    else {
+        return;
+    };
+
+    for index in 1..=count {
+        if let Ok(part) = part_entry(reference, kind, index) {
+            let _ = part.delete_credential();
+        }
+    }
+}
+
+pub fn store(reference: &str, kind: Kind, secret: &Secret) -> Result<(), CredentialError> {
+    let failed = |source| CredentialError::Store {
+        reference: reference.to_string(),
+        source,
+    };
+    let value = secret.expose();
+
+    // A longer secret stored before this one leaves its parts behind otherwise.
+    remove_parts(reference, kind);
+
+    if value.encode_utf16().count() <= ENTRY_CHARS && !value.starts_with(PARTS_MARKER) {
+        return entry(reference, kind)?.set_password(value).map_err(failed);
+    }
+
+    let parts = split(value, PART_CHARS);
+    if parts.len() > MAX_PARTS {
+        return Err(failed(keyring::Error::TooLong(
+            "secret".into(),
+            (MAX_PARTS * PART_CHARS) as u32,
+        )));
+    }
+
+    // The parts first, so the header never names parts that are not there yet.
+    for (index, part) in parts.iter().enumerate() {
+        part_entry(reference, kind, index + 1)?
+            .set_password(part)
+            .map_err(failed)?;
+    }
+
+    entry(reference, kind)?
+        .set_password(&format!("{PARTS_MARKER}{}", parts.len()))
+        .map_err(failed)
+}
+
+fn read(entry: &Entry, reference: &str) -> Result<String, CredentialError> {
+    match entry.get_password() {
+        Ok(value) => Ok(value),
         Err(keyring::Error::NoEntry) => Err(CredentialError::Missing {
             reference: reference.to_string(),
         }),
@@ -132,6 +232,20 @@ pub fn load(reference: &str, kind: Kind) -> Result<Secret, CredentialError> {
             source,
         }),
     }
+}
+
+pub fn load(reference: &str, kind: Kind) -> Result<Secret, CredentialError> {
+    let value = read(&entry(reference, kind)?, reference)?;
+
+    let Some(count) = parts_of(&value) else {
+        return Ok(Secret::new(value));
+    };
+
+    let mut whole = String::new();
+    for index in 1..=count {
+        whole.push_str(&read(&part_entry(reference, kind, index)?, reference)?);
+    }
+    Ok(Secret::new(whole))
 }
 
 /// Whether a secret of this kind exists, without reading it.
@@ -144,6 +258,8 @@ pub fn exists(reference: &str, kind: Kind) -> bool {
 
 /// Removes one secret. A missing entry is success — the caller wanted it gone.
 pub fn delete(reference: &str, kind: Kind) -> Result<(), CredentialError> {
+    remove_parts(reference, kind);
+
     match entry(reference, kind)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(source) => Err(CredentialError::Store {
@@ -326,6 +442,48 @@ mod tests {
             reference_for("Ada@Example.test"),
             reference_for("  ada@example.test  ")
         );
+    }
+
+    #[test]
+    fn a_secret_longer_than_one_entry_is_kept_whole() {
+        // M29. A Microsoft access token is commonly past the 1,280 characters one entry holds,
+        // and storing it failed outright.
+        let scratch = Scratch::new("long-token");
+        let reference = scratch.reference();
+        let token: String = (0..3_000)
+            .map(|index| char::from(b'A' + (index % 26) as u8))
+            .collect();
+
+        store(reference, Kind::AccessToken, &Secret::new(token.clone())).expect("store");
+        assert_eq!(
+            load(reference, Kind::AccessToken).expect("load").expose(),
+            token
+        );
+        assert!(exists(reference, Kind::AccessToken));
+
+        // A shorter one afterwards replaces it and leaves no parts behind.
+        store(reference, Kind::AccessToken, &Secret::new("short")).expect("store");
+        assert_eq!(
+            load(reference, Kind::AccessToken).expect("load").expose(),
+            "short"
+        );
+        let leftover = part_entry(reference, Kind::AccessToken, 1).expect("entry");
+        assert!(leftover.get_password().is_err(), "the old parts are gone");
+
+        // And a purge takes the parts as well as the header.
+        store(reference, Kind::AccessToken, &Secret::new(token)).expect("store");
+        purge(reference).expect("purge");
+        assert!(!exists(reference, Kind::AccessToken));
+        let leftover = part_entry(reference, Kind::AccessToken, 1).expect("entry");
+        assert!(leftover.get_password().is_err(), "purged with the rest");
+    }
+
+    #[test]
+    fn a_secret_is_split_between_characters_never_inside_one() {
+        let parts = split("ab😀cd", 3);
+        assert_eq!(parts.concat(), "ab😀cd");
+        assert!(parts.iter().all(|part| part.encode_utf16().count() <= 3));
+        assert_eq!(parts, vec!["ab", "😀c", "d"]);
     }
 
     #[test]

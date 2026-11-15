@@ -155,7 +155,7 @@ fn decode(path: &std::path::Path, part_id: &str) -> Result<Vec<u8>, AppError> {
         }
     })?;
 
-    let parsed = mailparse::parse_mail(&raw).map_err(|error| {
+    let parsed = crate::mail::mime::parse(&raw).map_err(|error| {
         tracing::warn!(%error, "attachment: cached message could not be parsed");
         AppError {
             code: "unreadable".into(),
@@ -210,13 +210,35 @@ pub async fn attachment_preview(
         });
     }
 
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let data_url = preview_data_url(&mime, &bytes).ok_or_else(|| AppError {
+        code: "not-previewable".into(),
+        message: "This kind of file cannot be shown here. Save it to open it.".into(),
+    })?;
 
     Ok(AttachmentData {
         filename,
-        mime: mime.clone(),
-        data_url: format!("data:{mime};base64,{encoded}"),
+        mime,
+        data_url,
     })
+}
+
+/// The previewer's `data:` URI for an attachment, or nothing if its type is not safe to put in
+/// one.
+///
+/// `mime` is the sender's Content-Type. The previewer writes an image's URI into an `<img src>`
+/// in the frame's markup, so an image type has to be one [`render::is_image_mime`] accepts — a
+/// prefix check let `image/png" style="…` through, and the quote ended the attribute (the same
+/// bug as H12, in a fifth place). Text, JSON and PDF are decoded from the URI rather than put in
+/// markup, so their URI carries a fixed type and never the sender's.
+fn preview_data_url(mime: &str, bytes: &[u8]) -> Option<String> {
+    let mime = mime.trim().to_ascii_lowercase();
+
+    if mime.starts_with("image/") {
+        return crate::mail::render::image_data_uri(&mime, bytes);
+    }
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:application/octet-stream;base64,{encoded}"))
 }
 
 /// Saves an attachment, asking the user where.
@@ -256,20 +278,26 @@ pub async fn attachment_save(
         return Ok(None);
     };
 
+    // Over a file of the same name only because the user said so: the dialog asks before
+    // replacing anything. Then marked as from the internet, as everything saved from mail is.
     let written = destination.clone();
-    tokio::task::spawn_blocking(move || std::fs::write(&written, &bytes))
-        .await
-        .map_err(|_| AppError {
-            code: "cancelled".into(),
-            message: "The save was interrupted.".into(),
-        })?
-        .map_err(|error| {
-            tracing::warn!(%error, "attachment: could not be written");
-            AppError {
-                code: "write-failed".into(),
-                message: "The file could not be saved to that location.".into(),
-            }
-        })?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&written, &bytes)?;
+        mark(&written);
+        Ok::<(), std::io::Error>(())
+    })
+    .await
+    .map_err(|_| AppError {
+        code: "cancelled".into(),
+        message: "The save was interrupted.".into(),
+    })?
+    .map_err(|error| {
+        tracing::warn!(%error, "attachment: could not be written");
+        AppError {
+            code: "write-failed".into(),
+            message: "The file could not be saved to that location.".into(),
+        }
+    })?;
 
     Ok(Some(destination.to_string_lossy().to_string()))
 }
@@ -297,9 +325,9 @@ pub struct SavedAll {
 /// ## Collisions are resolved, not overwritten
 ///
 /// Two parts of one message can carry the same filename — `image001.png` twice is what Outlook
-/// does with inline images — and mail from a stranger can name a file anything at all. A second
-/// `invoice.pdf` becomes `invoice (2).pdf` rather than replacing the first, because silently
-/// destroying the first file is the one outcome the user cannot undo.
+/// does with inline images — and the folder may already hold one. A second `invoice.pdf`
+/// becomes `invoice (2).pdf` rather than replacing the first, because silently destroying a
+/// file is the one outcome the user cannot undo. See `platform::files::write_new`.
 ///
 /// A part that fails is reported by name rather than aborting the rest: five of six saved and
 /// one named is more use than nothing saved and a reason.
@@ -349,7 +377,6 @@ pub async fn attachments_save_all(
 
     let mut saved = 0;
     let mut failed = Vec::new();
-    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for id in ids {
         let row = match read_row(db.inner(), id).await {
@@ -375,16 +402,20 @@ pub async fn attachments_save_all(
             }
         };
 
-        let name = unique_name(
-            &crate::platform::files::safe_file_name(&filename),
-            &mut used,
-        );
-        let destination = directory.join(&name);
+        let name = crate::platform::files::safe_file_name(&filename);
+        let folder = directory.clone();
 
-        match tokio::task::spawn_blocking(move || std::fs::write(&destination, &bytes)).await {
-            Ok(Ok(())) => saved += 1,
+        let written = tokio::task::spawn_blocking(move || {
+            let path = crate::platform::files::write_new(&folder, &name, &bytes)?;
+            mark(&path);
+            Ok::<_, std::io::Error>(path)
+        })
+        .await;
+
+        match written {
+            Ok(Ok(_)) => saved += 1,
             _ => {
-                tracing::warn!(name, "attachments: one could not be written");
+                tracing::warn!(filename, "attachments: one could not be written");
                 failed.push(filename);
             }
         }
@@ -397,29 +428,11 @@ pub async fn attachments_save_all(
     })
 }
 
-/// A name not yet used in this run, suffixing `(2)`, `(3)` … before the extension.
-///
-/// Tracked in a set rather than by asking the filesystem, because the collisions that matter
-/// here are *within one message* — two parts genuinely called `image001.png` — and a name that
-/// does not exist on disk yet is still taken if the previous part in this loop just claimed it.
-fn unique_name(name: &str, used: &mut std::collections::HashSet<String>) -> String {
-    if used.insert(name.to_string()) {
-        return name.to_string();
+/// Marks a saved attachment as from the internet. See `platform::files::mark_from_internet`.
+fn mark(path: &std::path::Path) {
+    if let Err(error) = crate::platform::files::mark_from_internet(path) {
+        tracing::warn!(%error, "attachment: saved, but without the mark of the web");
     }
-
-    let (stem, extension) = match name.rsplit_once('.') {
-        Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-        _ => (name, String::new()),
-    };
-
-    for n in 2.. {
-        let candidate = format!("{stem} ({n}){extension}");
-        if used.insert(candidate.clone()) {
-            return candidate;
-        }
-    }
-
-    unreachable!("the loop returns on the first name not already taken")
 }
 
 #[cfg(test)]
@@ -427,43 +440,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_repeated_filename_is_numbered_rather_than_overwritten() {
-        // Outlook attaches inline images as image001.png over and over, so one message really
-        // does carry the same name twice. Writing both to one path would leave the user with
-        // the last one and no sign the others existed.
-        let mut used = std::collections::HashSet::new();
+    fn a_preview_uri_never_carries_the_senders_type_unchecked() {
+        // The previewer writes an image's URI into the frame's markup as `<img src="…">`.
+        assert!(preview_data_url("image/png\" style=\"x", b"x").is_none());
+        assert!(preview_data_url("image/x><link rel=preconnect>", b"x").is_none());
 
-        assert_eq!(unique_name("invoice.pdf", &mut used), "invoice.pdf");
-        assert_eq!(unique_name("invoice.pdf", &mut used), "invoice (2).pdf");
-        assert_eq!(unique_name("invoice.pdf", &mut used), "invoice (3).pdf");
-    }
+        assert_eq!(
+            preview_data_url("IMAGE/PNG", b"x").as_deref(),
+            Some("data:image/png;base64,eA==")
+        );
 
-    #[test]
-    fn the_number_goes_before_the_extension() {
-        // "invoice.pdf (2)" is not a PDF as far as Windows is concerned — it would open the
-        // Open With dialog instead of a reader.
-        let mut used = std::collections::HashSet::new();
-        unique_name("report.tar.gz", &mut used);
-
-        assert_eq!(unique_name("report.tar.gz", &mut used), "report.tar (2).gz");
-    }
-
-    #[test]
-    fn a_name_with_no_extension_still_numbers() {
-        let mut used = std::collections::HashSet::new();
-        unique_name("README", &mut used);
-
-        assert_eq!(unique_name("README", &mut used), "README (2)");
-    }
-
-    #[test]
-    fn a_dotfile_is_not_treated_as_all_extension() {
-        // ".gitignore" splits into an empty stem and "gitignore", and numbering that would
-        // produce " (2).gitignore" — a file starting with a space.
-        let mut used = std::collections::HashSet::new();
-        unique_name(".gitignore", &mut used);
-
-        assert_eq!(unique_name(".gitignore", &mut used), ".gitignore (2)");
+        // Text is decoded from the URI, never put in markup by it, so the type is not the
+        // sender's to choose at all.
+        let text = preview_data_url("text/plain\" onload=\"x", b"x").expect("text previews");
+        assert_eq!(text, "data:application/octet-stream;base64,eA==");
     }
 
     #[test]

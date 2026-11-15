@@ -2,12 +2,23 @@ import { useEffect, useState } from 'react'
 
 import { saveSearchAsSmartMailbox } from '@/lib/search'
 import { Button, Sheet, TextField, useToast } from '@/ui'
+import { reasonFor } from '@/lib/ipc'
+
+import { savedSearch } from './savedSearch'
+import type { State } from './ScopeBar'
 
 export interface SaveSearchSheetProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   /** The search as typed. Converted to a predicate by the core, not stored as text. */
   text: string
+  /** The scope bar's Unread or Flagged, which narrows what is saved as it narrowed the results. */
+  state?: State
+  /**
+   * The names of the mailboxes the scope bar limited the search to, or none when it searched
+   * everywhere.
+   */
+  mailboxNames?: string[]
 }
 
 /**
@@ -18,7 +29,13 @@ export interface SaveSearchSheetProps {
  * conditions are substring matches. Someone who saves "fig" and later finds "configure" in
  * there should have been told, not left to work it out.
  */
-export function SaveSearchSheet({ open, onOpenChange, text }: SaveSearchSheetProps) {
+export function SaveSearchSheet({
+  open,
+  onOpenChange,
+  text,
+  state = 'all',
+  mailboxNames = [],
+}: SaveSearchSheetProps) {
   const [name, setName] = useState('')
   const toast = useToast()
 
@@ -27,11 +44,13 @@ export function SaveSearchSheet({ open, onOpenChange, text }: SaveSearchSheetPro
     if (open) setName(text.trim())
   }, [open, text])
 
+  const saving = savedSearch(text, state, mailboxNames)
+
   const save = () => {
     const trimmed = name.trim()
     if (trimmed === '') return
 
-    void saveSearchAsSmartMailbox(trimmed, text)
+    void saveSearchAsSmartMailbox(trimmed, saving.text)
       .then(() => {
         toast.show({ title: `Saved “${trimmed}”` })
         onOpenChange(false)
@@ -39,7 +58,7 @@ export function SaveSearchSheet({ open, onOpenChange, text }: SaveSearchSheetPro
       .catch((error: unknown) => {
         toast.show({
           title: 'The search could not be saved',
-          description: error instanceof Error ? error.message : String(error),
+          description: reasonFor(error),
         })
       })
   }
@@ -49,7 +68,11 @@ export function SaveSearchSheet({ open, onOpenChange, text }: SaveSearchSheetPro
       open={open}
       onOpenChange={onOpenChange}
       title="Save Search"
-      description="It appears in the sidebar and stays up to date."
+      description={
+        saving.note === null
+          ? 'It appears in the sidebar and stays up to date.'
+          : `It appears in the sidebar and stays up to date. ${saving.note}`
+      }
       footer={
         <>
           <Button

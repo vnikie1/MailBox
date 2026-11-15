@@ -218,41 +218,44 @@ pub async fn import_run(
             let outcome = db
                 .write(move |tx| {
                     let account = import::local_account(tx, "On My PC")?;
-                    let mailbox = import::mailbox_for(tx, account, &request.path)?;
-                    let mut uid = import::next_uid(tx, mailbox)?;
 
-                    let file =
-                        std::fs::File::open(&request.file).map_err(crate::db::DbError::from)?;
-                    let reader = std::io::BufReader::new(file);
+                    import::removing_bodies_on_failure(&cache_root, account, |ids| {
+                        let mailbox = import::mailbox_for(tx, account, &request.path)?;
+                        let mut uid = import::next_uid(tx, mailbox)?;
 
-                    let mut written = 0usize;
+                        let file =
+                            std::fs::File::open(&request.file).map_err(crate::db::DbError::from)?;
+                        let reader = std::io::BufReader::new(file);
 
-                    let counts = mbox::read(reader, |raw| {
-                        match import::write_message(
-                            tx,
-                            &cache_root,
-                            account,
-                            mailbox,
-                            uid,
-                            raw,
-                            None,
-                        ) {
-                            Ok(Some(_)) => {
-                                written += 1;
-                                uid += 1;
+                        let counts = mbox::read(reader, |raw| {
+                            match import::write_message(
+                                tx,
+                                &cache_root,
+                                account,
+                                mailbox,
+                                uid,
+                                raw,
+                                None,
+                            ) {
+                                Ok(Some(id)) => {
+                                    ids.push(id);
+                                    uid += 1;
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    return Err(std::io::Error::other(error.to_string()));
+                                }
                             }
-                            Ok(None) => {}
-                            Err(error) => {
-                                return Err(std::io::Error::other(error.to_string()));
-                            }
-                        }
-                        Ok(())
+                            Ok(())
+                        })
+                        .map_err(crate::db::DbError::from)?;
+
+                        // Counts now; threading once, after the last folder. See
+                        // `import::thread`.
+                        import::recount(tx, &[mailbox])?;
+
+                        Ok((ids.len(), counts.oversized))
                     })
-                    .map_err(crate::db::DbError::from)?;
-
-                    import::finish(tx, account, &[mailbox])?;
-
-                    Ok((written, counts.oversized))
                 })
                 .await;
 
@@ -269,6 +272,21 @@ pub async fn import_run(
                     skipped += 1;
                     failure.get_or_insert_with(|| error.to_string());
                 }
+            }
+        }
+
+        // Threaded once, now that every folder is in. Only when something was written: asking
+        // for the local account creates it, and an import that wrote nothing should leave none.
+        if messages > 0 {
+            let threaded = db
+                .write(|tx| {
+                    let account = import::local_account(tx, "On My PC")?;
+                    import::thread(tx, account)
+                })
+                .await;
+            if let Err(error) = threaded {
+                tracing::warn!(%error, "the imported mail could not be threaded");
+                failure.get_or_insert_with(|| error.to_string());
             }
         }
 
@@ -442,37 +460,39 @@ async fn import_pst(
             written += db
                 .write(move |tx| {
                     let account = import::local_account(tx, "On My PC")?;
-                    let mut touched: Vec<i64> = Vec::new();
-                    let mut count = 0usize;
 
-                    for message in work {
-                        let mailbox = import::mailbox_for(tx, account, &message.path)?;
-                        let uid = import::next_uid(tx, mailbox)?;
+                    import::removing_bodies_on_failure(&cache_root, account, |ids| {
+                        let mut touched: Vec<i64> = Vec::new();
 
-                        // Read state comes from a MAPI property rather than from the headers,
-                        // so it is handed over explicitly — the synthesised message has no
-                        // header that carries it.
-                        if import::write_message(
-                            tx,
-                            &cache_root,
-                            account,
-                            mailbox,
-                            uid,
-                            &message.raw,
-                            Some(message.seen),
-                        )?
-                        .is_some()
-                        {
-                            count += 1;
+                        for message in work {
+                            let mailbox = import::mailbox_for(tx, account, &message.path)?;
+                            let uid = import::next_uid(tx, mailbox)?;
+
+                            // Read state comes from a MAPI property rather than from the
+                            // headers, so it is handed over explicitly — the synthesised
+                            // message has no header that carries it.
+                            if let Some(id) = import::write_message(
+                                tx,
+                                &cache_root,
+                                account,
+                                mailbox,
+                                uid,
+                                &message.raw,
+                                Some(message.seen),
+                            )? {
+                                ids.push(id);
+                            }
+
+                            if !touched.contains(&mailbox) {
+                                touched.push(mailbox);
+                            }
                         }
 
-                        if !touched.contains(&mailbox) {
-                            touched.push(mailbox);
-                        }
-                    }
-
-                    import::finish(tx, account, &touched)?;
-                    Ok(count)
+                        // Counts now; threading once, after the last batch. See
+                        // `import::thread`.
+                        import::recount(tx, &touched)?;
+                        Ok(ids.len())
+                    })
                 })
                 .await
                 .map_err(|error| error.to_string())?;

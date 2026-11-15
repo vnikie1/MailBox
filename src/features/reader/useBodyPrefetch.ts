@@ -43,17 +43,28 @@ export function useThreadBodies(messages: { id: number; accountId: number }[]): 
     if (key === lastRequested.current) return
     lastRequested.current = key
 
-    const byAccount = new Map<number, number[]>()
-    for (const message of messages) {
-      const existing = byAccount.get(message.accountId)
-      if (existing === undefined) byAccount.set(message.accountId, [message.id])
-      else existing.push(message.id)
-    }
-
-    for (const [accountId, ids] of byAccount) {
-      void bodiesEnsure(accountId, ids)
-    }
+    ensureByAccount(messages)
   }, [messages])
+}
+
+/**
+ * One `bodiesEnsure` per account, each with only that account's ids, in the order given.
+ *
+ * The core opens the account's own server for a call, so an id from another account sent in the
+ * same call is looked up on the wrong server. Map iteration follows insertion order, so the
+ * first message's account is asked first.
+ */
+function ensureByAccount(messages: { id: number; accountId: number }[]): void {
+  const byAccount = new Map<number, number[]>()
+  for (const message of messages) {
+    const existing = byAccount.get(message.accountId)
+    if (existing === undefined) byAccount.set(message.accountId, [message.id])
+    else existing.push(message.id)
+  }
+
+  for (const [accountId, ids] of byAccount) {
+    void bodiesEnsure(accountId, ids)
+  }
 }
 
 export function useBodyPrefetch(selectedId: number | undefined, visibleRows: MessageRow[]): void {
@@ -64,24 +75,24 @@ export function useBodyPrefetch(selectedId: number | undefined, visibleRows: Mes
   useEffect(() => {
     if (selectedId === undefined) return
 
+    // A selection that is not among the rows has no account this hook can know. It used to be
+    // sent under the first row's account, which is the bug below in another form; the reader's
+    // `useThreadBodies` fetches it with its real account.
     const index = visibleRows.findIndex((row) => row.id === selectedId)
-
-    const ahead =
-      index >= 0
-        ? visibleRows.slice(index + 1, index + 1 + PREFETCH_AHEAD).map((row) => row.id)
-        : []
+    if (index < 0) return
 
     // The selected message first: it is the one someone is waiting for, and the core walks
-    // this list in order.
-    const wanted = [selectedId, ...ahead]
+    // each list in order.
+    const wanted = visibleRows.slice(index, index + 1 + PREFETCH_AHEAD)
 
-    const key = wanted.join(',')
+    const key = wanted.map((row) => row.id).join(',')
     if (key === lastRequested.current) return
     lastRequested.current = key
 
-    const accountId = visibleRows[index >= 0 ? index : 0]?.accountId
-    if (accountId === undefined) return
-
-    void bodiesEnsure(accountId, wanted)
+    // **Per row's own account.** This sent all four ids under the selected row's account, and
+    // in All Inboxes, a smart mailbox or a search the next rows are routinely another account's.
+    // The core fetched each by its UID and folder path from the wrong server and stored what it
+    // found there as the body: someone else's message, shown, quoted in replies, forwarded.
+    ensureByAccount(wanted)
   }, [selectedId, visibleRows])
 }

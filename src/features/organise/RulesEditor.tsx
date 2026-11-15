@@ -12,6 +12,7 @@ import { ActionEditor } from './ActionEditor'
 import { PredicateEditor } from './PredicateEditor'
 import { BLANK_CONDITION, fromFlat, toFlat } from './predicateShape'
 import styles from './RulesEditor.module.css'
+import { reasonFor } from '@/lib/ipc'
 
 export interface RulesEditorProps {
   open: boolean
@@ -102,7 +103,7 @@ export function RulesEditor({ open, onClose, mailboxes }: RulesEditorProps) {
       .catch((error: unknown) => {
         toast.show({
           title: 'The rule could not be saved',
-          description: error instanceof Error ? error.message : String(error),
+          description: reasonFor(error),
         })
       })
   }

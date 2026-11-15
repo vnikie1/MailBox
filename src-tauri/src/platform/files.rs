@@ -232,9 +232,137 @@ pub fn pick_folder_dialog(title: &str) -> Option<PathBuf> {
         result
     }
 }
+/// Marks a file as having come from the internet: the Mark of the Web.
+///
+/// Windows reads a file's `Zone.Identifier` stream to decide whether SmartScreen checks it
+/// before it runs, whether Office opens it in Protected View, and whether its macros may run at
+/// all. Nothing wrote one, so an attachment from a stranger, once saved, was trusted as though
+/// the user had made it themselves (H13, 2026-11-14 audit). Zone 3 is the Internet zone, which
+/// is what every browser and Outlook record for the same file.
+///
+/// A volume with no alternate data streams — FAT32 and exFAT, which most USB sticks are —
+/// cannot hold the mark. Windows cannot mark files there either, so the caller logs it and the
+/// save stands.
+pub fn mark_from_internet(path: &std::path::Path) -> std::io::Result<()> {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    std::fs::write(PathBuf::from(stream), "[ZoneTransfer]\r\nZoneId=3\r\n")
+}
+
+/// Writes a new file in `directory` and returns where. Never replaces a file already there.
+///
+/// Named `name`, or `name (2)`, `name (3)` … when that is taken. Asked of the filesystem, which
+/// is the only thing that knows: Save All used to number only the names repeated within one
+/// message, compared case by case, and then wrote over whatever the folder already held — a
+/// second `invoice.pdf`, or an `Invoice.pdf`, which Windows takes for the same file (H14,
+/// 2026-11-14 audit). `create_new` makes the check and the write one step, so nothing can take
+/// the name in between.
+pub fn write_new(
+    directory: &std::path::Path,
+    name: &str,
+    bytes: &[u8],
+) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+
+    // A folder holding a thousand copies of one name is not one this should keep counting in.
+    for n in 1..=1000 {
+        let path = directory.join(numbered(name, n));
+
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+
+        // A half-written file under the name is worse than none: it looks saved.
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(error);
+        }
+
+        return Ok(path);
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "every numbered name is taken",
+    ))
+}
+
+/// `name` for the first, then `stem (n).ext`. The number goes before the extension, or Windows
+/// no longer knows what kind of file it is.
+fn numbered(name: &str, n: u32) -> String {
+    if n <= 1 {
+        return name.to_string();
+    }
+
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem} ({n}).{extension}"),
+        _ => format!("{name} ({n})"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_file_carries_the_mark_of_the_web() {
+        // H13. What SmartScreen, Protected View and the macro block all read.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("invoice.docm");
+        std::fs::write(&path, b"PK").expect("file");
+
+        mark_from_internet(&path).expect("mark");
+
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        let mark = std::fs::read_to_string(PathBuf::from(stream)).expect("the stream");
+        assert!(
+            mark.contains("[ZoneTransfer]") && mark.contains("ZoneId=3"),
+            "{mark}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("file"),
+            b"PK",
+            "the file is untouched"
+        );
+    }
+
+    #[test]
+    fn a_new_file_never_replaces_one_already_there() {
+        // H14. The folder already holds an Invoice.pdf the user cares about.
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("Invoice.pdf"), b"theirs").expect("file");
+
+        let first = write_new(dir.path(), "invoice.pdf", b"one").expect("write");
+        let second = write_new(dir.path(), "invoice.pdf", b"two").expect("write");
+
+        assert_eq!(
+            std::fs::read(dir.path().join("Invoice.pdf")).expect("file"),
+            b"theirs",
+            "Windows takes invoice.pdf for Invoice.pdf; neither may replace it"
+        );
+        assert_eq!(first.file_name().unwrap(), "invoice (2).pdf");
+        assert_eq!(second.file_name().unwrap(), "invoice (3).pdf");
+        assert_eq!(std::fs::read(&second).expect("file"), b"two");
+    }
+
+    #[test]
+    fn the_number_goes_before_the_extension() {
+        // "invoice.pdf (2)" is not a PDF as far as Windows is concerned.
+        assert_eq!(numbered("invoice.pdf", 1), "invoice.pdf");
+        assert_eq!(numbered("invoice.pdf", 2), "invoice (2).pdf");
+        assert_eq!(numbered("report.tar.gz", 2), "report.tar (2).gz");
+        assert_eq!(numbered("README", 3), "README (3)");
+        // A dotfile is not all extension: " (2).gitignore" would start with a space.
+        assert_eq!(numbered(".gitignore", 2), ".gitignore (2)");
+    }
 
     #[test]
     fn a_filename_cannot_escape_the_folder_the_user_chose() {

@@ -102,7 +102,42 @@ impl Sender {
                 tracing::warn!(%error, "outbox recovery failed; leaving rows in place");
             }
 
+            // Files nothing refers to any more: sent messages, discarded drafts, old forward
+            // copies, removed accounts' outboxes. See `outbox::sweep_leftover_files` (M14).
+            {
+                let root = root.clone();
+                match db
+                    .read(move |conn| {
+                        outbox::sweep_leftover_files(
+                            conn,
+                            &root,
+                            &std::env::temp_dir(),
+                            std::time::SystemTime::now(),
+                        )
+                    })
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(removed) => {
+                        tracing::info!(removed, "outbox: leftover message files deleted")
+                    }
+                    Err(error) => tracing::debug!(%error, "outbox: leftover files not swept"),
+                }
+            }
+
             loop {
+                // Again on every pass, not only at start. Recovery has to ask the server, and at
+                // start the network is often not up yet; a row it could not decide stayed
+                // `sending` — shown nowhere and never sent — until the next restart (M13,
+                // 2026-11-14 audit). Cheap when there is nothing to resolve: one query.
+                //
+                // Safe here because this loop is the only thing that sends, and it does so one
+                // pass at a time: a row still `sending` at the top of a pass was left by a pass
+                // that died, or by a process that did.
+                if let Err(error) = resolve_stranded(events.as_ref(), &db).await {
+                    tracing::debug!(%error, "outbox: interrupted sends still undecided");
+                }
+
                 if let Err(error) = run_once(events.as_ref(), &db, &root).await {
                     tracing::warn!(%error, "outbox pass failed");
                 }
@@ -133,12 +168,20 @@ pub async fn recover(events: &dyn Events, db: &Db) -> Result<(), SyncError> {
     // First: rows from an `enqueue` that never finished writing its bytes. They can never be
     // sent, and `claim_due` will not pick them up, so without this they sit in the outbox
     // looking like a message still on its way.
+    //
+    // Only at start. Mid-run, a row with no path is usually one `enqueue` is writing right now.
     match outbox::sweep_unwritten(db).await {
         Ok(0) => {}
         Ok(count) => tracing::warn!(count, "outbox rows had no message bytes; marked failed"),
         Err(error) => tracing::warn!(%error, "could not sweep unwritten outbox rows"),
     }
 
+    resolve_stranded(events, db).await
+}
+
+/// Decides each row left `sending`, by asking the server's Sent mailbox. See the module header
+/// of `outbox`. A row that cannot be decided yet is left for the next pass.
+async fn resolve_stranded(events: &dyn Events, db: &Db) -> Result<(), SyncError> {
     let stranded = outbox::interrupted(db).await?;
     if stranded.is_empty() {
         return Ok(());
@@ -160,9 +203,10 @@ pub async fn recover(events: &dyn Events, db: &Db) -> Result<(), SyncError> {
         let found = match was_filed(db, entry.account_id, &message_id).await {
             Ok(found) => found,
             Err(error) => {
-                // The server could not be asked. Leave the row as it is and try again next
-                // start rather than deciding without evidence.
-                tracing::warn!(id = entry.id, %error, "could not check Sent; leaving in doubt");
+                // The server could not be asked. Leave the row as it is and try again on the
+                // next pass rather than deciding without evidence. Debug, not warn: offline, this
+                // repeats every thirty seconds.
+                tracing::debug!(id = entry.id, %error, "could not check Sent; leaving in doubt");
                 continue;
             }
         };
@@ -194,9 +238,7 @@ async fn was_filed(db: &Db, account_id: i64, message_id: &str) -> Result<bool, S
 
         // Searching by header rather than by UID: the UID is the server's and we never learned
         // it, whereas the Message-ID is ours and travels with the message.
-        let found = imap_session
-            .uid_search(format!("HEADER Message-ID \"{message_id}\""))
-            .await?;
+        let found = imap_session.uid_search(filed_search(message_id)).await?;
 
         Ok::<bool, SyncError>(!found.is_empty())
     }
@@ -204,6 +246,17 @@ async fn was_filed(db: &Db, account_id: i64, message_id: &str) -> Result<bool, S
 
     let _ = imap_session.logout().await;
     result
+}
+
+/// The search for a message this app sent: by its `Message-ID`, or by its `Resent-Message-ID`
+/// for a redirect, which keeps the original's `Message-ID` and is known by the id of its hop.
+///
+/// Quotes and backslashes escaped, as `ops::other_copies` escapes them. A redirect's id was
+/// the original's, written by whoever sent it, and an unescaped quote in it ended the search
+/// string early and changed what was asked (L9).
+fn filed_search(message_id: &str) -> String {
+    let escaped = message_id.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("OR HEADER Message-ID \"{escaped}\" HEADER Resent-Message-ID \"{escaped}\"")
 }
 
 /// The remote path of the account's Sent mailbox.
@@ -258,11 +311,48 @@ pub async fn run_once(events: &dyn Events, db: &Db, root: &Path) -> Result<(), S
         announce(events, &entry, State::Sending, None);
 
         match send_one(db, root, &entry).await {
-            Ok(()) => {
+            Ok(sent) => {
+                // Recorded the moment the server took it, before anything else can fail. This
+                // used to wait until the copy had been filed in Sent, so a crash in between left
+                // the row `sending`; recovery then looked for it in Sent, did not find it — only
+                // Gmail files sent mail by itself — and sent it again (M11, 2026-11-14 audit).
                 let id = entry.id;
                 db.write(move |tx| outbox::mark_sent(tx, id)).await?;
                 tracing::info!(id, "outbox: sent");
                 announce(events, &entry, State::Sent, None);
+
+                // Filed only now, after the server has taken it. A copy in Sent for a message
+                // that never left is a lie the user acts on; a message delivered but missing
+                // from Sent is merely untidy. A failure here is logged and does not fail the send.
+                if let Err(error) = file_in_sent(db, entry.account_id, &sent.bytes).await {
+                    tracing::warn!(id, %error, "sent, but could not file a copy in Sent");
+                }
+
+                // And the bytes go. The copy that matters is in Sent now; this one stayed on disk
+                // for ever, after the account was removed too (M14).
+                let _ = std::fs::remove_file(&sent.path);
+
+                // And the draft it was written as, here and on the server. Nothing did this, so
+                // a sent message stayed in Drafts on every device and could be sent again from
+                // any of them (H4, 2026-11-14 audit). Now rather than at Send, because Undo Send
+                // deletes the outbox copy and the draft is then all that is left of the message.
+                if let Some(draft) = entry.draft_message_id.clone() {
+                    let root = root.to_path_buf();
+                    match db
+                        .write(move |tx| super::drafts::discard(tx, &root, &draft))
+                        .await
+                    {
+                        Ok(files) => {
+                            for file in files {
+                                let _ = std::fs::remove_file(file);
+                            }
+                            events.emit("mailbox:changed", serde_json::Value::Null);
+                        }
+                        Err(error) => {
+                            tracing::warn!(id, %error, "sent, but its draft was not discarded");
+                        }
+                    }
+                }
             }
 
             Err(error) => {
@@ -344,7 +434,15 @@ fn is_gmail_content_block(detail: &str) -> bool {
     detail.contains("5.7.0") && detail.contains("p=BlockedMessage")
 }
 
-async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<(), smtp::SendError> {
+/// A message the server has accepted: the bytes it took, and where they were kept.
+struct Accepted {
+    bytes: Vec<u8>,
+    path: PathBuf,
+}
+
+/// Sends one message. Returns once the server has accepted it, and does nothing after that —
+/// recording it, filing it and tidying up are the caller's, in that order.
+async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<Accepted, smtp::SendError> {
     let account = db
         .read({
             let id = entry.account_id;
@@ -370,7 +468,13 @@ async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<(), smtp::SendE
         PathBuf::from(&entry.eml_path)
     };
 
-    let raw = std::fs::read(&path)?;
+    // Dated as it leaves, not as it was written: Send Later sent the date it was built with,
+    // hours or days earlier, and recipients file mail by it (M12, 2026-11-14 audit). The same
+    // bytes are filed in Sent, so the two copies agree.
+    let raw = crate::mail::outgoing::restamp_date(
+        &std::fs::read(&path)?,
+        &chrono::Local::now().to_rfc2822(),
+    );
 
     let recipients: Vec<String> = entry
         .recipients
@@ -408,14 +512,7 @@ async fn send_one(db: &Db, root: &Path, entry: &Entry) -> Result<(), smtp::SendE
 
     smtp::send(&server, &account.email, &credential, &envelope, &raw).await?;
 
-    // Filed only now, after the server has taken it. A copy in Sent for a message that never
-    // left is a lie the user acts on; a message delivered but missing from Sent is merely
-    // untidy. A failure here is logged and does not fail the send.
-    if let Err(error) = file_in_sent(db, entry.account_id, &raw).await {
-        tracing::warn!(id = entry.id, %error, "sent, but could not file a copy in Sent");
-    }
-
-    Ok(())
+    Ok(Accepted { bytes: raw, path })
 }
 
 /// Appends a copy of a sent message to the account's Sent mailbox.
@@ -426,7 +523,7 @@ async fn file_in_sent(db: &Db, account_id: i64, raw: &[u8]) -> Result<(), SyncEr
     // `\Seen`, because the user wrote it. A Sent folder that shows unread mail the user typed
     // themselves is a badge that can never be cleared by reading anything.
     let result = imap_session
-        .append(&mailbox, Some("(\\Seen)"), None, raw)
+        .append(session::append_name(&mailbox), Some("(\\Seen)"), None, raw)
         .await
         .map_err(SyncError::from);
 
@@ -437,6 +534,18 @@ async fn file_in_sent(db: &Db, account_id: i64, raw: &[u8]) -> Result<(), SyncEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_search_for_a_sent_copy_finds_a_redirect_and_cannot_be_broken_out_of() {
+        // A redirect is known by its Resent-Message-ID; and the id went into the search
+        // unescaped, so a quote in it ended the string early (L9).
+        let search = filed_search(r#"<a"b\c@example.test>"#);
+
+        assert_eq!(
+            search,
+            r#"OR HEADER Message-ID "<a\"b\\c@example.test>" HEADER Resent-Message-ID "<a\"b\\c@example.test>""#
+        );
+    }
 
     #[test]
     fn a_server_message_reaches_the_user_rather_than_a_paraphrase() {

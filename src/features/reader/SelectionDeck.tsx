@@ -1,11 +1,9 @@
-import { useMemo } from 'react'
-
 import type { MessageFull } from '@/lib/generated/MessageFull'
 import { cx } from '@/lib/cx'
 import { formatRowDate } from '@/lib/date'
 import { senderLabel, subjectLabel } from '@/features/messageList/rows'
 import { useMessageBody, useSelectedMessages } from '@/app/queries'
-import { storeNow } from '@/lib/ipc'
+import { useToday } from '@/app/useToday'
 import { Avatar } from '@/ui'
 
 import { MessageFrame } from './MessageFrame'
@@ -152,7 +150,7 @@ export function SelectionDeck({ ids }: SelectionDeckProps) {
 
   // One clock for the whole stack, so three sheets cannot disagree about what "Yesterday" is,
   // and taken once rather than on every render — the same as the reader beside it.
-  const now = useMemo(storeNow, [])
+  const now = useToday()
 
   const front = messages[0] ?? null
 

@@ -136,7 +136,9 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64, arrived: Vec<i64>) -> Resu
         .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
 
     db.write(move |tx| {
-        let candidates = {
+        // In pieces past SQLite's parameter limit (M7). See `db::write::CHUNK`.
+        let mut candidates = Vec::new();
+        for arrived in arrived.chunks(crate::db::write::CHUNK) {
             let placeholders = (0..arrived.len())
                 .map(|index| format!("?{}", index + 2))
                 .collect::<Vec<_>>()
@@ -167,8 +169,8 @@ pub async fn score_new_mail(db: &Db, mailbox_id: i64, arrived: Vec<i64>) -> Resu
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
 
-            rows
-        };
+            candidates.extend(rows);
+        }
 
         let mut filed = 0;
 

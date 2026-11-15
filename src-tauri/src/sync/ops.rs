@@ -54,9 +54,41 @@ pub enum Op {
         uids: Vec<u32>,
     },
 
+    /// `UID MOVE` of a message whose UID in `from` is not known yet, found by its `Message-ID`.
+    ///
+    /// A message this app moved has a new UID in its new mailbox, and the sync learns it only
+    /// when it next reads that mailbox. Moving it again before then has nothing else to name it
+    /// by — and Undo, a few seconds after Archive and after the archive has reached the server,
+    /// is the ordinary way to get there. A `Move` then named the UID the message *used* to have
+    /// in the Inbox, which the server ignores, so the undo was reversed by the next sync (H7,
+    /// 2026-11-14 audit).
+    MoveByMessageId {
+        from: String,
+        to: String,
+        message_id: String,
+    },
+
     /// `UID STORE \Deleted` then expunge. Only ever a *permanent* delete; moving to Trash is
     /// a `Move`, which is what the delete command does unless the user asked otherwise.
     Delete { mailbox: String, uids: Vec<u32> },
+
+    /// `Flag`, for a message in `mailbox` whose UID there is not known yet, found by its
+    /// `Message-ID`.
+    ///
+    /// A message moved here has a new UID that the sync learns only when it next reads this
+    /// mailbox. A flag change made before then was sent to the mailbox and UID it had *before*
+    /// the move, which the server accepted as a change to nothing; it was then forgotten as sent.
+    /// On Gmail, where Archive is a move, a star or a read mark on freshly archived mail never
+    /// reached the server (M4, 2026-11-14 audit).
+    FlagByMessageId {
+        mailbox: String,
+        message_id: String,
+        seen: Option<bool>,
+        flagged: Option<bool>,
+    },
+
+    /// `Delete`, for a message known only by its `Message-ID`. See `FlagByMessageId`.
+    DeleteByMessageId { mailbox: String, message_id: String },
 
     /// `APPEND` a draft to the Drafts mailbox, replacing the copy it supersedes.
     ///
@@ -78,6 +110,14 @@ pub enum Op {
         /// replacing was put there by somebody else.
         message_id: String,
     },
+
+    /// Every copy of a draft, found by its `Message-ID`, flagged `\Deleted` and expunged.
+    ///
+    /// For a draft that has been sent or thrown away. Nothing removed the server copy before, so
+    /// a sent message stayed in Drafts on every device and could be sent a second time from one
+    /// (H4, 2026-11-14 audit). By id rather than by UID because the UID of the last copy may not
+    /// be known yet, and because every copy with the draft's own id is this draft.
+    DeleteDraft { mailbox: String, message_id: String },
 
     /// `CREATE`, then `SUBSCRIBE`. New Mailbox.
     ///
@@ -121,8 +161,12 @@ impl Op {
         match self {
             Op::Flag { .. } => "flag",
             Op::Move { .. } => "move",
+            Op::MoveByMessageId { .. } => "moveById",
             Op::Delete { .. } => "delete",
+            Op::FlagByMessageId { .. } => "flagById",
+            Op::DeleteByMessageId { .. } => "deleteById",
             Op::AppendDraft { .. } => "append",
+            Op::DeleteDraft { .. } => "deleteDraft",
             Op::CreateMailbox { .. } => "mailboxCreate",
             Op::RenameMailbox { .. } => "mailboxRename",
             Op::DeleteMailbox { .. } => "mailboxDelete",
@@ -139,10 +183,23 @@ impl Op {
                 ..
             } => uids.is_empty() || (seen.is_none() && flagged.is_none()),
             Op::Move { uids, .. } | Op::Delete { uids, .. } => uids.is_empty(),
+            Op::MoveByMessageId {
+                from,
+                to,
+                message_id,
+            } => from == to || message_id.trim().is_empty(),
             Op::DeleteMailbox { paths, .. } => paths.is_empty(),
             Op::RenameMailbox { from, to, .. } => from == to,
+            Op::FlagByMessageId {
+                message_id,
+                seen,
+                flagged,
+                ..
+            } => message_id.trim().is_empty() || (seen.is_none() && flagged.is_none()),
+            Op::DeleteByMessageId { message_id, .. } => message_id.trim().is_empty(),
             // Always worth doing: the point is the bytes, not a UID list.
             Op::AppendDraft { .. } => false,
+            Op::DeleteDraft { message_id, .. } => message_id.trim().is_empty(),
             Op::CreateMailbox { .. } | Op::EraseMailbox { .. } => false,
         }
     }
@@ -162,14 +219,29 @@ impl Op {
         )
     }
 
+    /// The mailbox whose UIDs this operation names, for the kinds that name messages by UID.
+    ///
+    /// Those UIDs hold only while the mailbox keeps its `UIDVALIDITY`, so this is the mailbox
+    /// whose value is recorded beside the operation when it is queued (M3, 2026-11-14 audit).
+    fn uid_mailbox(&self) -> Option<&str> {
+        match self {
+            Op::Flag { mailbox, .. } | Op::Delete { mailbox, .. } => Some(mailbox),
+            Op::Move { from, .. } => Some(from),
+            _ => None,
+        }
+    }
+
     /// Every mailbox path this operation names.
     pub(crate) fn paths(&self) -> Vec<&str> {
         match self {
             Op::Flag { mailbox, .. }
             | Op::Delete { mailbox, .. }
+            | Op::FlagByMessageId { mailbox, .. }
+            | Op::DeleteByMessageId { mailbox, .. }
             | Op::AppendDraft { mailbox, .. }
+            | Op::DeleteDraft { mailbox, .. }
             | Op::EraseMailbox { mailbox } => vec![mailbox],
-            Op::Move { from, to, .. } => vec![from, to],
+            Op::Move { from, to, .. } | Op::MoveByMessageId { from, to, .. } => vec![from, to],
             Op::CreateMailbox { path } => vec![path],
             Op::RenameMailbox { from, to, .. } => vec![from, to],
             Op::DeleteMailbox { paths, .. } => paths.iter().map(String::as_str).collect(),
@@ -181,9 +253,12 @@ impl Op {
         match self {
             Op::Flag { mailbox, .. }
             | Op::Delete { mailbox, .. }
+            | Op::FlagByMessageId { mailbox, .. }
+            | Op::DeleteByMessageId { mailbox, .. }
             | Op::AppendDraft { mailbox, .. }
+            | Op::DeleteDraft { mailbox, .. }
             | Op::EraseMailbox { mailbox } => vec![mailbox],
-            Op::Move { from, to, .. } => vec![from, to],
+            Op::Move { from, to, .. } | Op::MoveByMessageId { from, to, .. } => vec![from, to],
             Op::CreateMailbox { path } => vec![path],
             Op::RenameMailbox { from, to, .. } => vec![from, to],
             Op::DeleteMailbox { paths, .. } => paths.iter_mut().collect(),
@@ -255,6 +330,8 @@ pub fn unsent_flags(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnsentRemovals {
     pub uids: std::collections::HashSet<u32>,
+    /// Messages a queued `MoveByMessageId` takes out, which have no UID to be listed by.
+    pub message_ids: std::collections::HashSet<String>,
     /// An erase of the whole mailbox is queued.
     pub everything: bool,
 }
@@ -262,6 +339,16 @@ pub struct UnsentRemovals {
 impl UnsentRemovals {
     pub fn contains(&self, uid: u32) -> bool {
         self.everything || self.uids.contains(&uid)
+    }
+
+    /// `contains`, also matching a message by its `Message-ID`.
+    pub fn contains_message(&self, uid: u32, message_id: Option<&str>) -> bool {
+        // Compared without angle brackets: the envelope stores ids bare, and a draft's carries
+        // them, as the builder writes it.
+        self.contains(uid)
+            || message_id
+                .map(super::drafts::bare)
+                .is_some_and(|id| !id.is_empty() && self.message_ids.contains(id))
     }
 }
 
@@ -273,7 +360,9 @@ pub fn unsent_removals(
     let payloads: Vec<String> = {
         let mut statement = tx.prepare(
             "SELECT payload_json FROM pending_op
-              WHERE account_id = ?1 AND kind IN ('move', 'delete', 'mailboxErase')",
+              WHERE account_id = ?1
+                AND kind IN ('move', 'moveById', 'delete', 'deleteById', 'deleteDraft',
+                             'mailboxErase')",
         )?;
         let rows = statement.query_map(params![account_id], |row| row.get(0))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -284,6 +373,27 @@ pub fn unsent_removals(
     for payload in payloads {
         match serde_json::from_str::<Op>(&payload) {
             Ok(Op::Move { from, uids, .. }) if from == mailbox => removals.uids.extend(uids),
+            Ok(Op::MoveByMessageId {
+                from, message_id, ..
+            }) if from == mailbox => {
+                removals
+                    .message_ids
+                    .insert(super::drafts::bare(&message_id).to_string());
+            }
+            Ok(
+                Op::DeleteDraft {
+                    mailbox: path,
+                    message_id,
+                }
+                | Op::DeleteByMessageId {
+                    mailbox: path,
+                    message_id,
+                },
+            ) if path == mailbox => {
+                removals
+                    .message_ids
+                    .insert(super::drafts::bare(&message_id).to_string());
+            }
             Ok(Op::Delete {
                 mailbox: path,
                 uids,
@@ -524,8 +634,61 @@ pub struct Located {
 /// round trip per message. A selection spanning two accounts is normal — "mark all as read"
 /// across All Inboxes — and produces one group per account per mailbox.
 pub fn locate(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<Located>, DbError> {
+    Ok(resolve(tx, ids)?.0)
+}
+
+/// A message this app can name to the server only by its `Message-ID`: one moved here whose
+/// UID here the sync has not learned yet. See [`resolve`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unnumbered {
+    pub account_id: i64,
+    pub mailbox: String,
+    pub message_id: String,
+}
+
+/// [`locate`], and the messages it cannot name by UID.
+///
+/// A parked row — moved here, with the move queued or already sent — is named by its
+/// `Message-ID` in the mailbox it is in now, wherever that move has got to. A change to it is
+/// queued *behind* the move, so by the time the change runs the move has run too, and the
+/// message is here under a UID nobody has told us. Naming it by its origin and old UID, as
+/// `locate` did, sent the change to where the message no longer was: the server accepted it as
+/// a change to nothing, and the queue forgot it as sent (M4, 2026-11-14 audit). A parked row
+/// with no `Message-ID` is still named by its origin, as before; there is nothing else to name
+/// it by.
+pub fn resolve(
+    tx: &Transaction<'_>,
+    ids: &[i64],
+) -> Result<(Vec<Located>, Vec<Unnumbered>), DbError> {
     if ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    // In pieces, as `db::write` does (M7): SQLite takes 32,766 parameters in a statement, and a
+    // Mark All as Read can name more messages than that. Each piece comes back grouped; the
+    // groups are merged by account and mailbox, so a mailbox is still one command.
+    if ids.len() > crate::db::write::CHUNK {
+        let mut merged: Vec<Located> = Vec::new();
+        let mut unnumbered: Vec<Unnumbered> = Vec::new();
+
+        for chunk in ids.chunks(crate::db::write::CHUNK) {
+            let (groups, more) = resolve(tx, chunk)?;
+            unnumbered.extend(more);
+
+            for group in groups {
+                match merged.iter_mut().find(|known| {
+                    known.account_id == group.account_id && known.mailbox == group.mailbox
+                }) {
+                    Some(known) => known.uids.extend(group.uids),
+                    None => merged.push(group),
+                }
+            }
+        }
+
+        for group in &mut merged {
+            group.uids.sort_unstable();
+        }
+        return Ok((merged, unnumbered));
     }
 
     let placeholders = (0..ids.len())
@@ -552,7 +715,9 @@ pub fn locate(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<Located>, DbError
                 CASE WHEN origin.id IS NOT NULL AND message.origin_uid IS NOT NULL
                      THEN origin.remote_path ELSE mailbox.remote_path END,
                 CASE WHEN origin.id IS NOT NULL AND message.origin_uid IS NOT NULL
-                     THEN message.origin_uid ELSE message.uid END
+                     THEN message.origin_uid ELSE message.uid END,
+                CASE WHEN message.uid < 0 THEN mailbox.remote_path END,
+                CASE WHEN message.uid < 0 THEN message.message_id END
            FROM message
            JOIN mailbox ON mailbox.id = message.mailbox_id
            LEFT JOIN mailbox AS origin ON origin.id = message.origin_mailbox_id
@@ -570,13 +735,29 @@ pub fn locate(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<Located>, DbError
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut groups: Vec<Located> = Vec::new();
+    let mut unnumbered: Vec<Unnumbered> = Vec::new();
 
-    for (account_id, mailbox, uid) in rows {
+    for (account_id, mailbox, uid, parked_in, message_id) in rows {
+        // Parked: by its `Message-ID`, where it is now. See above.
+        if let (Some(here), Some(message_id)) = (
+            parked_in,
+            message_id.filter(|value| !value.trim().is_empty()),
+        ) {
+            unnumbered.push(Unnumbered {
+                account_id,
+                mailbox: here,
+                message_id,
+            });
+            continue;
+        }
+
         // A UID of 0 is a message that exists locally and has never been on the server —
         // there is nothing to tell the server about, and "0" is not a valid UID to send.
         let Ok(uid) = u32::try_from(uid) else {
@@ -598,7 +779,132 @@ pub fn locate(tx: &Transaction<'_>, ids: &[i64]) -> Result<Vec<Located>, DbError
         }
     }
 
-    Ok(groups)
+    Ok((groups, unnumbered))
+}
+
+/// Queues the server side of a flag change to these messages. **Call before the local write**,
+/// as with [`locate`].
+///
+/// One `Flag` per mailbox for the messages with a known UID, and one `FlagByMessageId` for each
+/// that has none yet. Every flag change goes through here — the toolbar, the menus, Mark All as
+/// Read, colours, rules and Undo — so none of them can miss the second half.
+pub fn queue_flags(
+    tx: &Transaction<'_>,
+    ids: &[i64],
+    seen: Option<bool>,
+    flagged: Option<bool>,
+) -> Result<(), DbError> {
+    let (groups, unnumbered) = resolve(tx, ids)?;
+
+    for group in groups {
+        enqueue(
+            tx,
+            group.account_id,
+            &Op::Flag {
+                mailbox: group.mailbox,
+                uids: group.uids,
+                seen,
+                flagged,
+            },
+        )?;
+    }
+
+    for message in unnumbered {
+        enqueue(
+            tx,
+            message.account_id,
+            &Op::FlagByMessageId {
+                mailbox: message.mailbox,
+                message_id: message.message_id,
+                seen,
+                flagged,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Flag changes to many messages, queued the way a command acting on a selection queues them:
+/// one operation per mailbox and change, not one per message.
+///
+/// Undo and the rules engine work a message at a time, and each message queued its own `Flag`.
+/// Undoing a Mark All as Read over 5,000 messages queued 5,000 STOREs, sent one after another,
+/// and the account synced nothing else until the last had gone (L4).
+///
+/// Per message, the last change to each flag is the one queued, as it is the one the row ends with.
+/// **Queue the batch before queueing any move**: a flag change queued after a message's move names
+/// a UID its old mailbox no longer has, and the server ignores it without a word.
+#[derive(Debug, Default)]
+pub struct FlagBatch {
+    seen: std::collections::BTreeMap<i64, bool>,
+    flagged: std::collections::BTreeMap<i64, bool>,
+}
+
+impl FlagBatch {
+    pub fn add(&mut self, id: i64, seen: Option<bool>, flagged: Option<bool>) {
+        if let Some(seen) = seen {
+            self.seen.insert(id, seen);
+        }
+        if let Some(flagged) = flagged {
+            self.flagged.insert(id, flagged);
+        }
+    }
+
+    /// Queues everything added so far, and empties the batch.
+    pub fn queue(&mut self, tx: &Transaction<'_>) -> Result<(), DbError> {
+        let split = |changes: std::collections::BTreeMap<i64, bool>| {
+            let (on, off): (Vec<_>, Vec<_>) = changes.into_iter().partition(|(_, value)| *value);
+            let ids = |pairs: Vec<(i64, bool)>| pairs.into_iter().map(|(id, _)| id).collect();
+            (ids(on), ids(off))
+        };
+
+        let (read, unread): (Vec<i64>, Vec<i64>) = split(std::mem::take(&mut self.seen));
+        let (flag, unflag): (Vec<i64>, Vec<i64>) = split(std::mem::take(&mut self.flagged));
+
+        for (ids, seen, flagged) in [
+            (read, Some(true), None),
+            (unread, Some(false), None),
+            (flag, None, Some(true)),
+            (unflag, None, Some(false)),
+        ] {
+            if !ids.is_empty() {
+                queue_flags(tx, &ids, seen, flagged)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Queues the server side of permanently deleting these messages. **Call before the local
+/// write.** See [`queue_flags`].
+pub fn queue_delete(tx: &Transaction<'_>, ids: &[i64]) -> Result<(), DbError> {
+    let (groups, unnumbered) = resolve(tx, ids)?;
+
+    for group in groups {
+        enqueue(
+            tx,
+            group.account_id,
+            &Op::Delete {
+                mailbox: group.mailbox,
+                uids: group.uids,
+            },
+        )?;
+    }
+
+    for message in unnumbered {
+        enqueue(
+            tx,
+            message.account_id,
+            &Op::DeleteByMessageId {
+                mailbox: message.mailbox,
+                message_id: message.message_id,
+            },
+        )?;
+    }
+
+    Ok(())
 }
 
 /// The remote path of one mailbox, for naming a move's destination.
@@ -696,6 +1002,23 @@ fn supersede_move(
     Ok(())
 }
 
+/// Takes any queued save of this draft off the queue. See `enqueue`.
+fn supersede_draft(tx: &Transaction<'_>, account_id: i64, message_id: &str) -> Result<(), DbError> {
+    for (id, op) in queued(tx, account_id)? {
+        if let Op::AppendDraft {
+            message_id: queued_id,
+            ..
+        } = op
+        {
+            if queued_id == message_id {
+                tx.execute("DELETE FROM pending_op WHERE id = ?1", params![id])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn enqueue(tx: &Transaction<'_>, account_id: i64, op: &Op) -> Result<(), DbError> {
     if op.is_empty() {
         return Ok(());
@@ -707,14 +1030,38 @@ pub fn enqueue(tx: &Transaction<'_>, account_id: i64, op: &Op) -> Result<(), DbE
         supersede_move(tx, account_id, from, uids)?;
     }
 
+    // And a draft saved again replaces its queued save, as a delete of it does. Each autosave
+    // used to queue its own append, every one with the `replaces` that was known when it was
+    // queued — none, until the first had run — so a few saves between pushes each appended a
+    // fresh copy, Drafts filled with duplicates, and the copies were taken for another device's
+    // edits (H5, 2026-11-14 audit). Every save writes the same file, so only the newest matters.
+    if let Op::AppendDraft { message_id, .. } | Op::DeleteDraft { message_id, .. } = op {
+        supersede_draft(tx, account_id, message_id)?;
+    }
+
     let payload = serde_json::to_string(op).map_err(|error| DbError::Encode {
         what: "pending_op payload",
         detail: error.to_string(),
     })?;
 
+    // What the UIDs in it mean. See `uid_mailbox` and `stale`.
+    let validity: Option<i64> = match op.uid_mailbox() {
+        Some(path) => {
+            use rusqlite::OptionalExtension;
+            tx.query_row(
+                "SELECT uid_validity FROM mailbox WHERE account_id = ?1 AND remote_path = ?2",
+                params![account_id, path],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+        }
+        None => None,
+    };
+
     tx.execute(
-        "INSERT INTO pending_op (account_id, kind, payload_json, created_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO pending_op (account_id, kind, payload_json, created_at, uid_validity)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
         params![
             account_id,
             op.kind(),
@@ -723,8 +1070,297 @@ pub fn enqueue(tx: &Transaction<'_>, account_id: i64, op: &Op) -> Result<(), DbE
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
+            validity,
         ],
     )?;
+
+    Ok(())
+}
+
+/// Whether a mailbox's `UIDVALIDITY` has changed since an operation naming its UIDs was queued.
+///
+/// Unknown on either side is not a change: an operation queued before the value was recorded,
+/// or a server that sends none, is applied as it always was.
+fn stale(queued: Option<u32>, selected: Option<u32>) -> bool {
+    matches!((queued, selected), (Some(q), Some(s)) if q != 0 && s != 0 && q != s)
+}
+
+/// Where the server has one local message right now, as far as this app can tell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OnServer {
+    account_id: i64,
+    mailbox_id: i64,
+    path: String,
+    /// Its UID there, when known. Not known for a message moved there by an operation that has
+    /// already run, until the sync reads that mailbox and adopts it.
+    uid: Option<u32>,
+    message_id: Option<String>,
+}
+
+/// Where the server has a message: the answer `locate` gives, and the case it cannot.
+///
+/// A row moved here is *parked*: a negative UID, with its origin recorded, because until the
+/// queued move runs the server still has it in the origin under the origin's UID. Once the move
+/// has run the origin is out of date — the message is in the mailbox the row is in, under a UID
+/// the sync has not learned yet — and nothing said so. `locate` went on naming the origin, so
+/// every later move of that message, Undo included, asked the server to move a UID that was no
+/// longer there (H7, 2026-11-14 audit). Which of the two is true is read from the queue: if an
+/// operation that moves the message out of its origin is still waiting, it has not happened.
+fn on_server(tx: &Transaction<'_>, id: i64) -> Result<Option<OnServer>, DbError> {
+    use rusqlite::OptionalExtension;
+
+    struct Row {
+        account_id: i64,
+        mailbox_id: i64,
+        path: String,
+        uid: i64,
+        origin_id: Option<i64>,
+        origin_uid: Option<i64>,
+        message_id: Option<String>,
+    }
+
+    let row = tx
+        .query_row(
+            "SELECT message.account_id, message.mailbox_id, mailbox.remote_path, message.uid,
+                    message.origin_mailbox_id, message.origin_uid, message.message_id
+               FROM message JOIN mailbox ON mailbox.id = message.mailbox_id
+              WHERE message.id = ?1",
+            params![id],
+            |row| {
+                Ok(Row {
+                    account_id: row.get(0)?,
+                    mailbox_id: row.get(1)?,
+                    path: row.get(2)?,
+                    uid: row.get(3)?,
+                    origin_id: row.get(4)?,
+                    origin_uid: row.get(5)?,
+                    message_id: row.get(6)?,
+                })
+            },
+        )
+        .optional()?;
+
+    let Some(Row {
+        account_id,
+        mailbox_id,
+        path,
+        uid,
+        origin_id,
+        origin_uid,
+        message_id,
+    }) = row
+    else {
+        return Ok(None);
+    };
+    let message_id = message_id.filter(|value| !value.trim().is_empty());
+
+    // On the server where it is here, under its own UID: not parked.
+    if let Ok(uid) = u32::try_from(uid) {
+        if uid == 0 {
+            // Here and never on the server: nothing to tell it.
+            return Ok(None);
+        }
+        return Ok(Some(OnServer {
+            account_id,
+            mailbox_id,
+            path,
+            uid: Some(uid),
+            message_id,
+        }));
+    }
+
+    // Parked. With no origin there is nothing to go on, and sending nothing is the safe kind of
+    // wrong — as `locate` has always done.
+    let Some(origin_id) = origin_id else {
+        return Ok(None);
+    };
+    let Some((origin_account, origin_path)) = account_and_path(tx, origin_id)? else {
+        return Ok(None);
+    };
+
+    let origin_uid = origin_uid
+        .and_then(|uid| u32::try_from(uid).ok())
+        .filter(|uid| *uid > 0);
+
+    let still_queued = queued(tx, origin_account)?.iter().any(|(_, op)| match op {
+        Op::Move { from, uids, .. } => {
+            *from == origin_path && origin_uid.is_some_and(|uid| uids.contains(&uid))
+        }
+        Op::MoveByMessageId {
+            from,
+            message_id: queued_id,
+            ..
+        } => *from == origin_path && message_id.as_deref() == Some(queued_id.as_str()),
+        _ => false,
+    });
+
+    if still_queued {
+        return Ok(Some(OnServer {
+            account_id: origin_account,
+            mailbox_id: origin_id,
+            path: origin_path,
+            uid: origin_uid,
+            message_id,
+        }));
+    }
+
+    // The move ran. The server has it here, under a UID the next sync of this mailbox will learn.
+    Ok(Some(OnServer {
+        account_id,
+        mailbox_id,
+        path,
+        uid: None,
+        message_id,
+    }))
+}
+
+/// Takes a queued move-by-Message-ID of this message out of `from` off the queue.
+fn cancel_move_by_id(
+    tx: &Transaction<'_>,
+    account_id: i64,
+    from: &str,
+    message_id: &str,
+) -> Result<(), DbError> {
+    for (id, op) in queued(tx, account_id)? {
+        if let Op::MoveByMessageId {
+            from: queued_from,
+            message_id: queued_id,
+            ..
+        } = op
+        {
+            if queued_from == from && queued_id == message_id {
+                tx.execute("DELETE FROM pending_op WHERE id = ?1", params![id])?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Messages a move has put back exactly where the server already had them, with the UID they
+/// have there. See [`settle`].
+#[derive(Debug, Default)]
+#[must_use = "pass this to `ops::settle` after the local move"]
+pub struct Homecoming(Vec<(i64, u32)>);
+
+/// Queues the server side of moving these messages to `destination`. **Call before the local
+/// write**, then [`settle`] with what it returns.
+///
+/// The one place a move of mail decides what the server must do, for every caller — Move,
+/// Archive, Delete to Trash, a rule, Undo and Redo. Each used to work it out alone from
+/// `locate`, and all of them skipped a message whose server copy was already in the
+/// destination. That was wrong both ways a message gets there:
+///
+/// * **Its move out has not run yet.** Moving it back has to *cancel* that move. Skipping left it
+///   queued, so a message archived and then dragged straight back, or archived and undone within
+///   two seconds, was archived on the server anyway and the next sync took it away again.
+/// * **Its move out has run.** Then it is not in its origin at all, and the only name it has is
+///   its `Message-ID` — see [`on_server`].
+///
+/// A message whose earlier move is replaced by this one keeps one operation, never two: the
+/// queued one is rewritten or removed first.
+pub fn queue_move(
+    tx: &Transaction<'_>,
+    ids: &[i64],
+    destination: i64,
+) -> Result<Homecoming, DbError> {
+    let mut homecoming = Homecoming::default();
+
+    let Some(to) = mailbox_path(tx, destination)? else {
+        return Ok(homecoming);
+    };
+
+    // By UID, grouped so one command covers each source mailbox, as `locate` grouped them.
+    let mut by_uid: Vec<(i64, String, Vec<u32>)> = Vec::new();
+
+    for &id in ids {
+        let Some(server) = on_server(tx, id)? else {
+            continue;
+        };
+
+        // Whatever was going to move it is replaced by this.
+        if let Some(uid) = server.uid {
+            supersede_move(tx, server.account_id, &server.path, &[uid])?;
+        }
+        if let Some(message_id) = &server.message_id {
+            cancel_move_by_id(tx, server.account_id, &server.path, message_id)?;
+        }
+
+        // A parked row records where the server has it, so the next move starts from there.
+        // Written now because `write::move_to` keeps a parked row's origin as it is.
+        tx.execute(
+            "UPDATE message SET origin_mailbox_id = ?2, origin_uid = ?3
+              WHERE id = ?1 AND uid < 0",
+            params![id, server.mailbox_id, server.uid],
+        )?;
+
+        if server.path == to {
+            // Back where the server has it: nothing to send. With the UID known the row can
+            // stop being parked once it is there; without it, the next sync adopts it.
+            if let Some(uid) = server.uid {
+                homecoming.0.push((id, uid));
+            }
+            continue;
+        }
+
+        match (server.uid, &server.message_id) {
+            (Some(uid), _) => {
+                match by_uid.iter_mut().find(|(account, path, _)| {
+                    *account == server.account_id && *path == server.path
+                }) {
+                    Some((_, _, uids)) => uids.push(uid),
+                    None => by_uid.push((server.account_id, server.path.clone(), vec![uid])),
+                }
+            }
+            (None, Some(message_id)) => enqueue(
+                tx,
+                server.account_id,
+                &Op::MoveByMessageId {
+                    from: server.path.clone(),
+                    to: to.clone(),
+                    message_id: message_id.clone(),
+                },
+            )?,
+            (None, None) => tracing::debug!(
+                id,
+                "move: no UID and no Message-ID to name the message by; not sent"
+            ),
+        }
+    }
+
+    for (account_id, from, uids) in by_uid {
+        enqueue(
+            tx,
+            account_id,
+            &Op::Move {
+                from,
+                to: to.clone(),
+                uids,
+            },
+        )?;
+    }
+
+    Ok(homecoming)
+}
+
+/// After the local move: a message back exactly where the server has it takes its UID there
+/// again and stops being parked, as though it had never left.
+///
+/// Skipped if another row already holds that UID in the mailbox; the sync sorts that out, and
+/// a unique-constraint failure here would take the whole move with it.
+pub fn settle(tx: &Transaction<'_>, homecoming: &Homecoming) -> Result<(), DbError> {
+    for (id, uid) in &homecoming.0 {
+        tx.execute(
+            "UPDATE message
+                SET uid = ?2, origin_mailbox_id = NULL, origin_uid = NULL
+              WHERE id = ?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM message AS other
+                     WHERE other.mailbox_id = message.mailbox_id AND other.uid = ?2
+                       AND other.id <> message.id)",
+            params![id, uid],
+        )?;
+    }
 
     Ok(())
 }
@@ -822,30 +1458,35 @@ pub(crate) fn queued_after(
 }
 
 /// The oldest readable operation after `after`, dropping unreadable ones on the way.
+///
+/// With the `UIDVALIDITY` recorded when it was queued. See `stale`.
 fn next_queued(
     tx: &Transaction<'_>,
     account_id: i64,
     mut after: i64,
-) -> Result<Option<(i64, Op)>, DbError> {
+) -> Result<Option<(i64, Op, Option<u32>)>, DbError> {
     use rusqlite::OptionalExtension;
 
     loop {
-        let row: Option<(i64, String)> = tx
+        let row: Option<(i64, String, Option<i64>)> = tx
             .query_row(
-                "SELECT id, payload_json FROM pending_op
+                "SELECT id, payload_json, uid_validity FROM pending_op
                   WHERE account_id = ?1 AND id > ?2
                   ORDER BY id ASC LIMIT 1",
                 params![account_id, after],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
 
-        let Some((id, payload)) = row else {
+        let Some((id, payload, validity)) = row else {
             return Ok(None);
         };
 
         match serde_json::from_str::<Op>(&payload) {
-            Ok(op) => return Ok(Some((id, op))),
+            Ok(op) => {
+                let validity = validity.and_then(|v| u32::try_from(v).ok());
+                return Ok(Some((id, op, validity)));
+            }
             Err(error) => {
                 tracing::warn!(id, %error, "pending_op payload could not be read; dropping it");
                 forget(tx, id)?;
@@ -965,6 +1606,43 @@ async fn store_flags(
     Ok(())
 }
 
+/// Sets and clears `\Seen` and `\Flagged` on a set of UIDs in the selected mailbox.
+///
+/// Set and clear are separate commands: IMAP's `+FLAGS` and `-FLAGS` cannot be combined, and
+/// `FLAGS` without a sign would replace the whole set — wiping \Answered and every keyword the
+/// user never touched.
+async fn store_flag_changes(
+    session: &mut ImapSession,
+    set: &str,
+    seen: Option<bool>,
+    flagged: Option<bool>,
+) -> Result<(), SyncError> {
+    let mut add: Vec<&str> = Vec::new();
+    let mut remove: Vec<&str> = Vec::new();
+
+    for (value, name) in [(seen, "\\Seen"), (flagged, "\\Flagged")] {
+        match value {
+            Some(true) => add.push(name),
+            Some(false) => remove.push(name),
+            None => {}
+        }
+    }
+
+    if !add.is_empty() {
+        store_flags(session, set, format!("+FLAGS.SILENT ({})", add.join(" "))).await?;
+    }
+    if !remove.is_empty() {
+        store_flags(
+            session,
+            set,
+            format!("-FLAGS.SILENT ({})", remove.join(" ")),
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
 /// Applies one operation to the server.
 /// What applying one operation turned up. Only drafts have anything to say.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -978,7 +1656,40 @@ pub struct Applied {
     pub appended_draft: Option<(String, u32)>,
 }
 
-async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<Applied, SyncError> {
+/// Selects the mailbox an operation names by UID, and says whether its UIDs still mean what they
+/// meant when it was queued.
+///
+/// False after the server has reset the mailbox's `UIDVALIDITY`: the same numbers now name
+/// other messages, and a Delete queued before the reset expunged whichever of them had the number
+/// (M3, 2026-11-14 audit). Such an operation is dropped instead. The change it carried is lost,
+/// which is what a reset means for every client; the sync drops the mailbox's copy and reads it
+/// again the next time it reaches it.
+async fn select_for_uids(
+    session: &mut ImapSession,
+    mailbox: &str,
+    validity: Option<u32>,
+) -> Result<bool, SyncError> {
+    let selected = session.select(mailbox).await?;
+
+    if stale(validity, selected.uid_validity) {
+        tracing::warn!(
+            mailbox,
+            queued = validity,
+            found = selected.uid_validity,
+            "the mailbox was reset after this change was queued; its UIDs name other mail now, so it is dropped"
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+async fn apply(
+    session: &mut ImapSession,
+    op: &Op,
+    validity: Option<u32>,
+    has_move: bool,
+) -> Result<Applied, SyncError> {
     match op {
         Op::Flag {
             mailbox,
@@ -986,68 +1697,83 @@ async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<App
             seen,
             flagged,
         } => {
-            session.select(mailbox).await?;
-
-            // Set and clear are separate commands: IMAP's `+FLAGS` and `-FLAGS` cannot be
-            // combined, and `FLAGS` without a sign would replace the whole set — wiping
-            // \Answered and every keyword the user never touched.
-            let mut add: Vec<&str> = Vec::new();
-            let mut remove: Vec<&str> = Vec::new();
-
-            if let Some(value) = seen {
-                if *value {
-                    add.push("\\Seen");
-                } else {
-                    remove.push("\\Seen");
-                }
-            }
-            if let Some(value) = flagged {
-                if *value {
-                    add.push("\\Flagged");
-                } else {
-                    remove.push("\\Flagged");
-                }
+            if !select_for_uids(session, mailbox, validity).await? {
+                return Ok(Applied::default());
             }
 
             // Several commands when the set is long, each one whole. A retry after a failure
             // part-way repeats the ones that landed, which for flags changes nothing.
             for set in sequence_sets(uids) {
-                if !add.is_empty() {
-                    store_flags(session, &set, format!("+FLAGS.SILENT ({})", add.join(" ")))
-                        .await?;
+                store_flag_changes(session, &set, *seen, *flagged).await?;
+            }
+        }
+
+        Op::FlagByMessageId {
+            mailbox,
+            message_id,
+            seen,
+            flagged,
+        } => {
+            // The newest copy, as `MoveByMessageId` takes: it is the one the move put there.
+            let found = other_copies(session, mailbox, message_id, None).await?;
+            match found.iter().max() {
+                Some(uid) => {
+                    store_flag_changes(session, &uid.to_string(), *seen, *flagged).await?;
                 }
-                if !remove.is_empty() {
-                    store_flags(
-                        session,
-                        &set,
-                        format!("-FLAGS.SILENT ({})", remove.join(" ")),
-                    )
-                    .await?;
-                }
+                None => tracing::debug!(
+                    mailbox,
+                    "flag by Message-ID: not in the mailbox any more; nothing to change"
+                ),
+            }
+        }
+
+        Op::DeleteByMessageId {
+            mailbox,
+            message_id,
+        } => {
+            let found = match other_copies(session, mailbox, message_id, None).await {
+                Ok(found) => found,
+                Err(SyncError::Imap(error)) if nonexistent(&error) => Vec::new(),
+                Err(error) => return Err(error),
+            };
+            if let Some(uid) = found.iter().max() {
+                let set = uid.to_string();
+                store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
+                expunge(session, &set).await?;
             }
         }
 
         Op::Move { from, to, uids } => {
-            session.select(from).await?;
+            if !select_for_uids(session, from, validity).await? {
+                return Ok(Applied::default());
+            }
+            move_selected(session, uids, to, has_move).await?;
+        }
 
-            // A retry after a failure part-way names UIDs that have already left, and a UID
-            // command ignores UIDs that are not there (RFC 3501 §6.4.8).
-            for set in sequence_sets(uids) {
-                if has_move {
-                    session.uid_mv(&set, to).await?;
-                } else {
-                    // The three-step fallback docs/03 §5 describes. Copy first: if it fails the
-                    // message is still in one place, whereas deleting first and failing to copy
-                    // loses it outright.
-                    session.uid_copy(&set, to).await?;
-                    store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
-                    expunge(session, &set).await?;
-                }
+        Op::MoveByMessageId {
+            from,
+            to,
+            message_id,
+        } => {
+            // `other_copies` selects `from` and searches it; a search the server refuses counts
+            // as nothing found, and a move of nothing is done.
+            let found = other_copies(session, from, message_id, None).await?;
+
+            // The newest copy, if somehow there are several: it is the one this app put there.
+            // Moving every copy would take along a duplicate the user filed there themselves.
+            match found.iter().max() {
+                Some(uid) => move_selected(session, &[*uid], to, has_move).await?,
+                None => tracing::debug!(
+                    from,
+                    "move by Message-ID: not in the mailbox any more; nothing to move"
+                ),
             }
         }
 
         Op::Delete { mailbox, uids } => {
-            session.select(mailbox).await?;
+            if !select_for_uids(session, mailbox, validity).await? {
+                return Ok(Applied::default());
+            }
 
             for set in sequence_sets(uids) {
                 store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
@@ -1080,7 +1806,12 @@ async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<App
             // The new copy first. If the append fails the old draft is still on the server,
             // whereas deleting first and failing to append loses whatever was typed.
             session
-                .append(mailbox, Some("(\\Draft \\Seen)"), None, &raw)
+                .append(
+                    super::session::append_name(mailbox),
+                    Some("(\\Draft \\Seen)"),
+                    None,
+                    &raw,
+                )
                 .await?;
 
             // Our own previous copy is replaced. The other device's copy is **left alone**:
@@ -1142,6 +1873,26 @@ async fn apply(session: &mut ImapSession, op: &Op, has_move: bool) -> Result<App
                 conflicting_draft: None,
                 appended_draft: appended,
             });
+        }
+
+        Op::DeleteDraft {
+            mailbox,
+            message_id,
+        } => {
+            // Every copy with the draft's id: ours, and any another device saved, since a draft
+            // that has been sent or thrown away is done with everywhere. A mailbox that is not
+            // there, or a search the server refuses, finds nothing — and nothing is what there is
+            // to delete then.
+            let copies = match other_copies(session, mailbox, message_id, None).await {
+                Ok(copies) => copies,
+                Err(SyncError::Imap(error)) if nonexistent(&error) => Vec::new(),
+                Err(error) => return Err(error),
+            };
+
+            for set in sequence_sets(&copies) {
+                store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
+                expunge(session, &set).await?;
+            }
         }
 
         // Each of the four below is written to be run twice. The drain forgets an operation
@@ -1368,6 +2119,32 @@ async fn other_copies(
     Ok(found.into_iter().filter(|uid| Some(*uid) != ours).collect())
 }
 
+/// Moves these UIDs out of the selected mailbox into `to`.
+async fn move_selected(
+    session: &mut ImapSession,
+    uids: &[u32],
+    to: &str,
+    has_move: bool,
+) -> Result<(), SyncError> {
+    // A retry after a failure part-way names UIDs that have already left, and a UID command
+    // ignores UIDs that are not there (RFC 3501 §6.4.8).
+    for set in sequence_sets(uids) {
+        if has_move {
+            session.uid_mv(&set, to).await?;
+        } else {
+            // The three-step fallback docs/03 §5 describes. Copy first: if it fails the message
+            // is still in one place, whereas deleting first and failing to copy loses it outright.
+            session
+                .uid_copy(&set, super::session::copy_name(to))
+                .await?;
+            store_flags(session, &set, "+FLAGS.SILENT (\\Deleted)".into()).await?;
+            expunge(session, &set).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Expunges just the UIDs named, where the server allows it.
 ///
 /// A bare `EXPUNGE` removes **every** message flagged `\Deleted` in the mailbox, including
@@ -1436,7 +2213,7 @@ pub async fn drain(
     // the operations queued behind it, and a list taken at the start would send the versions
     // that no longer exist.
     loop {
-        let Some((id, op)) = db
+        let Some((id, op, validity)) = db
             .write(move |tx| next_queued(tx, account_id, after))
             .await?
         else {
@@ -1444,7 +2221,43 @@ pub async fn drain(
         };
         after = id;
 
-        match apply(session, &op, has_move).await {
+        // A draft's previous copy is the one its row says *now*, not the one known when the save
+        // was queued: an append that ran since has recorded a newer UID, and a draft opened from
+        // the server has one from the start. Taken at enqueue time it was none, so the copy was
+        // never replaced (H5, 2026-11-14 audit).
+        let op = match op {
+            Op::AppendDraft {
+                mailbox,
+                eml_path,
+                replaces,
+                message_id,
+            } => {
+                let lookup = message_id.clone();
+                let current = db
+                    .read(move |conn| {
+                        Ok(conn
+                            .query_row(
+                                "SELECT remote_uid FROM draft WHERE message_id = ?1",
+                                params![lookup],
+                                |row| row.get::<_, Option<i64>>(0),
+                            )
+                            .ok()
+                            .flatten()
+                            .and_then(|uid| u32::try_from(uid).ok()))
+                    })
+                    .await?;
+
+                Op::AppendDraft {
+                    mailbox,
+                    eml_path,
+                    replaces: current.or(replaces),
+                    message_id,
+                }
+            }
+            other => other,
+        };
+
+        match apply(session, &op, validity, has_move).await {
             Ok(applied) => {
                 // Recorded before the op is forgotten, so a crash between the two leaves the
                 // op queued and the conflict found again rather than lost.
@@ -1601,6 +2414,165 @@ mod tests {
             sequence_sets(&[u32::MAX - 1, u32::MAX]),
             vec![format!("{}:{}", u32::MAX - 1, u32::MAX)]
         );
+    }
+
+    #[test]
+    fn a_change_queued_by_uid_carries_what_those_uids_meant() {
+        // M3 in the 2026-11-14 audit: a Delete queued before the server reset a mailbox expunged
+        // whichever message had the number afterwards. The queue now records the UIDVALIDITY
+        // each UID-naming change was queued under, and the drain compares it with SELECT's.
+        let mut conn = store();
+        conn.execute(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name, uid_validity)
+             VALUES (10, 1, 'INBOX', 'Inbox', 777), (11, 1, 'Archive', 'Archive', 888)",
+            [],
+        )
+        .expect("mailboxes");
+        let tx = conn.transaction().expect("tx");
+
+        enqueue(&tx, 1, &flag(vec![7], Some(true))).expect("flag");
+        enqueue(
+            &tx,
+            1,
+            &Op::Move {
+                from: "Archive".into(),
+                to: "INBOX".into(),
+                uids: vec![4],
+            },
+        )
+        .expect("move");
+        enqueue(
+            &tx,
+            1,
+            &Op::Delete {
+                mailbox: "INBOX".into(),
+                uids: vec![9],
+            },
+        )
+        .expect("delete");
+        enqueue(
+            &tx,
+            1,
+            &Op::CreateMailbox {
+                path: "Receipts".into(),
+            },
+        )
+        .expect("create");
+        // A mailbox this store has never seen has no value to record.
+        enqueue(
+            &tx,
+            1,
+            &Op::Flag {
+                mailbox: "Unknown".into(),
+                uids: vec![1],
+                seen: Some(true),
+                flagged: None,
+            },
+        )
+        .expect("unknown");
+
+        let mut recorded = Vec::new();
+        let mut after = 0;
+        while let Some((id, op, validity)) = next_queued(&tx, 1, after).expect("next") {
+            recorded.push((op.kind(), validity));
+            after = id;
+        }
+
+        assert_eq!(
+            recorded,
+            vec![
+                ("flag", Some(777)),
+                ("move", Some(888)),
+                ("delete", Some(777)),
+                ("mailboxCreate", None),
+                ("flag", None),
+            ],
+            "a move is checked against the mailbox it moves out of"
+        );
+    }
+
+    #[test]
+    fn a_change_to_a_moved_message_follows_it_to_where_it_went() {
+        // M4 in the 2026-11-14 audit. A message archived a moment ago is parked in Archive; the
+        // server gives it a new UID there that the sync has not learned. A star on it was sent to
+        // the Inbox under its old UID, which named nothing by the time it ran — the move is queued
+        // ahead of it — so the server changed nothing and the queue forgot it as sent.
+        let mut conn = store();
+        conn.execute_batch(
+            "INSERT INTO mailbox (id, account_id, remote_path, display_name)
+             VALUES (10, 1, 'INBOX', 'Inbox'), (11, 1, 'Archive', 'Archive');
+             INSERT INTO message (id, account_id, mailbox_id, uid, date_sent, date_received,
+                                  message_id, origin_mailbox_id, origin_uid)
+             VALUES (1, 1, 11, -1, 0, 0, 'moved@example.test', 10, 5),
+                    (2, 1, 10, 6, 0, 0, 'stayed@example.test', NULL, NULL),
+                    (3, 1, 11, -3, 0, 0, NULL, 10, 7);",
+        )
+        .expect("rows");
+        let tx = conn.transaction().expect("tx");
+
+        let (groups, unnumbered) = resolve(&tx, &[1, 2, 3]).expect("resolve");
+        assert_eq!(
+            unnumbered,
+            vec![Unnumbered {
+                account_id: 1,
+                mailbox: "Archive".into(),
+                message_id: "moved@example.test".into(),
+            }],
+            "named by its Message-ID, where it is now"
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (group.mailbox.as_str(), group.uids.clone()))
+                .collect::<Vec<_>>(),
+            vec![("INBOX", vec![6, 7])],
+            "a message that never moved keeps its UID, and one with no Message-ID has only its \
+             origin to go by"
+        );
+
+        queue_flags(&tx, &[1, 2], None, Some(true)).expect("flag");
+        queue_delete(&tx, &[1]).expect("delete");
+
+        let queued: Vec<Op> = queued(&tx, 1)
+            .expect("queued")
+            .into_iter()
+            .map(|(_, op)| op)
+            .collect();
+        assert_eq!(
+            queued,
+            vec![
+                Op::Flag {
+                    mailbox: "INBOX".into(),
+                    uids: vec![6],
+                    seen: None,
+                    flagged: Some(true),
+                },
+                Op::FlagByMessageId {
+                    mailbox: "Archive".into(),
+                    message_id: "moved@example.test".into(),
+                    seen: None,
+                    flagged: Some(true),
+                },
+                Op::DeleteByMessageId {
+                    mailbox: "Archive".into(),
+                    message_id: "moved@example.test".into(),
+                },
+            ]
+        );
+
+        // And a sync of Archive meanwhile does not bring back what is being deleted.
+        let removals = unsent_removals(&tx, 1, "Archive").expect("removals");
+        assert!(removals.contains_message(999, Some("moved@example.test")));
+    }
+
+    #[test]
+    fn only_a_known_change_of_uidvalidity_makes_a_queued_change_stale() {
+        assert!(stale(Some(777), Some(778)), "a reset");
+        assert!(!stale(Some(777), Some(777)));
+        // Queued before the column existed, or on a server that sends none: as before.
+        assert!(!stale(None, Some(777)));
+        assert!(!stale(Some(777), None));
+        assert!(!stale(Some(0), Some(777)));
     }
 
     #[test]

@@ -27,8 +27,18 @@ const INTERVAL_MS = 30_000
 export interface Autosave {
   /** The stable `Message-ID` for this draft, once one has been assigned. */
   messageId: () => string | null
-  /** Saves now, if anything has changed. Used on blur and before sending. */
-  saveNow: () => void
+  /**
+   * Saves now, if anything has changed, and resolves once that save has finished — so Save as
+   * Draft can wait for it before closing the window. Resolves false if the save failed, which
+   * is the one case where closing would lose the message. A save already under way is waited for and
+   * followed by another if the message has changed since.
+   */
+  saveNow: () => Promise<boolean>
+  /**
+   * Continues an existing draft — one reopened from a Drafts mailbox — so each save replaces it
+   * rather than starting a second draft beside it.
+   */
+  adopt: (messageId: string) => void
   /** Forgets the draft, so a sent message is not saved again on the way out. */
   abandon: () => void
   /**
@@ -39,19 +49,28 @@ export interface Autosave {
   resume: () => void
 }
 
-export function useAutosave(build: () => OutgoingMessage | null): Autosave {
+/**
+ * `touched` says whether the user has changed anything. Until they have, nothing is saved: a
+ * reply opened and looked at is not a draft, and saving one whenever the window lost focus put
+ * an unwritten reply in Drafts on every device (L25, 2026-11-14 audit).
+ */
+export function useAutosave(build: () => OutgoingMessage | null, touched: () => boolean): Autosave {
   const messageId = useRef<string | null>(null)
   const lastSaved = useRef<string>('')
   const abandoned = useRef(false)
-  const inFlight = useRef(false)
+  /** The save under way, if any. */
+  const inFlight = useRef<Promise<boolean> | null>(null)
 
-  const save = useCallback(() => {
+  const save = useCallback((): Promise<boolean> => {
+    if (!runningInTauri || abandoned.current || !touched()) return Promise.resolve(true)
+
     // The in-flight guard replaces what used to be an early fingerprint commit. Both stop a
-    // second save racing the first; only this one lets a failed save be retried.
-    if (!runningInTauri || abandoned.current || inFlight.current) return
+    // second save racing the first; only this one lets a failed save be retried. Waited for
+    // rather than skipped, so a save asked for now still saves what is in the window now.
+    if (inFlight.current !== null) return inFlight.current.then(save)
 
     const message = build()
-    if (message === null) return
+    if (message === null) return Promise.resolve(true)
 
     // A draft with nothing in it is not a draft. Saving one would put an empty message in the
     // user's Drafts mailbox on every device, for a window they opened and closed.
@@ -60,9 +79,10 @@ export function useAutosave(build: () => OutgoingMessage | null): Autosave {
       (message.text ?? '').trim() !== '' ||
       message.to.length > 0 ||
       message.cc.length > 0 ||
-      message.bcc.length > 0
+      message.bcc.length > 0 ||
+      message.attachments.length > 0
 
-    if (!substantive) return
+    if (!substantive) return Promise.resolve(true)
 
     // Compared against the last saved shape rather than a dirty flag, because the editor
     // reports a change for a caret move as readily as for a typed character.
@@ -72,48 +92,65 @@ export function useAutosave(build: () => OutgoingMessage | null): Autosave {
       message.bcc,
       message.subject,
       message.html,
+      // Drafts keep their files now, so attaching one is a change worth saving.
+      message.attachments,
     ])
 
-    if (fingerprint === lastSaved.current) return
+    if (fingerprint === lastSaved.current) return Promise.resolve(true)
 
     // Recorded only once the write has actually succeeded. Recording it before the call --
     // which is what this did -- meant the guard above suppressed every later save of unchanged
     // content, so a single transient failure left the draft unsaved for the life of the window
     // and killed the timer, the blur save and Save as Draft together. The comment below
     // promised a retry the code had just made impossible.
-    inFlight.current = true
-
-    composeSaveDraft(message, messageId.current)
+    const saving = composeSaveDraft(message, messageId.current)
       .then((saved) => {
         messageId.current = saved.messageId
         lastSaved.current = fingerprint
+        return true
       })
       .catch((cause: unknown) => {
         // Worth a line in the console, never an interruption. The next save will try again --
         // and now it genuinely can, because the fingerprint was never committed.
         console.warn('[compose] draft not saved', cause)
+        return false
       })
       .finally(() => {
-        inFlight.current = false
+        inFlight.current = null
       })
-  }, [build])
+
+    inFlight.current = saving
+    return saving
+  }, [build, touched])
+
+  // Stable, so a window can name it as an effect's dependency without re-running the effect on
+  // every render.
+  const adopt = useCallback((id: string) => {
+    messageId.current = id
+  }, [])
 
   useEffect(() => {
-    const timer = window.setInterval(save, INTERVAL_MS)
+    // The result is not wanted here: a failed timed save is retried by the next one.
+    const quietly = () => {
+      void save()
+    }
+
+    const timer = window.setInterval(quietly, INTERVAL_MS)
 
     // `blur` on the window rather than on a field: the user clicking to another application is
     // the moment a draft most needs to exist, and a field-level blur would miss it.
-    window.addEventListener('blur', save)
+    window.addEventListener('blur', quietly)
 
     return () => {
       window.clearInterval(timer)
-      window.removeEventListener('blur', save)
+      window.removeEventListener('blur', quietly)
     }
   }, [save])
 
   return {
     messageId: () => messageId.current,
     saveNow: save,
+    adopt,
     abandon: () => {
       abandoned.current = true
     },

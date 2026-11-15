@@ -31,7 +31,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use halcyon_lib::mail::render::{remote_urls, render, sanitise_for_enumeration};
+use halcyon_lib::mail::render::{remote_image_urls, render};
 
 const NEWSLETTER: &str = include_str!("fixtures/slow-newsletter.html");
 
@@ -61,12 +61,12 @@ fn stand_in_image() -> String {
 
 /// The remote map the app would build for this message.
 ///
-/// Enumerated exactly as `ipc::body` enumerates it — from the *sanitised* markup, not the raw
-/// HTML — so the keys here are the keys `render` will look up. Building the map any other way
+/// Enumerated exactly as `ipc::body` enumerates it — by the sanitiser's own pass, not from the
+/// raw HTML — so the keys here are the keys `render` will look up. Building the map any other way
 /// would produce a test that silently substitutes nothing, which is the failure this file is
 /// recovering from.
 fn remote_images() -> HashMap<String, String> {
-    remote_urls(&sanitise_for_enumeration(NEWSLETTER))
+    remote_image_urls(NEWSLETTER)
         .into_iter()
         .map(|url| (url, stand_in_image()))
         .collect()
@@ -78,10 +78,16 @@ fn a_real_newsletter_renders_inside_the_budget() {
     let remote = HashMap::new();
 
     // Once to warm anything lazily initialised, then measured.
-    let _ = render(Some(NEWSLETTER), None, &inline, false, &remote);
+    let _ = render(
+        Some(NEWSLETTER),
+        None,
+        inline.clone(),
+        false,
+        remote.clone(),
+    );
 
     let started = Instant::now();
-    let rendered = render(Some(NEWSLETTER), None, &inline, false, &remote);
+    let rendered = render(Some(NEWSLETTER), None, inline, false, remote);
     let elapsed = started.elapsed().as_millis();
 
     println!(
@@ -101,7 +107,7 @@ fn rendering_does_not_multiply_the_message() {
     let inline = HashMap::new();
     let remote = HashMap::new();
 
-    let rendered = render(Some(NEWSLETTER), None, &inline, false, &remote);
+    let rendered = render(Some(NEWSLETTER), None, inline, false, remote);
     let growth = rendered.html.len() / NEWSLETTER.len().max(1);
 
     assert!(
@@ -127,7 +133,7 @@ fn inlining_images_costs_the_images_and_nothing_more() {
     );
 
     let substituted: usize = remote.values().map(String::len).sum();
-    let rendered = render(Some(NEWSLETTER), None, &inline, true, &remote);
+    let rendered = render(Some(NEWSLETTER), None, inline, true, remote.clone());
 
     assert_eq!(
         rendered.loaded_remote as usize,
@@ -161,10 +167,12 @@ fn loading_remote_images_is_no_slower() {
     let inline = HashMap::new();
     let remote = remote_images();
 
-    let _ = render(Some(NEWSLETTER), None, &inline, true, &remote);
+    let images = remote.len();
+
+    let _ = render(Some(NEWSLETTER), None, inline.clone(), true, remote.clone());
 
     let started = Instant::now();
-    let rendered = render(Some(NEWSLETTER), None, &inline, true, &remote);
+    let rendered = render(Some(NEWSLETTER), None, inline, true, remote);
     let elapsed = started.elapsed().as_millis();
 
     println!(
@@ -175,7 +183,6 @@ fn loading_remote_images_is_no_slower() {
 
     assert!(
         elapsed <= BUDGET_MS,
-        "rendering with {} images inlined took {elapsed}ms, over the {BUDGET_MS}ms budget",
-        remote.len()
+        "rendering with {images} images inlined took {elapsed}ms, over the {BUDGET_MS}ms budget"
     );
 }

@@ -61,3 +61,12 @@
   gap: var(--sp-2);
   align-items: center;
 }
+
+/* The whole address in the link check, which is what the choice is about. Long tracking links
+   wrap anywhere rather than widening the sheet. */
+.linkAddress {
+  margin: 0;
+  color: var(--label-2);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}

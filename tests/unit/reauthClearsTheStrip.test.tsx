@@ -24,11 +24,17 @@ const listeners: {
 
 const accountReauth = vi.fn<(id: number) => Promise<void>>()
 const syncAll = vi.fn(() => Promise.resolve())
+const settingsOpen = vi.fn<(pane: string, accountId?: number) => Promise<void>>(() =>
+  Promise.resolve(),
+)
+/** How each account signs in, by id. Account 1 is OAuth unless a test says otherwise. */
+let authKinds: Record<number, 'oAuth2' | 'password'> = { 1: 'oAuth2' }
 
 vi.mock('@/lib/ipc', async (importOriginal) => ({
   ...(await importOriginal<typeof Ipc>()),
   runningInTauri: true,
   accountReauth: (id: number) => accountReauth(id),
+  settingsOpen: (pane: string, accountId?: number) => settingsOpen(pane, accountId),
   syncAll: () => syncAll(),
   syncWatch: () => Promise.resolve(),
   onAccountError: (handler: (error: SyncAccountError) => void) => {
@@ -45,11 +51,19 @@ vi.mock('@/lib/ipc', async (importOriginal) => ({
   onMailboxesChanged: () => Promise.resolve(() => undefined),
 }))
 
+vi.mock('@/features/accounts/queries', () => ({
+  useAccountsDetail: () => ({
+    data: Object.entries(authKinds).map(([id, authKind]) => ({ id: Number(id), authKind })),
+  }),
+}))
+
 vi.mock('@tanstack/react-query', () => ({
   useQueryClient: () => ({ invalidateQueries: () => undefined }),
 }))
 
 afterEach(() => {
+  authKinds = { 1: 'oAuth2' }
+  settingsOpen.mockClear()
   listeners.accountError = []
   listeners.reauthenticated = []
   accountReauth.mockReset()
@@ -148,5 +162,111 @@ describe('the Sign In button on the strip', () => {
       expect(button).not.toBeDisabled()
     })
     expect(screen.queryByText('That sign-in did not complete')).toBeNull()
+  })
+})
+
+describe('a refused password account', () => {
+  it('is sent to Change Password, not to a browser sign-in it cannot use', async () => {
+    // H16 in the 2026-11-14 audit: the strip offered Sign In, which the core refuses for a
+    // password account with "update it in its settings", and there was no such setting.
+    authKinds = { 1: 'password' }
+    const { SyncStatus } = await import('@/features/sidebar/SyncStatus')
+    render(
+      <ToastProvider>
+        <SyncStatus
+          errors={new Map([[1, refused(1)]])}
+          busy={false}
+          online
+          accountNames={new Map([[1, 'Work']])}
+        />
+      </ToastProvider>,
+    )
+
+    expect(screen.queryByRole('button', { name: 'Sign In' })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Change Password' }))
+
+    expect(settingsOpen).toHaveBeenCalledWith('accounts', 1)
+    expect(accountReauth).not.toHaveBeenCalled()
+  })
+})
+
+describe('several accounts failing at once', () => {
+  it('names each one and gives each its own way back in', async () => {
+    // M42 in the 2026-11-14 audit: the strip showed the count, the first account's message and
+    // the first account's button. A second account whose sign-in had been refused could not be
+    // signed in again from it, and nothing said which account it was.
+    authKinds = { 1: 'oAuth2', 2: 'password' }
+    accountReauth.mockResolvedValue(undefined)
+    const { SyncStatus } = await import('@/features/sidebar/SyncStatus')
+    render(
+      <ToastProvider>
+        <SyncStatus
+          errors={
+            new Map([
+              [1, refused(1)],
+              [2, refused(2)],
+            ])
+          }
+          busy={false}
+          online
+          accountNames={
+            new Map([
+              [1, 'Gmail'],
+              [2, 'Work'],
+            ])
+          }
+        />
+      </ToastProvider>,
+    )
+
+    expect(screen.getByText('2 accounts can’t connect')).toBeTruthy()
+    expect(screen.getByText('Gmail')).toBeTruthy()
+    expect(screen.getByText('Work')).toBeTruthy()
+    // The same words for both, said once.
+    expect(screen.getAllByText(/was refused/)).toHaveLength(1)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign In' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Change Password' }))
+    expect(accountReauth).toHaveBeenCalledWith(1)
+    expect(settingsOpen).toHaveBeenCalledWith('accounts', 2)
+    // Nothing here is fixed by asking again.
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('gives each its own words when they differ, and one Retry for those that need it', async () => {
+    const { SyncStatus } = await import('@/features/sidebar/SyncStatus')
+    render(
+      <ToastProvider>
+        <SyncStatus
+          errors={
+            new Map([
+              [1, refused(1)],
+              [
+                3,
+                {
+                  accountId: 3,
+                  message: 'The server did not answer.',
+                  retryInSeconds: 30,
+                  needsReauth: false,
+                },
+              ],
+            ])
+          }
+          busy={false}
+          online
+          accountNames={
+            new Map([
+              [1, 'Gmail'],
+              [3, 'iCloud'],
+            ])
+          }
+        />
+      </ToastProvider>,
+    )
+
+    expect(screen.getByText(/was refused/)).toBeTruthy()
+    expect(screen.getByText('The server did not answer.')).toBeTruthy()
+    expect(screen.getAllByRole('button', { name: 'Sign In' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(1)
   })
 })

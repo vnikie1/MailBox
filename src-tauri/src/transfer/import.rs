@@ -125,13 +125,17 @@ pub fn mailbox_for(tx: &Transaction<'_>, account_id: i64, path: &str) -> Result<
     parent.ok_or_else(|| DbError::Sqlite(rusqlite::Error::InvalidQuery))
 }
 
-/// Guesses a folder's role from its name, so an imported Inbox looks like an inbox.
+/// Guesses a folder's role from its name, so imported Sent Items look like sent mail.
 ///
 /// Only the names the mail clients themselves use, matched case-insensitively. A guess wider
 /// than this starts filing someone's folder called "Sent to accountant" as their Sent mailbox.
+///
+/// Never the inbox role. That one is not only an icon: the taskbar badge counts every inbox's
+/// unread mail and the Inboxes row lists it, so an imported archive's years-old unread mail
+/// joined both (L40). An imported Inbox is a folder of old mail. Migration 20 took the role off the
+/// ones earlier imports made.
 fn role_for(name: &str) -> Option<&'static str> {
     match name.to_ascii_lowercase().as_str() {
-        "inbox" => Some("inbox"),
         "sent" | "sent messages" | "sent items" => Some("sent"),
         "drafts" => Some("drafts"),
         "trash" | "deleted items" | "deleted messages" => Some("trash"),
@@ -169,7 +173,11 @@ pub fn write_message(
     raw: &[u8],
     seen: Option<bool>,
 ) -> Result<Option<i64>, DbError> {
-    let Ok(parsed) = mailparse::parse_mail(raw) else {
+    // The headers only. The envelope and the references are all this needs, and the body is
+    // parsed once below by `bodies::parse`, which is bounded. A full `parse_mail` here was a
+    // second, unbounded parse: an mbox holding one message nested a few thousand deep crashed
+    // the import, and the app with it.
+    let Ok((headers, _)) = mailparse::parse_headers(raw) else {
         // Not a message. Standing rule 13 says degrade visibly, and the visible part is the
         // count the caller reports — one file that is not mail should not stop an import of
         // fifty thousand that are.
@@ -177,15 +185,21 @@ pub fn write_message(
         return Ok(None);
     };
 
-    let envelope = envelope::from_headers(&parsed);
+    let envelope = envelope::from_headers(&headers);
 
     // Thunderbird records read state in the message itself; a PST records it in a MAPI property
     // the message does not carry. The caller supplies it when it knows better than the headers do.
     let flags = MozillaFlags::from_headers(raw);
     let seen = seen.unwrap_or(flags.seen);
 
-    let references = parsed
-        .headers
+    // Deleted in Thunderbird. It deletes by marking a message expunged and leaves it in the
+    // mbox until the folder is next compacted, which can be months; until then the file holds
+    // mail the user deleted, and importing it brought every one of them back (M32).
+    if flags.deleted {
+        return Ok(None);
+    }
+
+    let references = headers
         .iter()
         .find(|header| header.get_key_ref().eq_ignore_ascii_case("References"))
         .map(|header| envelope::parse_references(&header.get_value()))
@@ -227,13 +241,58 @@ pub fn write_message(
     Ok(Some(message_id))
 }
 
-/// Threads and recounts after an import. Run once at the end, not per message.
+/// Runs one import transaction's writes, and takes their bodies off the disk again if it fails.
+///
+/// [`write_message`] writes each body to the cache as it goes, and the cache is not part of the
+/// transaction. A folder that failed partway — an mbox truncated at message 4,000, a disk filling
+/// up — rolled its rows back and left every body it had written: gigabytes, for a large import,
+/// that nothing would ever read or remove, under ids the next messages would be given (L38).
+///
+/// `work` puts the id of each message it writes into the list it is given.
+pub fn removing_bodies_on_failure<T>(
+    cache_root: &Path,
+    account_id: i64,
+    work: impl FnOnce(&mut Vec<i64>) -> Result<T, DbError>,
+) -> Result<T, DbError> {
+    let mut written = Vec::new();
+    let outcome = work(&mut written);
+
+    if outcome.is_err() {
+        for message_id in written {
+            let _ = std::fs::remove_file(bodies::cache_path(cache_root, account_id, message_id));
+        }
+    }
+
+    outcome
+}
+
+/// Threads and recounts after an import: `thread` and then `recount`.
+pub fn finish(tx: &Transaction<'_>, account_id: i64, mailboxes: &[i64]) -> Result<(), DbError> {
+    thread(tx, account_id)?;
+    recount(tx, mailboxes)
+}
+
+/// Recounts the mailboxes a batch wrote to, so the sidebar shows an import's progress.
+pub fn recount(tx: &Transaction<'_>, mailboxes: &[i64]) -> Result<(), DbError> {
+    for mailbox_id in mailboxes {
+        persist::recount(tx, *mailbox_id)?;
+    }
+
+    Ok(())
+}
+
+/// Threads an account after an import. Once, after the last batch, not per batch.
 ///
 /// Threading a message needs the messages it replies to, and during an import those may not be
 /// written yet — a folder is not in date order, and a reply can precede its parent in the file.
 /// Running per message would thread each one against a partial mailbox and leave conversations
 /// split in ways nothing later repairs.
-pub fn finish(tx: &Transaction<'_>, account_id: i64, mailboxes: &[i64]) -> Result<(), DbError> {
+///
+/// And not per batch. The import commands called this after every folder and every 200 messages
+/// of a `.pst`, and each call threads the whole account, so an import of N batches threaded the
+/// account N times over a growing number of messages: quadratic, for a result only the last pass
+/// decides (M19, 2026-11-14 audit).
+pub fn thread(tx: &Transaction<'_>, account_id: i64) -> Result<(), DbError> {
     // One pass over the whole account, not a loop over a window.
     //
     // This used to call `rethread` with a 5,000 window until `unthreaded_count` reached zero.
@@ -254,10 +313,6 @@ pub fn finish(tx: &Transaction<'_>, account_id: i64, mailboxes: &[i64]) -> Resul
     let outstanding = persist::unthreaded_count(tx, account_id)?;
     if outstanding > 0 {
         persist::rethread(tx, account_id, FULL_RETHREAD)?;
-    }
-
-    for mailbox_id in mailboxes {
-        persist::recount(tx, *mailbox_id)?;
     }
 
     Ok(())
@@ -368,13 +423,115 @@ mod tests {
     }
 
     #[test]
-    fn an_imported_inbox_is_recognised_as_one() {
-        assert_eq!(role_for("Inbox"), Some("inbox"));
+    fn imported_folders_are_recognised_by_name() {
         assert_eq!(role_for("Sent Items"), Some("sent"));
         assert_eq!(role_for("Deleted Items"), Some("trash"));
         // And nothing wider. A folder named for what it holds is not a role.
         assert_eq!(role_for("Sent to accountant"), None);
         assert_eq!(role_for("Work"), None);
+    }
+
+    #[test]
+    fn an_imported_inbox_is_a_folder_and_not_an_inbox() {
+        // Its unread mail went into the taskbar badge and the Inboxes row (L40).
+        let mut conn = store();
+        let tx = conn.transaction().expect("tx");
+        let account = local_account(&tx, "On My PC").expect("account");
+
+        let inbox = mailbox_for(&tx, account, "Outlook/Inbox").expect("inbox");
+        let role: Option<String> = tx
+            .query_row("SELECT role FROM mailbox WHERE id = ?1", [inbox], |row| {
+                row.get(0)
+            })
+            .expect("role");
+
+        assert_eq!(role, None);
+        assert_eq!(role_for("INBOX"), None);
+    }
+
+    #[test]
+    fn mail_deleted_in_thunderbird_stays_deleted() {
+        // Thunderbird marks a deleted message expunged and leaves it in the mbox until the folder
+        // is compacted. Every one came back on import (M32).
+        let mut conn = store();
+        let cache = tempfile::tempdir().expect("cache");
+        let tx = conn.transaction().expect("tx");
+        let account = local_account(&tx, "On My PC").expect("account");
+        let mailbox = mailbox_for(&tx, account, "Local Folders/Inbox").expect("mailbox");
+
+        let deleted = b"X-Mozilla-Status: 0009\r\nSubject: deleted\r\n\r\ngone\r\n";
+        let kept = b"X-Mozilla-Status: 0001\r\nSubject: kept\r\n\r\nhere\r\n";
+
+        let first = write_message(&tx, cache.path(), account, mailbox, 1, deleted, None);
+        let second = write_message(&tx, cache.path(), account, mailbox, 2, kept, None);
+
+        assert_eq!(first.expect("write"), None);
+        assert!(second.expect("write").is_some());
+
+        let subjects: Vec<String> = tx
+            .prepare("SELECT subject FROM message")
+            .expect("prepare")
+            .query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("rows");
+        assert_eq!(subjects, ["kept"]);
+    }
+
+    #[test]
+    fn a_folder_that_fails_partway_leaves_no_bodies_behind() {
+        // Its rows roll back with the transaction; the bodies it had written did not (L38).
+        let mut conn = store();
+        let cache = tempfile::tempdir().expect("cache");
+        let tx = conn.transaction().expect("tx");
+        let account = local_account(&tx, "On My PC").expect("account");
+        let mailbox = mailbox_for(&tx, account, "Archive").expect("mailbox");
+
+        let mut files = Vec::new();
+        let outcome: Result<(), DbError> =
+            removing_bodies_on_failure(cache.path(), account, |written| {
+                for uid in 1..=2 {
+                    let raw = format!("Subject: number {uid}\r\n\r\nbody {uid}\r\n");
+                    let id = write_message(
+                        &tx,
+                        cache.path(),
+                        account,
+                        mailbox,
+                        uid,
+                        raw.as_bytes(),
+                        None,
+                    )?
+                    .expect("inserted");
+                    written.push(id);
+                    files.push(bodies::cache_path(cache.path(), account, id));
+                }
+                // The third message is where the file turned out to be cut short.
+                Err(DbError::Sqlite(rusqlite::Error::InvalidQuery))
+            });
+
+        assert!(outcome.is_err());
+        assert_eq!(files.len(), 2);
+        for file in &files {
+            assert!(!file.exists(), "{} was left behind", file.display());
+        }
+
+        // A folder that succeeds keeps its bodies.
+        let kept = removing_bodies_on_failure(cache.path(), account, |written| {
+            let id = write_message(
+                &tx,
+                cache.path(),
+                account,
+                mailbox,
+                3,
+                b"Subject: kept\r\n\r\nx\r\n",
+                None,
+            )?
+            .expect("inserted");
+            written.push(id);
+            Ok(bodies::cache_path(cache.path(), account, id))
+        })
+        .expect("written");
+        assert!(kept.exists());
     }
 
     #[test]

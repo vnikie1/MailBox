@@ -78,11 +78,14 @@ pub fn text_from(filename: &str, bytes: &[u8]) -> Option<String> {
     let kind = Kind::of(filename)?;
 
     // Caught, because a parser panicking on a malformed file is a real possibility and it must
-    // cost one attachment rather than the process the user is reading their mail in.
-    let extracted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match kind {
-        Kind::Text => from_text(bytes),
-        Kind::Pdf => from_pdf(bytes),
-        Kind::Docx => from_docx(bytes),
+    // cost one attachment rather than the process the user is reading their mail in. And
+    // expected, so it is logged below rather than filed as a crash report (L39).
+    let extracted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::diagnostics::panics_expected(|| match kind {
+            Kind::Text => from_text(bytes),
+            Kind::Pdf => from_pdf(bytes),
+            Kind::Docx => from_docx(bytes),
+        })
     }));
 
     let text = match extracted {

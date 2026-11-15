@@ -1,12 +1,16 @@
 /* The scope bar above search results. docs/01 §7. */
 
+/* Wraps onto a second line in a narrow list rather than cutting anything off. It was one row
+ * of fixed height, and at the default window size the count and Save Search were pushed past the
+ * pane's edge and clipped: "200 re…" (M43, 2026-11-14 audit). One line still looks as it did. */
 .bar {
   display: flex;
   flex: 0 0 auto;
-  gap: var(--sp-3);
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
   align-items: center;
-  height: var(--scope-bar-height);
-  padding: 0 var(--sp-5);
+  min-height: var(--scope-bar-height);
+  padding: var(--sp-1) var(--sp-5);
   border-bottom: var(--hairline) solid var(--separator);
 }
 
@@ -17,8 +21,11 @@
 }
 
 .tab {
+  max-width: var(--scope-tab-max-width);
   height: var(--scope-tab-height);
   padding: 0 var(--sp-4);
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--label-2);
   font: inherit;
   font-size: var(--t-subhead-size);

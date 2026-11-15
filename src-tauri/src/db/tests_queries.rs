@@ -280,6 +280,7 @@ fn page(conn: &Connection, cursor: Option<Cursor>, limit: u32) -> Vec<i64> {
         cursor,
         limit,
         unread_only: false,
+        keep_ids: Vec::new(),
     };
 
     query::messages_page(conn, &query)
@@ -311,6 +312,7 @@ fn paging_walks_every_row_exactly_once_across_a_timestamp_collision() {
             cursor,
             limit: 2,
             unread_only: false,
+            keep_ids: Vec::new(),
         };
         let result = query::messages_page(&conn, &query).expect("page");
 
@@ -333,6 +335,7 @@ fn the_cursor_is_none_once_the_end_is_reached() {
         cursor: None,
         limit: 5,
         unread_only: false,
+        keep_ids: Vec::new(),
     };
     let result = query::messages_page(&conn, &exactly_all).expect("page");
 
@@ -352,6 +355,7 @@ fn a_unified_row_merges_its_mailboxes() {
         cursor: None,
         limit: 10,
         unread_only: false,
+        keep_ids: Vec::new(),
     };
     let ids: Vec<i64> = query::messages_page(&conn, &query)
         .expect("page")
@@ -373,6 +377,7 @@ fn unread_only_filters_without_disturbing_the_order() {
         cursor: None,
         limit: 10,
         unread_only: true,
+        keep_ids: Vec::new(),
     };
     let ids: Vec<i64> = query::messages_page(&conn, &query)
         .expect("page")
@@ -382,6 +387,52 @@ fn unread_only_filters_without_disturbing_the_order() {
         .collect();
 
     assert_eq!(ids, vec![1, 3, 5]);
+}
+
+/// H1 in the 2026-11-14 audit: with Show Unread Only on, opening one message read the list.
+///
+/// Opening a message marks it read; the refetch then dropped it from an unread-only list; the
+/// selection followed the list to the row that took its place; that row was marked read 700ms
+/// later, and so on down the mailbox — about one a second, synced to the server. Mail keeps the
+/// open message in a filtered list until the selection moves, and so does this now: the list
+/// asks for the messages it is showing to be kept whatever their read state.
+#[test]
+fn a_kept_message_stays_in_an_unread_only_list_after_it_is_read() {
+    let conn = fixture();
+
+    // 2 and 4 are read. 2 stands in for the message that has just been opened and read.
+    let query = ListQuery {
+        mailbox_ids: vec![1],
+        cursor: None,
+        limit: 10,
+        unread_only: true,
+        keep_ids: vec![2],
+    };
+    let ids: Vec<i64> = query::messages_page(&conn, &query)
+        .expect("page")
+        .items
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+
+    // In its place: 2 and 3 share a date, and ties go by id, newest first.
+    assert_eq!(ids, vec![1, 3, 2, 5], "kept in its place in the order");
+
+    // Kept, not added: an id that is no longer in the mailbox — deleted or moved while it was
+    // open — still leaves, so Delete goes on moving the selection.
+    let elsewhere = ListQuery {
+        mailbox_ids: vec![2],
+        keep_ids: vec![2],
+        ..query
+    };
+    let ids: Vec<i64> = query::messages_page(&conn, &elsewhere)
+        .expect("page")
+        .items
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+
+    assert!(!ids.contains(&2), "{ids:?}");
 }
 
 #[test]
@@ -670,6 +721,7 @@ fn an_empty_mailbox_set_returns_nothing_rather_than_everything() {
         cursor: None,
         limit: 10,
         unread_only: false,
+        keep_ids: Vec::new(),
     };
     let result = query::messages_page(&conn, &query).expect("page");
 
@@ -1188,4 +1240,109 @@ fn messages_without_a_message_id_are_never_collapsed() {
     }
 
     assert_eq!(query::thread_get(&conn, 1).expect("thread").len(), 2);
+}
+
+/// M7 in the 2026-11-14 audit: an id list went into one SQL statement whole, and SQLite allows
+/// 32,766 parameters in a statement. Mark All as Read on a mailbox with more unread than that
+/// failed outright, and so would a batch of arrivals that large.
+#[test]
+fn a_selection_larger_than_sqlite_allows_in_one_statement_still_works() {
+    let mut conn = fixture();
+    const MANY: i64 = 40_000;
+
+    {
+        let tx = conn.transaction().expect("tx");
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO message
+                       (id, account_id, mailbox_id, uid, subject, date_sent, date_received, size,
+                        flag_seen, from_all, to_all, attachment_names)
+                     VALUES (?1, 1, 1, ?1, 's', 0, 0, 1, 0, '', '', '')",
+                )
+                .expect("prepare");
+            for id in 1_000..1_000 + MANY {
+                insert.execute([id]).expect("insert");
+            }
+        }
+        write::recount_mailboxes(&tx, &[1]).expect("recount");
+        tx.commit().expect("commit");
+    }
+
+    let ids: Vec<i64> = (1_000..1_000 + MANY).collect();
+    let tx = conn.transaction().expect("tx");
+
+    let changed = write::set_flags(
+        &tx,
+        &ids,
+        FlagPatch {
+            seen: Some(true),
+            flagged: None,
+        },
+    )
+    .expect("mark all as read");
+    assert_eq!(changed, MANY as usize);
+
+    let unread: i64 = tx
+        .query_row("SELECT unread_count FROM mailbox WHERE id = 1", [], |row| {
+            row.get(0)
+        })
+        .expect("count");
+    assert_eq!(unread, 3, "only the fixture's own unread messages are left");
+
+    // And the server side of the same selection.
+    let located = crate::sync::ops::locate(&tx, &ids).expect("locate");
+    let uids: usize = located.iter().map(|group| group.uids.len()).sum();
+    assert_eq!(uids, MANY as usize);
+    assert_eq!(located.len(), 1, "one mailbox, one group");
+
+    assert_eq!(write::mailboxes_of(&tx, &ids).expect("mailboxes"), vec![1]);
+}
+
+/// A smart row's header counts what the row holds. Found in batch 7 of the 2026-11-14 audit:
+/// the header added up the selection's mailboxes, a smart row has none, and every one of them
+/// read "0 messages" over a full list.
+#[test]
+fn a_smart_mailbox_counts_what_it_lists() {
+    use crate::rules::predicate::{Condition, Field, Op, Predicate};
+
+    let conn = fixture();
+
+    // Every message in the fixture is from Ada, across two mailboxes; 1, 3 and 5 are unread.
+    let from_ada = Predicate::Is(Condition {
+        field: Field::From,
+        op: Op::Contains,
+        value: "ada".into(),
+    });
+
+    let counts = query::count_matching(&conn, &from_ada).expect("count");
+    let listed = query::messages_matching(&conn, &from_ada, 100, 0).expect("list");
+    assert_eq!(counts.total, 6);
+    assert_eq!(counts.unread, 3);
+    assert_eq!(
+        counts.total,
+        listed.len() as i64,
+        "the count and the list disagree"
+    );
+
+    // A snoozed message is out of the list until it comes due, and out of the count with it.
+    conn.execute(
+        "UPDATE message SET snooze_until = ?1 WHERE id = 1",
+        [i64::MAX / 2],
+    )
+    .expect("snooze");
+
+    let counts = query::count_matching(&conn, &from_ada).expect("count");
+    let listed = query::messages_matching(&conn, &from_ada, 100, 0).expect("list");
+    assert_eq!((counts.total, counts.unread), (5, 2));
+    assert_eq!(counts.total, listed.len() as i64);
+
+    // And a row matching nothing says nothing rather than failing.
+    let nobody = Predicate::Is(Condition {
+        field: Field::From,
+        op: Op::Contains,
+        value: "nobody@example.test".into(),
+    });
+    let counts = query::count_matching(&conn, &nobody).expect("count");
+    assert_eq!((counts.total, counts.unread), (0, 0));
 }

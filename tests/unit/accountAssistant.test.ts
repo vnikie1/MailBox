@@ -147,7 +147,7 @@ describe('the assistant flow', () => {
   it('shows the server form when the servers were only guessed', () => {
     // A probed result is a guess with a TCP handshake behind it. The user should see it
     // before the app tries to sign in with it.
-    let state = atIdentity(icloud)
+    let state = atIdentity(other)
     state = reduce(state, {
       type: 'discovered',
       discovery: {
@@ -184,6 +184,31 @@ describe('the assistant flow', () => {
     })
 
     expect(state.provider?.id).toBe('google')
+    expect(reduce(state, { type: 'continue' }).step).toBe('testing')
+    // Google's own servers, not Other's defaults or the lookup's.
+    expect(state.imap).toBeNull()
+    expect(state.smtp).toBeNull()
+  })
+
+  it("keeps iCloud's own servers for a custom domain, whatever a lookup finds", () => {
+    // M26 in the 2026-11-14 audit. ada@example.test is on iCloud Custom Email Domain; the
+    // domain's DNS points somewhere else, and the password went there.
+    let state = atIdentity(icloud)
+    state = reduce(state, {
+      type: 'discovered',
+      discovery: {
+        imap: { host: 'mail.example.test', port: 993, security: 'tls' },
+        smtp: { host: 'mail.example.test', port: 587, security: 'startTls' },
+        source: 'srvRecord',
+        explanation: "Found in the domain's DNS records.",
+        needsConfirmation: true,
+        suggestedProvider: null,
+      },
+    })
+
+    expect(state.provider?.id).toBe('icloud')
+    expect(state.imap).toBeNull()
+    expect(state.smtp).toBeNull()
     expect(reduce(state, { type: 'continue' }).step).toBe('testing')
   })
 

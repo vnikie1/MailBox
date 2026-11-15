@@ -44,9 +44,19 @@ function span(cell: Element): number {
   return Number.isInteger(declared) && declared > 0 ? declared : 1
 }
 
-/** The rows belonging to this table — not to a table nested inside one of its cells. */
+/**
+ * The rows belonging to this table — not to a table nested inside one of its cells.
+ *
+ * The same rows as `table.rows` minus the nested ones, by selector. `table.rows` reaches into
+ * nested tables and needed filtering, and jsdom's implementation of it overflows its own stack
+ * on a table of a hundred thousand rows, which kept the test for exactly that case from running.
+ */
 function ownRows(table: HTMLTableElement): HTMLTableRowElement[] {
-  return [...table.rows].filter((row) => row.closest('table') === table)
+  return Array.from(
+    table.querySelectorAll<HTMLTableRowElement>(
+      ':scope > tr, :scope > thead > tr, :scope > tbody > tr, :scope > tfoot > tr',
+    ),
+  )
 }
 
 export function repairShortRows(html: string): string {
@@ -62,7 +72,14 @@ export function repairShortRows(html: string): string {
     if (rows.some((row) => [...row.cells].some((cell) => cell.hasAttribute('rowspan')))) continue
 
     const widths = rows.map((row) => [...row.cells].reduce((total, cell) => total + span(cell), 0))
-    const columns = Math.max(...widths)
+
+    // A loop, not `Math.max(...widths)`. A spread passes one argument per row, V8 refuses a call
+    // with more than about 120,000, and this runs during render: one message with a long enough
+    // table threw "Maximum call stack size exceeded" and blanked the whole window.
+    let columns = 0
+    for (const width of widths) {
+      if (width > columns) columns = width
+    }
 
     rows.forEach((row, index) => {
       const missing = columns - (widths[index] ?? 0)

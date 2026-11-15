@@ -198,27 +198,61 @@ pub async fn discover(session: &mut ImapSession) -> Result<Vec<Discovered>, Sync
                 .map(|attribute| format!("{attribute:?}"))
                 .collect();
 
-            let path = name.name().to_string();
-            let delimiter = name.delimiter().map(str::to_string);
-
-            // `\Noselect` marks a container with no messages of its own — Gmail's `[Gmail]`
-            // is the common case. It has to be listed so its children have a parent, but
-            // SELECTing it is a protocol error.
-            let selectable = !attributes
-                .iter()
-                .any(|attribute| attribute.to_ascii_lowercase().contains("noselect"));
-
-            listed.push(Discovered {
-                role: infer_role(&path, &attributes, delimiter.as_deref()),
-                display_name: display_name(&path, delimiter.as_deref()),
-                remote_path: path,
-                delimiter,
-                selectable,
-            });
+            listed.push(from_listing(name.name(), name.delimiter(), &attributes));
         }
     }
 
     Ok(resolve_duplicate_roles(listed))
+}
+
+/// One line of a `LIST` response, as the parser hands it over.
+fn from_listing(name: &str, delimiter: Option<&str>, attributes: &[String]) -> Discovered {
+    let path = unescape(name);
+    let delimiter = delimiter.map(unescape);
+
+    // `\Noselect` marks a container with no messages of its own — Gmail's `[Gmail]` is the
+    // common case. It has to be listed so its children have a parent, but SELECTing it is a
+    // protocol error.
+    let selectable = !attributes
+        .iter()
+        .any(|attribute| attribute.to_ascii_lowercase().contains("noselect"));
+
+    Discovered {
+        role: infer_role(&path, attributes, delimiter.as_deref()),
+        display_name: display_name(&path, delimiter.as_deref()),
+        remote_path: path,
+        delimiter,
+        selectable,
+    }
+}
+
+/// A quoted string's contents with its escapes taken out: `\"` is `"` and `\\` is `\`.
+///
+/// The IMAP parser returns what was between the quotes as it was sent, escapes and all. A folder
+/// called `"Q4" plans` was stored and shown as `\"Q4\" plans`, and opening it failed: the path
+/// went back to the server escaped a second time, naming a folder that does not exist (L3). A
+/// delimiter of `\`, which servers send as `"\\"`, arrived as two characters for the same reason.
+fn unescape(quoted: &str) -> String {
+    let mut out = String::with_capacity(quoted.len());
+    let mut characters = quoted.chars();
+
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            // Only `\\` and `\"` are escapes in a quoted string. Anything else, which a literal
+            // could hold, is kept as it came.
+            match characters.clone().next() {
+                Some(next @ ('\\' | '"')) => {
+                    out.push(next);
+                    characters.next();
+                }
+                _ => out.push(character),
+            }
+        } else {
+            out.push(character);
+        }
+    }
+
+    out
 }
 
 /// Keeps at most one mailbox per role.
@@ -437,6 +471,30 @@ pub fn prune(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_with_a_quote_or_a_backslash_in_its_name_is_stored_as_it_is_named() {
+        // As the parser hands them over: the contents of the quoted string, escapes included.
+        // Stored like that, the path was escaped again on SELECT and named no folder (L3).
+        let quoted = from_listing(r#"Projects/\"Q4\" plans"#, Some("/"), &[]);
+        assert_eq!(quoted.remote_path, r#"Projects/"Q4" plans"#);
+        assert_eq!(quoted.display_name, r#""Q4" plans"#);
+
+        let backslash = from_listing(r"Work\\Clients\\A\\B", Some(r"\\"), &[]);
+        assert_eq!(backslash.delimiter.as_deref(), Some(r"\"));
+        assert_eq!(backslash.remote_path, r"Work\Clients\A\B");
+        assert_eq!(backslash.display_name, "B");
+
+        let plain = from_listing("INBOX", Some("/"), &[]);
+        assert_eq!(
+            (plain.remote_path.as_str(), plain.display_name.as_str()),
+            ("INBOX", "Inbox")
+        );
+
+        // A backslash that is not an escape is kept.
+        assert_eq!(unescape(r"a\b"), r"a\b");
+        assert_eq!(unescape(r"trailing\"), r"trailing\");
+    }
 
     fn attrs(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()

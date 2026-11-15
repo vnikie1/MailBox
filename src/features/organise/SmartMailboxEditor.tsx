@@ -9,6 +9,7 @@ import { Button, IconButton, Sheet, TextField, useToast } from '@/ui'
 import { PredicateEditor } from './PredicateEditor'
 import { BLANK_CONDITION, fromFlat, toFlat } from './predicateShape'
 import styles from './RulesEditor.module.css'
+import { reasonFor } from '@/lib/ipc'
 
 export interface SmartMailboxEditorProps {
   open: boolean
@@ -93,7 +94,7 @@ export function SmartMailboxEditor({ open, onClose }: SmartMailboxEditorProps) {
       .catch((error: unknown) => {
         toast.show({
           title: 'The smart mailbox could not be saved',
-          description: error instanceof Error ? error.message : String(error),
+          description: reasonFor(error),
         })
       })
   }

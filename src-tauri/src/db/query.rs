@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Row};
 
 use super::model::{
     AccountRow, AttachmentRow, BuiltinFavourite, Cursor, FavouriteRow, ListQuery, MailboxCounts,
-    MailboxRow, MessageFull, MessageRow, Page, SearchQuery,
+    MailboxRow, MatchCounts, MessageFull, MessageRow, Page, SearchQuery,
 };
 use super::DbError;
 
@@ -271,7 +271,17 @@ pub fn messages_page(conn: &Connection, query: &ListQuery) -> Result<Page<Messag
     );
 
     if query.unread_only {
-        sql.push_str(" AND message.flag_seen = 0");
+        if query.keep_ids.is_empty() {
+            sql.push_str(" AND message.flag_seen = 0");
+        } else {
+            let keep = placeholders(query.keep_ids.len(), params.len() + 1);
+            for id in &query.keep_ids {
+                params.push(Box::new(*id));
+            }
+            sql.push_str(&format!(
+                " AND (message.flag_seen = 0 OR message.id IN ({keep}))"
+            ));
+        }
     }
 
     // Snoozed mail is hidden until it comes due. Without this the whole of Remind Me is a
@@ -832,33 +842,21 @@ pub fn messages_matching(
     limit: u32,
     offset: u32,
 ) -> Result<Vec<MessageRow>, DbError> {
-    let compiled = predicate.compile();
+    let (matched, mut params) = matching(predicate);
 
-    // The join is what lets a predicate read `mailbox.display_name`; `compile` assumes it.
     let sql = format!(
         "SELECT {}
            FROM message
            JOIN mailbox ON mailbox.id = message.mailbox_id
            {THREAD_JOIN}
-          WHERE ({})
-            AND (message.snooze_until IS NULL OR message.snooze_until <= ?{})
+          WHERE {matched}
           ORDER BY message.date_received DESC, message.id DESC
           LIMIT ?{} OFFSET ?{}",
         row_columns(),
-        compiled.sql,
-        compiled.params.len() + 1,
-        compiled.params.len() + 2,
-        compiled.params.len() + 3,
+        params.len() + 1,
+        params.len() + 2,
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = compiled
-        .params
-        .into_iter()
-        .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>)
-        .collect();
-
-    // Bound rather than called per row; see `messages_page`.
-    params.push(Box::new(now_seconds()));
     params.push(Box::new(i64::from(limit)));
     params.push(Box::new(i64::from(offset)));
 
@@ -870,4 +868,61 @@ pub fn messages_matching(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(rows)
+}
+
+/// How many messages a smart mailbox holds, and how many of them are unread: its list header.
+///
+/// The header added up the counts of the selection's mailboxes, and a smart row has none, so
+/// Flagged, every flag colour, VIPs and every saved search read "0 messages" over a full list
+/// (found in batch 7 of the 2026-11-14 audit). Counted from the same `WHERE` the list pages
+/// through, so the two cannot disagree about what the row holds.
+pub fn count_matching(
+    conn: &Connection,
+    predicate: &crate::rules::predicate::Predicate,
+) -> Result<MatchCounts, DbError> {
+    let (matched, params) = matching(predicate);
+
+    let sql = format!(
+        "SELECT COUNT(*), COALESCE(SUM(message.flag_seen = 0), 0)
+           FROM message
+           JOIN mailbox ON mailbox.id = message.mailbox_id
+          WHERE {matched}"
+    );
+
+    let borrowed: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+
+    Ok(conn.query_row(&sql, borrowed.as_slice(), |row| {
+        Ok(MatchCounts {
+            total: row.get(0)?,
+            unread: row.get(1)?,
+        })
+    })?)
+}
+
+/// What a smart mailbox matches, as a `WHERE` clause and its parameters: the predicate, with
+/// snoozed mail hidden as every list hides it.
+///
+/// The clause reads `mailbox`, which `compile` assumes is joined (a predicate can name the
+/// mailbox). Further parameters are numbered from `params.len() + 1`.
+fn matching(
+    predicate: &crate::rules::predicate::Predicate,
+) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let compiled = predicate.compile();
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = compiled
+        .params
+        .into_iter()
+        .map(|value| Box::new(value) as Box<dyn rusqlite::ToSql>)
+        .collect();
+
+    // Bound rather than called per row; see `messages_page`.
+    params.push(Box::new(now_seconds()));
+
+    let clause = format!(
+        "({}) AND (message.snooze_until IS NULL OR message.snooze_until <= ?{})",
+        compiled.sql,
+        params.len(),
+    );
+
+    (clause, params)
 }

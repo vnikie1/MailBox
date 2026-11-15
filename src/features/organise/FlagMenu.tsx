@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import type { FlagName } from '@/lib/generated/FlagName'
 import { flagNames, flagSet, onChanged } from '@/lib/organise'
 import { Menu, MenuItem, MenuSeparator, useToast, type MenuProps } from '@/ui'
+import { reasonFor } from '@/lib/ipc'
 
 export interface FlagMenuProps {
   /** What the flag applies to. */
@@ -55,7 +56,7 @@ export function FlagMenu({ ids, current, trigger }: FlagMenuProps) {
       // to be missing half its mail.
       toast.show({
         title: 'The flag could not be set',
-        description: error instanceof Error ? error.message : String(error),
+        description: reasonFor(error),
       })
     })
   }

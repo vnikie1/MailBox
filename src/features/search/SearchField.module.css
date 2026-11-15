@@ -1,12 +1,19 @@
 /* The search field and its dropdown. docs/02 §6.6. */
 
+/* Free to shrink, but never below its resting width. Focused, the field asks for
+ * --search-width-focused and gets as much of it as the toolbar has room for: it asked for all of
+ * it regardless, and at the default window size ran 78px off the right edge of the window
+ * (M43, 2026-11-14 audit). */
 .wrap {
   position: relative;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: var(--search-width);
 }
 
+/* Sized by the control inside it, which asks for its resting or focused width and is capped at
+ * this. A fixed width here held the control to 200px of room it then overflowed when focused. */
 .field {
-  width: var(--search-width);
+  max-width: 100%;
 }
 
 /* Anchored to the field rather than portalled: it is always directly below, never flips, and

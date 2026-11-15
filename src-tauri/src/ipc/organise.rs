@@ -120,6 +120,17 @@ pub async fn smart_messages(
         .await?)
 }
 
+/// How many messages a smart mailbox holds, and how many are unread, for the list header.
+#[tauri::command]
+pub async fn smart_count(
+    db: State<'_, Db>,
+    predicate: Predicate,
+) -> Response<crate::db::model::MatchCounts> {
+    Ok(db
+        .read(move |conn| crate::db::query::count_matching(conn, &predicate))
+        .await?)
+}
+
 /* ------------------------------------------------------------------------------- rules */
 
 #[tauri::command]
@@ -234,18 +245,7 @@ pub async fn flag_set(
         .write(move |tx| {
             let step = undo::capture(tx, label, &affected, &[Field::Flagged])?;
 
-            for group in ops::locate(tx, &affected)? {
-                ops::enqueue(
-                    tx,
-                    group.account_id,
-                    &ops::Op::Flag {
-                        mailbox: group.mailbox,
-                        uids: group.uids,
-                        seen: None,
-                        flagged: Some(color.is_some()),
-                    },
-                )?;
-            }
+            ops::queue_flags(tx, &affected, None, Some(color.is_some()))?;
 
             let mut changed = 0;
             for &id in &affected {
@@ -666,9 +666,18 @@ pub async fn notify_set_prefs(
 /// Read from the OS rather than from a setting of our own, so the answer stays right when the
 /// user removes it from Startup themselves — which they can, and a stored flag would then be a
 /// lie the settings panel repeats back at them.
+///
+/// The Store package asks its `StartupTask` instead of the `Run` key, which MSIX redirects into
+/// a private registry nothing reads at sign-in (M31, 2026-11-14 audit). See `platform::startup`.
 #[tauri::command]
 pub async fn run_at_login(app: tauri::AppHandle) -> Response<bool> {
     use tauri_plugin_autostart::ManagerExt;
+
+    if crate::platform::package::is_packaged() {
+        return Ok(startup_blocking(crate::platform::startup::is_enabled)
+            .await
+            .unwrap_or(false));
+    }
 
     Ok(app.autolaunch().is_enabled().unwrap_or(false))
 }
@@ -676,6 +685,15 @@ pub async fn run_at_login(app: tauri::AppHandle) -> Response<bool> {
 #[tauri::command]
 pub async fn set_run_at_login(app: tauri::AppHandle, enabled: bool) -> Response<()> {
     use tauri_plugin_autostart::ManagerExt;
+
+    if crate::platform::package::is_packaged() {
+        return startup_blocking(move || crate::platform::startup::set(enabled))
+            .await
+            .map_err(|refusal| AppError {
+                code: "autostart".into(),
+                message: refusal.explain(),
+            });
+    }
 
     let result = if enabled {
         app.autolaunch().enable()
@@ -687,6 +705,15 @@ pub async fn set_run_at_login(app: tauri::AppHandle, enabled: bool) -> Response<
         code: "autostart".into(),
         message: format!("Windows would not change the startup setting: {error}"),
     })
+}
+
+/// Runs a StartupTask call off the async workers: each one waits on a WinRT operation.
+async fn startup_blocking<T: Send + 'static>(
+    call: impl FnOnce() -> Result<T, crate::platform::startup::Refusal> + Send + 'static,
+) -> Result<T, crate::platform::startup::Refusal> {
+    tauri::async_runtime::spawn_blocking(call)
+        .await
+        .unwrap_or_else(|error| Err(crate::platform::startup::Refusal::Failed(error.to_string())))
 }
 
 /* --------------------------------------------------------------------------------- undo */

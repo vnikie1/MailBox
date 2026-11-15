@@ -6,6 +6,7 @@
 pub mod attachment_policy;
 pub mod css;
 pub mod detect;
+pub mod mime;
 pub mod outgoing;
 pub mod render;
 pub mod reply;

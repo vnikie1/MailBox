@@ -325,23 +325,10 @@ pub fn run_parsed(
             .then_with(|| a.row.id.cmp(&b.row.id))
     });
 
-    // One row per message, applied after sorting and before the limit.
-    //
-    // After sorting, so the copy kept is the best-ranked one. Before the limit, so removing a
-    // duplicate cannot leave the caller with fewer results than it asked for -- the query
-    // already over-fetches for exactly this kind of pruning.
-    //
-    // Gmail exposes a labelled message once per label, so the store holds several rows with the
-    // same Message-ID: 88 of 1,432 on the account this was found on. Search showed the same
-    // email two and three times, which reads as separate emails rather than as one filed twice.
-    let mut seen = std::collections::HashSet::new();
-    hits.retain(|hit| match identities.get(&hit.row.id) {
-        // No Message-ID means nothing proves this is the same message as any other, and
-        // dropping mail on a guess is the worse mistake of the two.
-        Some(id) if !id.is_empty() => seen.insert(id.clone()),
-        _ => true,
-    });
-
+    // No second pass over the ranked hits for duplicates. There was one, keyed on the Message-ID
+    // alone, and within an account it could find nothing `dedupe_by_identity` had not already
+    // removed; all it did was fold the copy each of two accounts received into one hit, which
+    // the first pass deliberately keeps (L12).
     hits.truncate(limit as usize);
     Ok(hits)
 }
@@ -449,5 +436,46 @@ mod dedupe_tests {
         let kept = dedupe_by_identity(candidates, &identities, &std::collections::HashSet::new());
 
         assert_eq!(ids(&kept), vec![1, 2]);
+    }
+
+    /// Two accounts, each with an Inbox and a Gmail-style label folder, all holding one email.
+    fn store_with_one_email_everywhere() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::db::unicode_lower(&conn).expect("lower");
+        crate::db::migrate::run(&mut conn).expect("migrate");
+
+        conn.execute_batch(
+            "INSERT INTO account (id, display_name, email, provider, auth_kind, cred_ref) VALUES
+                 (1, 'Work', 'me@work.test', 'other', 'password', 'halcyon:1'),
+                 (2, 'Home', 'me@home.test', 'other', 'password', 'halcyon:2');
+             INSERT INTO mailbox (id, account_id, remote_path, display_name, role) VALUES
+                 (1, 1, 'INBOX', 'Inbox', 'inbox'),
+                 (2, 1, 'Receipts', 'Receipts', NULL),
+                 (3, 2, 'INBOX', 'Inbox', 'inbox'),
+                 (4, 2, 'Receipts', 'Receipts', NULL);
+             INSERT INTO message
+                 (id, account_id, mailbox_id, uid, message_id, subject, date_sent, date_received)
+             VALUES
+                 (1, 1, 1, 1, 'figures@sender.test', 'Quarterly figures', 0, 100),
+                 (2, 1, 2, 1, 'figures@sender.test', 'Quarterly figures', 0, 100),
+                 (3, 2, 3, 1, 'figures@sender.test', 'Quarterly figures', 0, 100),
+                 (4, 2, 4, 1, 'figures@sender.test', 'Quarterly figures', 0, 100);",
+        )
+        .expect("seed");
+
+        conn
+    }
+
+    #[test]
+    fn a_search_shows_each_accounts_copy_of_an_email_both_received() {
+        // The label copies go, and each account's Inbox copy stays: two addresses that were both
+        // sent the same email received two emails (L12).
+        let conn = store_with_one_email_everywhere();
+
+        let hits = run(&conn, "quarterly", &[], 50, 1_000).expect("search");
+        let mut found: Vec<i64> = hits.iter().map(|hit| hit.row.id).collect();
+        found.sort_unstable();
+
+        assert_eq!(found, vec![1, 3]);
     }
 }

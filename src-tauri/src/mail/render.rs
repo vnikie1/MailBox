@@ -6,17 +6,20 @@
 //! `<meta http-equiv="refresh">` that navigates the app somewhere else, a remote image whose
 //! only purpose is to tell the sender you opened it and from which IP.
 //!
-//! The order matters and is not arbitrary:
+//! **Sanitising and rewriting images are one step**, done by `ammonia`, which parses with
+//! html5ever rather than matching patterns — so it cannot be defeated by the malformed markup
+//! that defeats every regex-based stripper. The image rewrite runs as ammonia's attribute
+//! filter: it sees each `<img src>` only after the parse has settled what the attributes really
+//! are and after the allow-list has removed the ones that may not exist, and what it returns is
+//! serialised by html5ever, which escapes it.
 //!
-//! 1. **Sanitise first**, with `ammonia`, which parses with html5ever rather than matching
-//!    patterns — so it cannot be defeated by the malformed markup that defeats every
-//!    regex-based stripper. Nothing downstream may assume it is looking at valid HTML.
-//! 2. **Then rewrite images**, because the rewriting works on attributes that only exist
-//!    once the parse has settled what the attributes actually are.
-//!
-//! Doing it the other way round would let `<img src=x onerror=...>` past the rewriter and
-//! rely on the sanitiser to catch the handler — which it would, but building a pipeline whose
-//! safety depends on the *last* step rather than the first is how a later change breaks it.
+//! It used to be a second step, a string scan over the sanitised output that spliced new values
+//! in. That made the sanitiser's guarantee depend on a hand-written scanner agreeing with
+//! html5ever about where attributes begin and end, and on every value spliced in being free of
+//! quotes. Neither held: an `alt` ending in `src=` threw the scanner's quotes out of step (M21),
+//! and a data URI built from a sender's `Content-Type` carried a quote straight into the markup
+//! (H12). The passes that still run over the output — data detectors and quote folding — only
+//! read tags and wrap text; none of them writes into an attribute.
 
 use std::collections::{HashMap, HashSet};
 
@@ -99,12 +102,270 @@ fn allowed_schemes() -> HashSet<&'static str> {
         .collect()
 }
 
-/// Enforces "`data:` URLs are for image sources and nothing else". docs/03 §6.2.
+/// Whether `mime` is an image type that is safe to write into a `data:` URI: `image/` and a
+/// subtype of letters, digits, `.`, `+` and `-`, lower case.
 ///
-/// A `data:text/html` in an `href` is a whole document under the sender's control, one click
-/// away. A `data:image/png` in an `<img src>` is a picture. The scheme allow-list cannot tell
-/// them apart, so this does.
-fn filter_data_urls(
+/// The type comes from a sender's `Content-Type` header or a remote server's, and both can say
+/// anything. `image/png" onerror="…` starts with `image/` too.
+pub fn is_image_mime(mime: &str) -> bool {
+    mime.strip_prefix("image/").is_some_and(|subtype| {
+        !subtype.is_empty()
+            && subtype.len() <= 64
+            && subtype
+                .bytes()
+                .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'+' | b'-'))
+    })
+}
+
+/// An image's bytes as a `data:` URI, or nothing if `mime` is not an image type.
+///
+/// The one place a data URI is built from a type someone else supplied. Every caller used to
+/// `format!` its own, after sanitising, with the type pasted in unchecked — so a quote in a
+/// sender's `Content-Type` ended the `src` attribute and the rest of the header was markup.
+pub fn image_data_uri(mime: &str, bytes: &[u8]) -> Option<String> {
+    use base64::Engine;
+
+    let mime = mime.trim().to_ascii_lowercase();
+    if !is_image_mime(&mime) {
+        return None;
+    }
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+/// Whether a value is a well-formed base64 image data URI of the kind [`image_data_uri`] makes.
+///
+/// Checked again where the URIs are used, so the renderer does not depend on every caller having
+/// built its map through the one function that checks.
+fn is_image_data_uri(value: &str) -> bool {
+    let Some((mime, data)) = value
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+    else {
+        return false;
+    };
+
+    is_image_mime(mime)
+        && data
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+}
+
+/// What a sanitising pass does with each `<img src>`.
+enum Mode {
+    /// Leaves sources as the sender wrote them.
+    Keep,
+    /// Leaves them, and notes every remote one.
+    Collect,
+    /// Replaces each with what the reader may show.
+    Rewrite {
+        inline: HashMap<String, String>,
+        remote: HashMap<String, String>,
+        load_remote: bool,
+        /// See [`Marker`].
+        marker: Marker,
+    },
+}
+
+/// What a pass found, written by the attribute filter and read once the pass is over.
+#[derive(Default)]
+struct Found {
+    /// Remote image URLs, in document order, once each.
+    remote_urls: Vec<String>,
+    /// The data URIs the markers stand for, by number.
+    held_back: Vec<String>,
+    blocked: u32,
+    loaded: u32,
+    failed: u32,
+    inlined: u32,
+}
+
+/// What an image the core resolved is called during the sanitising pass, put back afterwards.
+///
+/// The image is a `data:` URI of hundreds of kilobytes. Handed to ammonia as the attribute's
+/// value, html5ever's serialiser walks it one character at a time looking for something to
+/// escape, and there is nothing to find: [`is_image_data_uri`] allows only a lower-case image type
+/// and base64, none of which html5ever escapes. That walk made a 52 KB newsletter with eight
+/// images take 140 ms to render where it took 4 ms before the rewrite moved inside the sanitiser
+/// (M21), and pushed the render-budget test over its limit.
+///
+/// So the sanitiser is given a short marker, and the URI goes in afterwards. The bytes are the ones
+/// the serialiser would have written. The marker is random for every render, so no message can
+/// contain one, which is what keeps this from being the post-sanitise splice that M21 removed:
+/// that one searched for `src="`, which a sender can write.
+#[derive(Clone)]
+struct Marker(String);
+
+impl Marker {
+    fn new() -> Self {
+        use rand::RngCore;
+
+        let mut bytes = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self(format!("halcyon-image-{hex}-"))
+    }
+
+    /// The marker for the `index`th URI held back.
+    fn for_index(&self, index: usize) -> String {
+        format!("{}{index}", self.0)
+    }
+
+    /// `html` with every marker replaced by the URI it stands for.
+    fn put_back(&self, html: String, held_back: &[String]) -> String {
+        if held_back.is_empty() {
+            return html;
+        }
+
+        let mut out =
+            String::with_capacity(html.len() + held_back.iter().map(String::len).sum::<usize>());
+        let mut rest = html.as_str();
+
+        while let Some(at) = rest.find(&self.0) {
+            out.push_str(&rest[..at]);
+
+            let after = &rest[at + self.0.len()..];
+            let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+            let uri = after[..digits]
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| held_back.get(index));
+
+            match uri {
+                Some(uri) => out.push_str(uri),
+                // Only this pass wrote markers, so only a number it gave out can follow one.
+                None => out.push_str(BLOCKED),
+            }
+
+            rest = &after[digits..];
+        }
+
+        out.push_str(rest);
+        out
+    }
+}
+
+/// The image handling for one pass. Shared with ammonia's attribute filter, which must be
+/// `'static`, hence owned maps and a lock rather than borrowed ones.
+struct Images {
+    mode: Mode,
+    found: std::sync::Mutex<Found>,
+}
+
+impl Images {
+    fn new(mode: Mode) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            mode,
+            found: std::sync::Mutex::new(Found::default()),
+        })
+    }
+
+    fn found(&self) -> std::sync::MutexGuard<'_, Found> {
+        self.found
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The value an `<img src>` leaves the sanitiser with.
+    fn source(&self, value: &str) -> String {
+        let url = value.trim();
+
+        match &self.mode {
+            Mode::Keep => value.to_string(),
+
+            Mode::Collect => {
+                if is_remote(url) {
+                    let mut found = self.found();
+                    if !found.remote_urls.iter().any(|known| known == url) {
+                        found.remote_urls.push(url.to_string());
+                    }
+                }
+                value.to_string()
+            }
+
+            Mode::Rewrite {
+                inline,
+                remote,
+                load_remote,
+                marker,
+            } => {
+                let mut found = self.found();
+                let hold_back = |found: &mut Found, data_uri: &String| {
+                    found.held_back.push(data_uri.clone());
+                    marker.for_index(found.held_back.len() - 1)
+                };
+
+                if let Some(reference) = strip_scheme(url, "cid:") {
+                    // docs/03 §6.4 — `cid:` resolves from the local cache **only**. A reference
+                    // we do not hold becomes a blocked placeholder rather than a request.
+                    return match inline.get(reference.trim()) {
+                        Some(data_uri) if is_image_data_uri(data_uri) => {
+                            found.inlined += 1;
+                            hold_back(&mut found, data_uri)
+                        }
+                        _ => BLOCKED.to_string(),
+                    };
+                }
+
+                if is_remote(url) {
+                    return match (load_remote, remote.get(url)) {
+                        // Fetched by the core, so the frame makes no request. docs/03 §6.3.
+                        (true, Some(data_uri)) if is_image_data_uri(data_uri) => {
+                            found.loaded += 1;
+                            hold_back(&mut found, data_uri)
+                        }
+                        // Asked for and not fetched. Still replaced rather than left as a live
+                        // URL, or "load remote content" would become "let the frame fetch it",
+                        // which is the thing being prevented. Counted apart from the withheld
+                        // ones: nothing is being kept from the user here.
+                        (true, _) => {
+                            found.failed += 1;
+                            BLOCKED.to_string()
+                        }
+                        (false, _) => {
+                            found.blocked += 1;
+                            BLOCKED.to_string()
+                        }
+                    };
+                }
+
+                // Already inline and already an image. docs/03 §6.2 permits exactly this.
+                if strip_scheme(url, "data:image/").is_some() {
+                    return value.to_string();
+                }
+
+                BLOCKED.to_string()
+            }
+        }
+    }
+}
+
+/// `url` without `scheme`, compared without regard to case, as URL schemes are.
+fn strip_scheme<'u>(url: &'u str, scheme: &str) -> Option<&'u str> {
+    let head = url.get(..scheme.len())?;
+    head.eq_ignore_ascii_case(scheme)
+        .then(|| &url[scheme.len()..])
+}
+
+fn is_remote(url: &str) -> bool {
+    strip_scheme(url, "http://").is_some() || strip_scheme(url, "https://").is_some()
+}
+
+/// Ammonia's attribute filter: the last word on every attribute that survived the allow-list.
+///
+/// * **`style`** goes through the CSS filter.
+/// * **`<img src>`** is whatever `images` says. Done *here*, inside the sanitiser, and not on its
+///   output, because what this returns is a value that html5ever then serialises — escaping any
+///   quote in it — rather than text spliced into markup. It used to be the second: a string scan
+///   for `src="` over the sanitised HTML, which a sender could defeat by ending an `alt` with
+///   `src=` (M21), and into which a data URI built from a sender's `Content-Type` was pasted raw
+///   (H12). Both put markup of the sender's choosing past the sanitiser.
+/// * **`data:`** is for image sources and nothing else. docs/03 §6.2. A `data:text/html` in an
+///   `href` is a whole document under the sender's control, one click away; the scheme
+///   allow-list cannot tell it from a picture, so this does.
+fn filter_attribute(
+    images: &Images,
     element: &str,
     attribute: &str,
     value: &str,
@@ -113,24 +374,34 @@ fn filter_data_urls(
         return Some(super::css::filter_declarations(value).into());
     }
 
-    let lowered = value.trim_start().to_ascii_lowercase();
+    // Without lowercasing the value: an inline image's is megabytes long.
+    let trimmed = value.trim_start();
+    let is_data = strip_scheme(trimmed, "data:").is_some();
 
-    if !lowered.starts_with("data:") {
-        return Some(value.to_string().into());
+    if element == "img" && attribute == "src" {
+        if is_data && strip_scheme(trimmed, "data:image/").is_none() {
+            return None;
+        }
+        return Some(images.source(value).into());
     }
 
-    if element == "img" && attribute == "src" && lowered.starts_with("data:image/") {
-        return Some(value.to_string().into());
+    if is_data {
+        return None;
     }
 
-    None
+    Some(value.to_string().into())
+}
+
+/// Sanitises message HTML, leaving image sources as they are.
+fn sanitise(html: &str) -> String {
+    sanitise_with(html, Images::new(Mode::Keep))
 }
 
 /// Sanitises message HTML.
 ///
 /// `ammonia` is allow-list based: anything not named is removed. That is the right default
 /// for hostile input — a deny-list is a list of the attacks someone has thought of.
-fn sanitise(html: &str) -> String {
+fn sanitise_with(html: &str, images: std::sync::Arc<Images>) -> String {
     let mut builder = Builder::default();
 
     builder
@@ -172,7 +443,9 @@ fn sanitise(html: &str) -> String {
         .add_tag_attributes("table", ["cellpadding", "cellspacing", "border", "width"])
         .add_tag_attributes("td", ["colspan", "rowspan", "width", "height"])
         .add_tag_attributes("th", ["colspan", "rowspan", "width", "height"])
-        .attribute_filter(|element, attribute, value| filter_data_urls(element, attribute, value));
+        .attribute_filter(move |element, attribute, value| {
+            filter_attribute(&images, element, attribute, value)
+        });
 
     builder.clean(html).to_string()
 }
@@ -234,188 +507,29 @@ fn stylesheets(html: &str) -> String {
     super::css::filter_stylesheet(&css)
 }
 
-/// Rewrites `<img src>` after sanitisation.
-///
-/// A hand-written pass over the sanitised markup rather than another parse. It is safe here
-/// precisely *because* the input has already been through html5ever: the attribute syntax is
-/// normalised, so a naive scan cannot be tricked by the kind of malformed markup that would
-/// defeat it on raw input. On raw input this function would be a vulnerability.
-fn rewrite_images(
-    html: &str,
-    inline: &HashMap<String, String>,
-    load_remote: bool,
-    remote: &HashMap<String, String>,
-) -> (String, u32, u32, u32, u32) {
-    let mut out = String::with_capacity(html.len());
-    let mut blocked = 0u32;
-    let mut loaded = 0u32;
-    let mut failed = 0u32;
-    let mut inlined = 0u32;
-    let mut rest = html;
-
-    while let Some(position) = next_src_attribute(rest) {
-        let (before, after) = rest.split_at(position + 5);
-        out.push_str(before);
-
-        let Some(end) = after.find('"') else {
-            // No closing quote: not something html5ever would emit, so stop rewriting and
-            // pass the remainder through rather than guessing.
-            out.push_str(after);
-            return (out, blocked, loaded, failed, inlined);
-        };
-
-        let url = &after[..end];
-
-        if let Some(reference) = url.strip_prefix("cid:") {
-            // docs/03 §6.4 — `cid:` resolves from the local cache **only**. A reference we do
-            // not hold becomes a blocked placeholder rather than a request to anywhere.
-            match inline.get(reference.trim()) {
-                Some(data_uri) => {
-                    out.push_str(data_uri);
-                    inlined += 1;
-                }
-                None => {
-                    out.push_str(BLOCKED);
-                }
-            }
-        } else if url.starts_with("http://") || url.starts_with("https://") {
-            // Decoded the same way the enumeration decodes it, so the key looked up here is the
-            // key `fetch_remote` stored. Decode on one side only and every remote image with an
-            // `&` in its query silently misses the map and renders blocked.
-            let fetched = url_from_attribute(url);
-
-            match (load_remote, remote.get(&fetched)) {
-                // Loaded through the core, which is what keeps the sender from seeing the
-                // user's IP. docs/03 §6.3.
-                (true, Some(data_uri)) => {
-                    out.push_str(data_uri);
-                    loaded += 1;
-                }
-                (true, None) => {
-                    // Asked for but could not be fetched. Still replaced rather than left as a
-                    // live URL — otherwise "load remote content" would quietly become "let the
-                    // frame make the request itself", which is the thing being prevented.
-                    //
-                    // Counted apart from the withheld ones: nothing is being kept from the
-                    // user here, the image simply is not there.
-                    out.push_str(BLOCKED);
-                    failed += 1;
-                }
-                (false, _) => {
-                    out.push_str(BLOCKED);
-                    blocked += 1;
-                }
-            }
-        } else if url.starts_with("data:image/") {
-            // Already inline and already an image. docs/03 §6.2 permits exactly this.
-            out.push_str(url);
-        } else {
-            out.push_str(BLOCKED);
-        }
-
-        rest = &after[end..];
-    }
-
-    out.push_str(rest);
-    (out, blocked, loaded, failed, inlined)
-}
-
 /// Sanitised HTML with `src` attributes untouched.
 ///
-/// Used only to enumerate which remote images a message wants, so that the fetch list is
-/// built from markup the sanitiser has already approved. Building it from the raw HTML would
-/// mean fetching URLs the sanitiser had decided to drop — the app going to a server on behalf
-/// of markup it refused to render.
+/// For callers that want the sanitiser's verdict on markup for some purpose other than showing
+/// it, such as quoting it in a reply.
 pub fn sanitise_for_enumeration(html: &str) -> String {
     sanitise(html)
 }
 
-/// Collects every remote image URL a sanitised body wants.
+/// Every remote image URL a body wants, in document order, once each.
 ///
-/// Used to fetch them through the core when the user asks for them, so that the frame never
-/// makes a request of its own.
-/// The offset of the next `src="` that is really an attribute, skipping any in text.
+/// Taken from the sanitiser's own pass rather than from the raw HTML, so the fetch list holds
+/// only images the sanitiser kept — the app must not go to a server on behalf of markup it
+/// refused to render — and rather than from a scan of the sanitised output, so an image written
+/// as *text* (`<pre>&lt;img src="https://tracker/beacon"&gt;</pre>`, which every client draws as
+/// characters) is never mistaken for one. Halcyon used to fetch those.
 ///
-/// ## Why this cannot just be `find("src=\"")`
-///
-/// It was, in both `remote_urls` and `rewrite_images`, and a message whose visible text
-/// *contains* markup was treated as though it contained an image. A quoted HTML example or a
-/// code snippet arrives as escaped text — `<pre>&lt;img src="https://tracker/beacon"&gt;</pre>` —
-///
-/// which every client on earth draws as the characters `<img src="...">` and none treats as an
-/// image. Halcyon collected that URL as a remote image and, with images allowed, **fetched it** —
-/// a tracking beacon that fires from text the reader can see is only text, and that no amount of
-/// looking at the message would explain.
-///
-/// It also rewrote the visible characters, so somebody reading a snippet saw
-/// `<img src="data:image/png;base64,...">` where the sender had written a URL, or
-/// `<img src="blocked:remote">` with images off. The message was altered, not just its images.
-///
-/// A tag boundary scan is enough here and a parser is not needed: this runs on output from
-/// ammonia, where every `<` and `>` in text has already been escaped, so a raw one is a tag.
-fn next_src_attribute(haystack: &str) -> Option<usize> {
-    let mut cursor = 0;
+/// The URLs are attribute values as html5ever decoded them, so `&amp;` in the markup is already
+/// `&` here, and they are the same strings the rewrite looks up — the two are one code path.
+pub fn remote_image_urls(html: &str) -> Vec<String> {
+    let images = Images::new(Mode::Collect);
+    sanitise_with(html, std::sync::Arc::clone(&images));
 
-    while let Some(open) = haystack[cursor..].find('<') {
-        let tag_start = cursor + open;
-        let Some(close) = haystack[tag_start..].find('>') else {
-            return None; // an unterminated tag: nothing after it is safe to rewrite
-        };
-        let tag_end = tag_start + close;
-
-        if let Some(at) = haystack[tag_start..tag_end].find("src=\"") {
-            return Some(tag_start + at);
-        }
-
-        cursor = tag_end + 1;
-    }
-
-    None
-}
-
-/// An attribute value as a URL, with the escaping HTML required removed again.
-///
-/// ## Why a URL out of markup is not the URL
-///
-/// `&` separates query parameters and is also the start of an HTML entity, so a serialiser has
-/// to write it as `&amp;`. Ammonia does, correctly. Taking the attribute's characters and
-/// treating them as a URL therefore yields a *different* URL from the one the sender wrote: a
-/// sender's `?w=600&h=400&s=abc` parses as `w=600`, `amp;h=400`, `amp;s=abc`.
-///
-/// Every parameter after the first is renamed. A CDN answers with the wrong size, a signed URL
-/// fails its signature, and the image the message meant to show does not appear — for any URL
-/// carrying more than one parameter, which is most of them.
-///
-/// Both the enumeration and the rewrite use this, so the fetch list and the lookup keys stay the
-/// same strings. They were consistent before, which is why the map still matched: the requests
-/// simply went somewhere else.
-fn url_from_attribute(value: &str) -> String {
-    // `&amp;` is the entity that matters and the only one a serialiser must introduce here — the
-    // others (`&lt;`, `&gt;`, `&quot;`) cannot appear unescaped inside a quoted attribute in the
-    // first place. `&amp;amp;` decodes once, to `&amp;`, which is the sender's own text.
-    value.replace("&amp;", "&")
-}
-
-pub fn remote_urls(html: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    let mut rest = html;
-
-    while let Some(position) = next_src_attribute(rest) {
-        let after = &rest[position + 5..];
-
-        let Some(end) = after.find('"') else { break };
-        let url = &after[..end];
-
-        if url.starts_with("http://") || url.starts_with("https://") {
-            let url = url_from_attribute(url);
-            if !urls.contains(&url) {
-                urls.push(url);
-            }
-        }
-
-        rest = &after[end..];
-    }
-
+    let urls = std::mem::take(&mut images.found().remote_urls);
     urls
 }
 
@@ -659,12 +773,15 @@ fn split_plain_quote(text: &str) -> Option<(&str, String)> {
 }
 
 /// Prepares a message for the reader.
+///
+/// `inline` maps `cid:` references and `remote` maps fetched URLs to `data:` URIs. Any value that
+/// is not a well-formed base64 image URI is treated as missing.
 pub fn render(
     html: Option<&str>,
     plain: Option<&str>,
-    inline: &HashMap<String, String>,
+    inline: HashMap<String, String>,
     load_remote: bool,
-    remote: &HashMap<String, String>,
+    remote: HashMap<String, String>,
 ) -> Rendered {
     let Some(html) = html.filter(|value| !value.trim().is_empty()) else {
         // Nothing stored at all. Distinct from "a message whose text happens to be empty":
@@ -687,9 +804,28 @@ pub fn render(
         };
     };
 
-    let clean = sanitise(html);
-    let (rewritten, blocked_remote, loaded_remote, failed_remote, inlined) =
-        rewrite_images(&clean, inline, load_remote, remote);
+    // One pass: sanitising and rewriting the images are the same parse. See `filter_attribute`.
+    let marker = Marker::new();
+    let images = Images::new(Mode::Rewrite {
+        inline,
+        remote,
+        load_remote,
+        marker: marker.clone(),
+    });
+    let sanitised = sanitise_with(html, std::sync::Arc::clone(&images));
+
+    let (blocked_remote, loaded_remote, failed_remote, inlined, held_back) = {
+        let mut found = images.found();
+        (
+            found.blocked,
+            found.loaded,
+            found.failed,
+            found.inlined,
+            std::mem::take(&mut found.held_back),
+        )
+    };
+
+    let rewritten = marker.put_back(sanitised, &held_back);
 
     // Detected *before* folding, so a tracking number in the quoted part is still a link when
     // the quote is opened. Folding only wraps; it does not change any text.
@@ -716,7 +852,7 @@ mod tests {
     use super::*;
 
     fn render_html(html: &str) -> Rendered {
-        render(Some(html), None, &HashMap::new(), false, &HashMap::new())
+        render(Some(html), None, HashMap::new(), false, HashMap::new())
     }
 
     /* ------------------------------------------------------------------ the hard rules */
@@ -837,9 +973,9 @@ mod tests {
         let rendered = render(
             Some(r#"<img src="https://cdn.test/logo.png">"#),
             None,
-            &HashMap::new(),
+            HashMap::new(),
             true,
-            &remote,
+            remote,
         );
 
         assert!(rendered.html.contains("data:image/png;base64,AAAA"));
@@ -851,15 +987,73 @@ mod tests {
     }
 
     #[test]
+    fn an_image_put_back_after_sanitising_reads_as_the_serialiser_would_have_written_it() {
+        // The same pictures twice: once fetched by the core, so they go in after the sanitiser,
+        // and once written into the message as data, so html5ever serialises them itself.
+        let png = "data:image/png;base64,iVBORw0KGgo+/AAA=";
+        let gif = "data:image/gif;base64,R0lGODlh";
+
+        let mut remote = HashMap::new();
+        remote.insert("https://cdn.test/a.png".to_string(), png.to_string());
+        remote.insert("https://cdn.test/b.gif".to_string(), gif.to_string());
+        let mut inline = HashMap::new();
+        inline.insert("logo@test".to_string(), png.to_string());
+
+        let template = r#"<p>Hi</p><img alt="a" src="A"><table><tr><td><img src="B" width="10"></td></tr></table><img src="C"><img src="A">"#;
+        let fetched = template
+            .replace("\"A\"", "\"https://cdn.test/a.png\"")
+            .replace("\"B\"", "\"https://cdn.test/b.gif\"")
+            .replace("\"C\"", "\"cid:logo@test\"");
+        let written = template
+            .replace("\"A\"", &format!("\"{png}\""))
+            .replace("\"B\"", &format!("\"{gif}\""))
+            .replace("\"C\"", &format!("\"{png}\""));
+
+        let put_back = render(Some(&fetched), None, inline, true, remote);
+        let serialised = render(Some(&written), None, HashMap::new(), true, HashMap::new());
+
+        assert_eq!(put_back.html, serialised.html);
+        assert_eq!((put_back.loaded_remote, put_back.inlined), (3, 1));
+        assert!(!put_back.html.contains("halcyon-image-"));
+    }
+
+    #[test]
+    fn a_message_cannot_write_the_marker_an_image_is_held_back_under() {
+        // The marker is random for every render. One a sender guessed at is text like any other.
+        let guess = "halcyon-image-00000000000000000000000000000000-0";
+        let mut remote = HashMap::new();
+        remote.insert(
+            "https://cdn.test/a.png".to_string(),
+            "data:image/png;base64,AAAA".to_string(),
+        );
+
+        let rendered = render(
+            Some(&format!(
+                r#"<p>{guess}</p><img alt="{guess}" src="https://cdn.test/a.png">"#
+            )),
+            None,
+            HashMap::new(),
+            true,
+            remote,
+        );
+
+        assert_eq!(rendered.html.matches(guess).count(), 2, "{}", rendered.html);
+        assert_eq!(
+            rendered.html.matches("data:image/png;base64,AAAA").count(),
+            1
+        );
+    }
+
+    #[test]
     fn a_remote_image_that_could_not_be_fetched_stays_blocked() {
         // "Load remote content" must not degrade into "let the frame fetch it itself", which
         // is precisely the thing being prevented.
         let rendered = render(
             Some(r#"<img src="https://cdn.test/gone.png">"#),
             None,
-            &HashMap::new(),
+            HashMap::new(),
             true,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(rendered.html.contains(BLOCKED));
@@ -880,7 +1074,7 @@ mod tests {
 
     #[test]
     fn the_remote_urls_of_a_body_can_be_listed_for_fetching() {
-        let urls = remote_urls(
+        let urls = remote_image_urls(
             r#"<img src="https://a.test/1.png"><img src="https://b.test/2.png"><img src="cid:x">"#,
         );
 
@@ -894,7 +1088,7 @@ mod tests {
         // every parameter after the first is renamed to `amp;<name>`. A CDN returns the wrong
         // size, a signed URL fails its signature, and the image does not appear.
         let raw = r#"<img src="https://cdn.example/i.png?w=600&h=400&s=abc">"#;
-        let urls = remote_urls(&sanitise(raw));
+        let urls = remote_image_urls(raw);
 
         assert_eq!(
             urls,
@@ -909,12 +1103,12 @@ mod tests {
         // what the enumeration returned, and the rewrite must look up the same string. Decode on
         // one side only and every remote image with an `&` in its query renders blocked.
         let raw = r#"<img src="https://cdn.example/i.png?w=600&h=400">"#;
-        let urls = remote_urls(&sanitise(raw));
+        let urls = remote_image_urls(raw);
 
         let mut remote = HashMap::new();
         remote.insert(urls[0].clone(), "data:image/png;base64,AAAA".to_string());
 
-        let rendered = render(Some(raw), None, &HashMap::new(), true, &remote);
+        let rendered = render(Some(raw), None, HashMap::new(), true, remote);
 
         assert_eq!(
             rendered.loaded_remote, 1,
@@ -933,11 +1127,11 @@ mod tests {
         let raw = r#"<pre>&lt;img src="https://tracker.example/beacon?id=42"&gt;</pre>"#;
 
         assert!(
-            remote_urls(&sanitise(raw)).is_empty(),
+            remote_image_urls(raw).is_empty(),
             "a URL in escaped text was collected as a remote image"
         );
 
-        let rendered = render(Some(raw), None, &HashMap::new(), true, &HashMap::new());
+        let rendered = render(Some(raw), None, HashMap::new(), true, HashMap::new());
         assert_eq!(rendered.loaded_remote, 0, "escaped text caused a fetch");
         assert_eq!(
             rendered.blocked_remote, 0,
@@ -959,12 +1153,12 @@ mod tests {
         let raw = r#"<p>hello</p><img src="https://a.test/pixel.png">"#;
 
         assert_eq!(
-            remote_urls(&sanitise(raw)),
+            remote_image_urls(raw),
             vec!["https://a.test/pixel.png"],
             "a genuine image attribute was missed"
         );
 
-        let blocked = render(Some(raw), None, &HashMap::new(), false, &HashMap::new());
+        let blocked = render(Some(raw), None, HashMap::new(), false, HashMap::new());
         assert_eq!(
             blocked.blocked_remote, 1,
             "a genuine remote image was not blocked"
@@ -972,12 +1166,99 @@ mod tests {
         assert!(!blocked.html.contains("https://a.test/pixel.png"));
     }
 
+    /// Every `(element, attribute, value)` a browser would see in this markup.
+    ///
+    /// Parsed by html5ever, which follows the HTML spec's tokenizer as browsers do, so what comes
+    /// back is how the frame will read the rendered output rather than how a string scan reads it.
+    fn as_a_browser_reads_it(html: &str) -> Vec<(String, String, String)> {
+        use std::sync::{Arc, Mutex};
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+
+        Builder::default()
+            .add_tags(["link", "style"])
+            .rm_clean_content_tags(["style"])
+            .add_generic_attributes(["style", "src", "href", "rel", "alt", "title", "class"])
+            .link_rel(None)
+            .url_schemes(
+                ["http", "https", "data", "blocked", "cid"]
+                    .into_iter()
+                    .collect(),
+            )
+            .attribute_filter(move |element, attribute, value| {
+                record.lock().expect("lock").push((
+                    element.to_string(),
+                    attribute.to_string(),
+                    value.to_string(),
+                ));
+                Some(value.to_string().into())
+            })
+            .clean(html);
+
+        let seen = seen.lock().expect("lock").clone();
+        seen
+    }
+
+    /// Asserts that a hostile host appears only as inert text: an `alt` or `title`.
+    fn only_as_text(html: &str, host: &str) {
+        for (element, attribute, value) in as_a_browser_reads_it(html) {
+            assert_ne!(element, "link", "a <link> was injected: {html}");
+            if value.contains(host) {
+                assert!(
+                    attribute == "alt" || attribute == "title",
+                    "{host} reached <{element} {attribute}=\"{value}\">: {html}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_attribute_cannot_be_smuggled_past_the_image_rewrite() {
+        // M21. The rewrite used to scan the sanitised output for `src="`, which also matches
+        // the end of an attribute *value* written `alt="… src="`. It then replaced the text up
+        // to the next quote — the *opening* quote of the following attribute — and every quote
+        // after it was off by one. What ammonia had approved as a title became, to the browser,
+        // a bare `style` attribute the CSS filter never saw.
+        let raw = r#"<img alt="src=" title=" style=background:url(https://evil.test/p) x">"#;
+
+        for load_remote in [false, true] {
+            let rendered = render(Some(raw), None, HashMap::new(), load_remote, HashMap::new());
+            only_as_text(&rendered.html, "evil.test");
+        }
+    }
+
+    #[test]
+    fn an_image_source_cannot_break_out_of_its_attribute() {
+        // H12. An inline image's MIME type comes from the sender's Content-Type header and was
+        // pasted into the data URI, and the data URI into the markup, after sanitising. A quote
+        // in the type ended the attribute and the rest was markup of the sender's choosing.
+        let hostile = r#"data:image/png" style="background:url(https://evil.test/p)"><link rel="preconnect" href="https://evil.test/x;base64,AAAA"#;
+
+        let mut inline = HashMap::new();
+        inline.insert("logo".to_string(), hostile.to_string());
+
+        let mut remote = HashMap::new();
+        remote.insert("https://cdn.test/a.png".to_string(), hostile.to_string());
+
+        let rendered = render(
+            Some(r#"<img src="cid:logo"><img src="https://cdn.test/a.png">"#),
+            None,
+            inline,
+            true,
+            remote,
+        );
+
+        only_as_text(&rendered.html, "evil.test");
+    }
+
     #[test]
     fn a_repeated_remote_url_is_listed_once() {
         // A newsletter uses the same spacer gif forty times. Fetching it forty times is
         // forty requests announcing the same thing.
-        let urls =
-            remote_urls(r#"<img src="https://a.test/x.gif"><img src="https://a.test/x.gif">"#);
+        let urls = remote_image_urls(
+            r#"<img src="https://a.test/x.gif"><img src="https://a.test/x.gif">"#,
+        );
 
         assert_eq!(urls.len(), 1);
     }
@@ -997,9 +1278,9 @@ mod tests {
         let rendered = render(
             Some(r#"<img src="cid:logo@example">"#),
             None,
-            &inline,
+            inline,
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(rendered.html.contains("data:image/png;base64,BBBB"));
@@ -1165,9 +1446,9 @@ mod tests {
         let rendered = render(
             None,
             Some("plain words"),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert_eq!(rendered.css, "");
@@ -1190,9 +1471,9 @@ mod tests {
         let rendered = render(
             None,
             Some("Just some text.\n\nSecond para."),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(rendered.from_plain_text);
@@ -1207,9 +1488,9 @@ mod tests {
         let rendered = render(
             None,
             Some("<script>alert(1)</script> and <b>not bold</b>"),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(!rendered.html.contains("<script"), "{}", rendered.html);
@@ -1228,9 +1509,9 @@ mod tests {
         let rendered = render(
             Some("   "),
             Some("the real content"),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(rendered.from_plain_text);
@@ -1371,9 +1652,9 @@ mod tests {
         let rendered = render(
             None,
             Some("Yes, that works.\n\nOn Tuesday, Ada wrote:\n> Does this work?\n"),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(rendered.from_plain_text);
@@ -1394,9 +1675,9 @@ mod tests {
         let rendered = render(
             None,
             Some("> Does this work?\nYes.\n> And this?\nAlso yes.\n"),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(!rendered.html.contains("<details"), "{}", rendered.html);
@@ -1410,9 +1691,9 @@ mod tests {
         let rendered = render(
             None,
             Some("Reply.\n\nOn Tuesday, Ada wrote:\n> <script>alert(1)</script>\n"),
-            &HashMap::new(),
+            HashMap::new(),
             false,
-            &HashMap::new(),
+            HashMap::new(),
         );
 
         assert!(!rendered.html.contains("<script"), "{}", rendered.html);
@@ -1431,7 +1712,7 @@ mod tests {
         // anything non-empty here — even an empty `<pre>` wrapper — puts a blank white card
         // on screen instead of a line of text saying what is happening.
         for (html, plain) in [(None, None), (Some(""), None), (Some("   "), Some("\n \t"))] {
-            let rendered = render(html, plain, &HashMap::new(), false, &HashMap::new());
+            let rendered = render(html, plain, HashMap::new(), false, HashMap::new());
 
             assert!(
                 rendered.html.is_empty(),

@@ -137,6 +137,12 @@ describe('sidebar', () => {
     // The renamed one keeps its colour key, so the predicate still finds the right mail even
     // though the label no longer says "Red".
     expect(flagged?.children[0]?.id).toBe('flag-red')
+    // H11: the colour itself, not "flagged and the text mentions red", which listed mail from
+    // Fred and about credit.
+    expect(flagged?.children[0]?.predicate).toEqual({
+      type: 'is',
+      value: { field: 'flagColor', op: 'is', value: 'red' },
+    })
   })
 
   it('still builds when there are no smart mailboxes or flag names', () => {
@@ -196,7 +202,10 @@ describe('VIP mailbox', () => {
     for (const child of predicate.value) {
       expect(child.type).toBe('is')
       if (child.type !== 'is') throw new Error('expected a condition')
-      expect(child.value.field).toBe('from')
+      // The sender's address, whole. "From contains ann@company.com" also matched mail from
+      // joann@company.com, because `from` holds the name and address run together.
+      expect(child.value.field).toBe('fromAddress')
+      expect(child.value.op).toBe('is')
     }
   })
 

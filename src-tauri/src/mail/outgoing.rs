@@ -84,6 +84,11 @@ pub struct Built {
     pub message_id: String,
 }
 
+/// A fresh `Message-ID` for this sender, for a draft that could not be built yet.
+pub fn new_message_id(from: &Address) -> String {
+    generate_message_id(from)
+}
+
 /// Generates an RFC 5322 `Message-ID`.
 ///
 /// The domain half comes from the sender's address rather than the machine's hostname. A
@@ -258,7 +263,23 @@ fn document_html(fragment: &str) -> String {
 /// The editor supplies the real thing — it knows what the user actually typed, which is always
 /// a better plain-text version than anything recovered from markup afterwards.
 pub fn text_from_html(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
+    html_to_text(html, false)
+}
+
+/// The same, with every line inside a `<blockquote>` marked `> `, once per level.
+///
+/// For the text part of a reply. The editor's own text has the quoted message's words and not its
+/// shape, so a reply's text part had the history run straight on from the answer with nothing to
+/// say where one ended (L11). Not for incoming mail's derived text, which is a preview and a
+/// search index, where the markers would only be noise.
+pub fn quoted_text_from_html(html: &str) -> String {
+    html_to_text(html, true)
+}
+
+fn html_to_text(html: &str, mark_quotes: bool) -> String {
+    // Lines, each with how deep in quotes it began.
+    let mut lines: Vec<(usize, String)> = vec![(0, String::new())];
+    let mut depth = 0usize;
     let mut inside_tag = false;
     let mut tag = String::new();
 
@@ -270,6 +291,7 @@ pub fn text_from_html(html: &str) -> String {
             }
             '>' => {
                 inside_tag = false;
+                let closing = tag.starts_with('/');
                 let name: String = tag
                     .trim_start_matches('/')
                     .chars()
@@ -282,40 +304,84 @@ pub fn text_from_html(html: &str) -> String {
                     name.as_str(),
                     "p" | "div" | "br" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "blockquote"
                 ) {
-                    out.push('\n');
+                    if name == "blockquote" {
+                        depth = if closing {
+                            depth.saturating_sub(1)
+                        } else {
+                            depth + 1
+                        };
+                    }
+                    lines.push((depth, String::new()));
                 }
             }
             _ if inside_tag => tag.push(character),
-            _ => out.push(character),
+            _ => {
+                if let Some((line_depth, line)) = lines.last_mut() {
+                    // A line belongs to the quote it starts in.
+                    if line.is_empty() {
+                        *line_depth = depth;
+                    }
+                    line.push(character);
+                }
+            }
         }
     }
 
-    let decoded = out
-        .replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        // Last, or it would corrupt the entities above.
-        .replace("&amp;", "&");
+    let decode = |text: &str| {
+        text.replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            // Last, or it would corrupt the entities above.
+            .replace("&amp;", "&")
+    };
 
-    // Collapse the runs of blank lines the block-tag rule produces.
-    let mut lines: Vec<&str> = Vec::new();
+    // Collapse the runs of blank lines the block-tag rule produces: one blank line at most
+    // between two lines of text, and in a quote, a blank line of the quote's own.
+    let mut out: Vec<(bool, String)> = Vec::new();
     let mut blank = false;
-    for line in decoded.lines() {
-        let trimmed = line.trim_end();
-        if trimmed.trim().is_empty() {
+    for (line_depth, raw) in &lines {
+        let decoded = decode(raw);
+        let text = decoded.trim_end();
+        let line_depth = if mark_quotes { *line_depth } else { 0 };
+
+        if text.trim().is_empty() {
             if blank {
                 continue;
             }
             blank = true;
+            out.push((true, ">".repeat(line_depth)));
         } else {
             blank = false;
+            if line_depth == 0 {
+                out.push((false, text.to_string()));
+            } else {
+                out.push((
+                    false,
+                    format!("{} {}", ">".repeat(line_depth), text.trim_start()),
+                ));
+            }
         }
-        lines.push(trimmed);
     }
 
-    lines.join("\r\n").trim().to_string()
+    // No blank lines at either end, marked or not.
+    let first = out
+        .iter()
+        .position(|(blank, _)| !blank)
+        .unwrap_or(out.len());
+    let last = out
+        .iter()
+        .rposition(|(blank, _)| !blank)
+        .map_or(first, |at| at + 1);
+
+    out[first..last.max(first)]
+        .iter()
+        .map(|(_, line)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        .trim()
+        .to_string()
 }
 
 /// Quotes a plain-text body the way a reply should, prefixing every line with `> `.
@@ -336,21 +402,54 @@ pub fn quote_text(body: &str) -> String {
         .join("\r\n")
 }
 
-/// Builds the RFC 5322 bytes for a draft.
+/// Builds the RFC 5322 bytes for a message to send.
 pub fn build(draft: &Draft) -> Result<Built, BuildError> {
     if draft.to.is_empty() && draft.cc.is_empty() && draft.bcc.is_empty() {
         return Err(BuildError::NoRecipients);
     }
 
+    build_as(draft, Purpose::Send)
+}
+
+/// Builds the bytes of a draft to file in the Drafts mailbox.
+///
+/// Two differences from [`build`], both because a draft is filed rather than sent:
+///
+/// * **No recipient is needed.** People write the body first. A draft that could not be built
+///   until someone was in To was kept only as a local row nothing read, so Save as Draft on a
+///   message with no recipient yet simply lost it (C3, 2026-11-14 audit).
+/// * **`Bcc` is kept.** A draft is the writer's own copy. A sent message must never carry its
+///   blind copies; a draft that dropped them lost them when it was reopened.
+pub fn build_draft(draft: &Draft) -> Result<Built, BuildError> {
+    build_as(draft, Purpose::Draft)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Send,
+    Draft,
+}
+
+fn build_as(draft: &Draft, purpose: Purpose) -> Result<Built, BuildError> {
     let message_id = match draft.message_id.as_deref().map(str::trim) {
         Some(id) if !id.is_empty() => id.to_string(),
         _ => generate_message_id(&draft.from),
     };
 
+    let from = mailbox("From", &draft.from)?;
+
     let mut builder = Message::builder()
-        .from(mailbox("From", &draft.from)?)
+        .from(from.clone())
         .message_id(Some(message_id.clone()))
         .subject(draft.subject.trim());
+
+    if purpose == Purpose::Draft {
+        // The envelope is lettre's delivery list, and it refuses an empty one. A draft is never
+        // delivered, so it is addressed to its own writer and the envelope goes no further.
+        let own = lettre::address::Envelope::new(Some(from.email.clone()), vec![from.email])
+            .map_err(|error| BuildError::Assembly(error.to_string()))?;
+        builder = builder.envelope(own).keep_bcc();
+    }
 
     for address in &draft.to {
         builder = builder.to(mailbox("To", address)?);
@@ -382,9 +481,12 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
     // install id, which would turn a courtesy header into a tracking one.
     builder = builder.user_agent(format!("Halcyon/{}", env!("CARGO_PKG_VERSION")));
 
+    // The editor's text, unless the message quotes another: that text has the quote's words but
+    // not its markers, so the history ran straight on from the answer (L11).
+    let quotes = draft.html.to_ascii_lowercase().contains("<blockquote");
     let text = match draft.text.as_deref() {
-        Some(text) if !text.trim().is_empty() => text.to_string(),
-        _ => text_from_html(&draft.html),
+        Some(text) if !text.trim().is_empty() && !quotes => text.to_string(),
+        _ => quoted_text_from_html(&draft.html),
     };
 
     // Plain first, HTML second. RFC 2046 §5.1.4: the last part is the richest, and clients
@@ -473,12 +575,15 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
             // filesystem, but it lands in the recipient's download folder, and the traversal
             // and right-to-left tricks that matter on the way in matter identically on the way
             // out — this app must not be the thing that sends them.
-            mixed = mixed.singlepart(
-                lettre::message::Attachment::new(crate::platform::files::safe_file_name(
-                    &attachment.filename,
-                ))
-                .body(attachment.bytes.clone(), content_type),
-            );
+            let file = lettre::message::Attachment::new(crate::platform::files::safe_file_name(
+                &attachment.filename,
+            ));
+
+            mixed = mixed.singlepart(if attachment.mime.eq_ignore_ascii_case("message/rfc822") {
+                file.body(attached_message(&attachment.bytes), content_type)
+            } else {
+                file.body(attachment.bytes.clone(), content_type)
+            });
         }
 
         mixed
@@ -492,6 +597,37 @@ pub fn build(draft: &Draft) -> Result<Built, BuildError> {
         bytes: message.formatted(),
         message_id,
     })
+}
+
+/// A message attached whole, the way RFC 2046 §5.2.1 allows: 7bit or 8bit, with CRLF line ends.
+///
+/// Forward as Attachment went out as quoted-printable or base64, whichever lettre judged best
+/// for the bytes. Neither is permitted for `message/rfc822`, and some clients show such a part
+/// as a file of encoded text rather than as a message. And the cached source was attached with
+/// the line ends it was stored with, bare LF included, which SMTP does not carry (L8).
+///
+/// A source neither form can carry, raw 8-bit that is not UTF-8 or a line past 998 characters,
+/// keeps lettre's choice, its line ends made CRLF first. Better a part some clients show oddly
+/// than a message that fails to send.
+fn attached_message(bytes: &[u8]) -> lettre::message::Body {
+    use lettre::message::{header::ContentTransferEncoding, Body};
+
+    let mut crlf = Vec::with_capacity(bytes.len() + bytes.len() / 40);
+    for (at, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' && (at == 0 || bytes[at - 1] != b'\r') {
+            crlf.push(b'\r');
+        }
+        crlf.push(*byte);
+    }
+
+    let as_body = |encoding| match String::from_utf8(crlf.clone()) {
+        Ok(text) => Body::new_with_encoding(text, encoding),
+        Err(_) => Body::new_with_encoding(crlf.clone(), encoding),
+    };
+
+    as_body(ContentTransferEncoding::SevenBit)
+        .or_else(|_| as_body(ContentTransferEncoding::EightBit))
+        .unwrap_or_else(|_| Body::new(crlf))
 }
 
 /// A message being passed on unaltered. docs/01 §6, RFC 5322 §3.6.6.
@@ -644,45 +780,147 @@ pub fn redirect(request: &Redirect<'_>) -> Result<Built, BuildError> {
     block.push_str(&format!("Resent-Date: {}\r\n", request.date.trim()));
     block.push_str(&format!("Resent-Message-ID: {resent_id}\r\n"));
 
-    let mut bytes = Vec::with_capacity(block.len() + request.original.len());
+    // The original, less any blind copies it records. A Sent copy written by Gmail's web client
+    // or most other clients keeps its `Bcc:` — it is the sender's own record — and passing it on
+    // untouched told the new recipient everyone the user had blind-copied (M15, 2026-11-14
+    // audit). The one change a redirect makes to the original, and the reason it is allowed.
+    let original = without_headers(request.original, &["bcc", "resent-bcc"]);
+
+    let mut bytes = Vec::with_capacity(block.len() + original.len());
     bytes.extend_from_slice(block.as_bytes());
-    bytes.extend_from_slice(request.original);
+    bytes.extend_from_slice(&original);
 
-    // The message keeps its **original** `Message-ID`, which is what makes it the same message
-    // rather than a copy. That is also the id the outbox searches the Sent mailbox for when
-    // resolving an interrupted send, and it still works: the search is scoped to Sent, and the
-    // original arrived in the Inbox.
-    let message_id = original_message_id(request.original).unwrap_or(resent_id);
+    // The message keeps its original `Message-ID`, which is what makes it the same message
+    // rather than a copy. But the outbox knows this hop by its own `Resent-Message-ID`. Keyed on
+    // the original's, a redirect interrupted by a crash was taken for sent if the original was
+    // in Sent already, as it is for a redirect of the user's own message or one passed on once
+    // before (L9). The sender looks for either header.
 
-    Ok(Built { bytes, message_id })
+    Ok(Built {
+        bytes,
+        message_id: resent_id,
+    })
 }
 
-/// Reads the `Message-ID` out of a raw message's headers.
+/// The message with its date moved to `date`: `Resent-Date` if it has one, `Date` otherwise.
 ///
-/// Stops at the blank line. A `Message-ID:` occurring in the body — quoted in a reply, say —
-/// is not this message's identity, and treating it as such would have the outbox looking for
-/// the wrong message when deciding whether a send completed.
-fn original_message_id(raw: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(raw);
+/// Called by the sender as a message leaves, so the date is when it went rather than when it was
+/// built. Send Later sent the date it was written, hours or days earlier, and recipients file by
+/// it (M12, 2026-11-14 audit). A redirect's `Date` belongs to the original and stays; the hop's
+/// own time is `Resent-Date`, and only the topmost one — the hop being sent — is moved.
+pub fn restamp_date(raw: &[u8], date: &str) -> Vec<u8> {
+    let field = if header_present(raw, "resent-date") {
+        "Resent-Date"
+    } else {
+        "Date"
+    };
 
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            break;
+    let replacement = format!("{field}: {date}\r\n");
+    let wanted = field.to_ascii_lowercase();
+
+    let mut out = Vec::with_capacity(raw.len() + replacement.len());
+    let mut at = 0usize;
+    let mut state = Restamp::Looking;
+
+    while at < raw.len() {
+        let end = raw[at..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(raw.len(), |offset| at + offset + 1);
+        let line = &raw[at..end];
+
+        if line == b"\r\n" || line == b"\n" {
+            out.extend_from_slice(&raw[at..]);
+            return out;
         }
 
-        if let Some(value) = line
-            .strip_prefix("Message-ID:")
-            .or_else(|| line.strip_prefix("Message-Id:"))
-            .or_else(|| line.strip_prefix("message-id:"))
-        {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
+        let continuation = matches!(line.first(), Some(b' ' | b'\t'));
+
+        if !continuation {
+            if state == Restamp::Replacing {
+                state = Restamp::Done;
+            }
+            if state == Restamp::Looking && field_name(line).as_deref() == Some(wanted.as_str()) {
+                out.extend_from_slice(replacement.as_bytes());
+                state = Restamp::Replacing;
             }
         }
+
+        if state != Restamp::Replacing {
+            out.extend_from_slice(line);
+        }
+
+        at = end;
     }
 
-    None
+    out
+}
+
+#[derive(PartialEq, Eq)]
+enum Restamp {
+    Looking,
+    Replacing,
+    Done,
+}
+
+/// A header line's field name, lower-cased.
+fn field_name(line: &[u8]) -> Option<String> {
+    line.iter().position(|&byte| byte == b':').map(|colon| {
+        String::from_utf8_lossy(&line[..colon])
+            .trim()
+            .to_ascii_lowercase()
+    })
+}
+
+/// Whether the header section has a field of this (lower-case) name.
+fn header_present(raw: &[u8], name: &str) -> bool {
+    raw.split(|&byte| byte == b'\n')
+        .take_while(|line| *line != b"\r" && !line.is_empty())
+        .filter(|line| !matches!(line.first(), Some(b' ' | b'\t')))
+        .any(|line| field_name(line).as_deref() == Some(name))
+}
+
+/// The raw message without the named header fields, continuation lines and all.
+///
+/// Only the header section is looked at; the body is copied as it is, byte for byte. Names are
+/// compared without regard to case, as RFC 5322 has them. A field that is not removed keeps its
+/// exact bytes, line endings included.
+pub(crate) fn without_headers(raw: &[u8], names: &[&str]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut at = 0usize;
+    let mut skipping = false;
+
+    while at < raw.len() {
+        let end = raw[at..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(raw.len(), |offset| at + offset + 1);
+        let line = &raw[at..end];
+
+        // The blank line ends the headers; everything from it on is copied whole.
+        if line == b"\r\n" || line == b"\n" {
+            out.extend_from_slice(&raw[at..]);
+            return out;
+        }
+
+        let continuation = matches!(line.first(), Some(b' ' | b'\t'));
+        if !continuation {
+            let name = line.iter().position(|&byte| byte == b':').map(|colon| {
+                String::from_utf8_lossy(&line[..colon])
+                    .trim()
+                    .to_ascii_lowercase()
+            });
+            skipping = name.is_some_and(|name| names.iter().any(|wanted| *wanted == name));
+        }
+
+        if !skipping {
+            out.extend_from_slice(line);
+        }
+
+        at = end;
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -913,6 +1151,50 @@ mod tests {
         assert!(matches!(build(&draft), Err(BuildError::NoRecipients)));
     }
 
+    /// C3 in the 2026-11-14 audit. A draft with nobody in To yet — the usual way a message
+    /// starts — could not be built, so it was kept only as a local row nothing ever read, and
+    /// Save as Draft lost it. A draft is filed, not sent, and needs no recipient.
+    #[test]
+    fn a_draft_with_no_recipients_yet_is_built_all_the_same() {
+        let mut draft = draft();
+        draft.to.clear();
+        draft.cc.clear();
+        draft.bcc.clear();
+
+        let built = build_draft(&draft).expect("a draft needs no recipient");
+        let text = String::from_utf8_lossy(&built.bytes);
+
+        assert!(text.contains("Subject:"), "{text}");
+        assert!(!text.contains("\r\nTo:"), "{text}");
+        assert!(!built.message_id.is_empty());
+    }
+
+    /// A draft is the writer's own copy, so it keeps the blind copies they typed — a sent
+    /// message must never carry them, and a saved draft that dropped them lost them on reopen.
+    #[test]
+    fn a_draft_keeps_its_bcc_and_a_sent_message_does_not() {
+        let mut draft = draft();
+        draft.bcc = vec![address(None, "secret@example.test")];
+
+        let saved = String::from_utf8_lossy(&build_draft(&draft).expect("draft").bytes).to_string();
+        assert!(saved.contains("Bcc: secret@example.test"), "{saved}");
+
+        let sent = String::from_utf8_lossy(&build(&draft).expect("message").bytes).to_string();
+        assert!(!sent.contains("secret@example.test"), "{sent}");
+    }
+
+    #[test]
+    fn two_drafts_started_in_the_same_second_are_two_drafts() {
+        // L7: the identity of a draft with no recipients was `draft-<seconds>`, so two windows
+        // saving in the same second wrote one draft and each overwrote the other.
+        let mut draft = draft();
+        draft.to.clear();
+
+        let first = build_draft(&draft).expect("first").message_id;
+        let second = build_draft(&draft).expect("second").message_id;
+        assert_ne!(first, second);
+    }
+
     #[test]
     fn an_unusable_address_is_reported_with_the_field_it_came_from() {
         // "Invalid address" alone means opening three token fields to find which.
@@ -970,6 +1252,63 @@ mod tests {
             !text.contains('<'),
             "markup leaked into the text part: {text:?}"
         );
+    }
+
+    #[test]
+    fn a_replys_text_part_marks_what_it_quotes() {
+        // The editor's text has the quoted message's words and not its shape (L11).
+        let mut draft = draft();
+        draft.html = "<p>Yes, Thursday works.</p><p><br></p>\
+                      <p>On 27 Aug 2026, at 09:34, Ada Lovelace &lt;ada@example.test&gt; wrote:</p>\
+                      <blockquote type=\"cite\"><p>Can we meet on Thursday?</p><p><br></p>\
+                      <p>Or Friday &amp; Monday.</p>\
+                      <blockquote><p>Earlier: the figures.</p></blockquote></blockquote>"
+            .into();
+        draft.text = Some(
+            "Yes, Thursday works.\n\nOn 27 Aug 2026, at 09:34, Ada Lovelace <ada@example.test> \
+             wrote:\nCan we meet on Thursday?\n\nOr Friday & Monday.\nEarlier: the figures."
+                .into(),
+        );
+
+        let bytes = build(&draft).expect("build").bytes;
+        let parsed = mailparse::parse_mail(&bytes).expect("parse");
+        let plain = parsed
+            .subparts
+            .iter()
+            .find(|part| part.ctype.mimetype == "text/plain")
+            .expect("a text part")
+            .get_body()
+            .expect("body");
+        let lines: Vec<&str> = plain.lines().map(str::trim_end).collect();
+
+        assert_eq!(
+            lines,
+            [
+                "Yes, Thursday works.",
+                "",
+                "On 27 Aug 2026, at 09:34, Ada Lovelace <ada@example.test> wrote:",
+                "",
+                "> Can we meet on Thursday?",
+                ">",
+                "> Or Friday & Monday.",
+                ">",
+                ">> Earlier: the figures.",
+            ],
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn a_message_that_quotes_nothing_keeps_the_editors_text() {
+        let mut draft = draft();
+        draft.text = Some("Exactly as typed.".into());
+
+        let bytes = build(&draft).expect("build").bytes;
+        let parsed = mailparse::parse_mail(&bytes).expect("parse");
+        let plain = parsed.subparts[0].get_body().expect("body");
+
+        assert_eq!(plain.trim(), "Exactly as typed.");
+        assert!(!text_from_html("<blockquote>x</blockquote>").contains('>'));
     }
 
     #[test]
@@ -1036,6 +1375,60 @@ mod attachment_tests {
             attachments,
             ..Draft::default()
         }
+    }
+
+    #[test]
+    fn a_message_forwarded_as_an_attachment_goes_as_a_message() {
+        // It went as quoted-printable or base64, neither allowed for message/rfc822, with the
+        // cached copy's bare LF line ends (L8).
+        let original = "From: ada@example.test\nSubject: Café receipt\n\nTotal: 12 €\nThanks.\n";
+        let draft = draft_with(vec![Attachment {
+            filename: "Café receipt.eml".into(),
+            mime: "message/rfc822".into(),
+            bytes: original.as_bytes().to_vec(),
+            content_id: None,
+        }]);
+
+        let bytes = build(&draft).expect("build").bytes;
+        let parsed = mailparse::parse_mail(&bytes).expect("parse");
+        let part = parsed
+            .subparts
+            .iter()
+            .find(|part| part.ctype.mimetype == "message/rfc822")
+            .expect("the attached message");
+
+        let encoding = part
+            .headers
+            .iter()
+            .find(|header| {
+                header
+                    .get_key_ref()
+                    .eq_ignore_ascii_case("Content-Transfer-Encoding")
+            })
+            .map(|header| header.get_value().to_ascii_lowercase());
+        assert!(
+            matches!(encoding.as_deref(), Some("7bit" | "8bit")),
+            "{encoding:?}"
+        );
+
+        let inner = String::from_utf8(part.get_body_raw().expect("body")).expect("utf-8");
+        assert!(inner.contains("Subject: Café receipt\r\n"), "{inner:?}");
+        assert!(
+            !inner.replace("\r\n", "").contains('\n'),
+            "a bare LF survived"
+        );
+    }
+
+    #[test]
+    fn a_message_no_mail_line_can_carry_is_still_sent() {
+        let long = format!("Subject: x\r\n\r\n{}\r\n", "a".repeat(2_000));
+        assert!(build(&draft_with(vec![Attachment {
+            filename: "long.eml".into(),
+            mime: "message/rfc822".into(),
+            bytes: long.into_bytes(),
+            content_id: None,
+        }]))
+        .is_ok());
     }
 
     fn rendered(draft: &Draft) -> String {
@@ -1269,6 +1662,91 @@ mod attachment_tests {
         );
     }
 
+    /// M12 in the 2026-11-14 audit: Send Later sent the message with the `Date` it was built
+    /// with — when it was written, hours or days before it went. Recipients sort by that date, so
+    /// a message scheduled for Monday morning arrived filed under Friday night.
+    #[test]
+    fn a_message_is_dated_when_it_is_sent() {
+        let raw = b"From: me@halcyon.test\r\n\
+Date: Fri, 13 Nov 2026 23:10:00 +0000\r\n\
+Subject: Monday\r\n\
+\r\n\
+Date: in the body is not a header.\r\n";
+
+        let out = restamp_date(raw, "Mon, 16 Nov 2026 09:00:00 +0000");
+        let text = String::from_utf8_lossy(&out);
+
+        assert!(
+            text.contains("Date: Mon, 16 Nov 2026 09:00:00 +0000\r\n"),
+            "{text}"
+        );
+        assert!(!text.contains("Fri, 13 Nov"), "{text}");
+        assert!(
+            text.ends_with("\r\n\r\nDate: in the body is not a header.\r\n"),
+            "{text}"
+        );
+
+        // A folded Date is replaced whole.
+        let folded = b"Date: Fri, 13 Nov 2026\r\n 23:10:00 +0000\r\nSubject: x\r\n\r\nbody";
+        let text = String::from_utf8_lossy(&restamp_date(folded, "NOW")).to_string();
+        assert_eq!(text, "Date: NOW\r\nSubject: x\r\n\r\nbody");
+    }
+
+    #[test]
+    fn a_redirect_keeps_the_original_date_and_restamps_its_own() {
+        // The original's `Date` is part of the original, which a redirect passes on unaltered.
+        // When *this* hop happened is `Resent-Date`, and that is what a later send moves.
+        let raw = b"Resent-From: me@halcyon.test\r\n\
+Resent-Date: Fri, 13 Nov 2026 23:10:00 +0000\r\n\
+From: ada@example.test\r\n\
+Date: Tue, 1 Sep 2026 08:00:00 +0000\r\n\
+\r\n\
+body";
+
+        let text = String::from_utf8_lossy(&restamp_date(raw, "NOW")).to_string();
+        assert!(text.contains("Resent-Date: NOW\r\n"), "{text}");
+        assert!(
+            text.contains("Date: Tue, 1 Sep 2026 08:00:00 +0000"),
+            "{text}"
+        );
+    }
+
+    /// M15 in the 2026-11-14 audit. A Sent copy written by Gmail's web client, or by most other
+    /// clients, keeps its `Bcc:` header — it is the sender's own record — and Redirect passed the
+    /// original through untouched, so redirecting one of your own sent messages told the new
+    /// recipient everyone you had blind-copied.
+    #[test]
+    fn a_redirect_never_passes_on_the_originals_blind_copies() {
+        let raw = b"From: Me <me@halcyon.test>\r\n\
+To: Ada <ada@example.test>\r\n\
+Bcc: Secret One <secret1@example.test>,\r\n\
+\tsecret2@example.test\r\n\
+Resent-Bcc: old-hop@example.test\r\n\
+Subject: Plans\r\n\
+Message-ID: <plans@halcyon.test>\r\n\
+\r\n\
+The body may mention Bcc: in passing and keeps it.\r\n"
+            .to_vec();
+
+        let built = redirect(&redirect_request(&raw)).expect("redirect");
+        let output = String::from_utf8_lossy(&built.bytes);
+
+        assert!(!output.contains("secret1"), "{output}");
+        assert!(
+            !output.contains("secret2"),
+            "the folded line survived: {output}"
+        );
+        assert!(!output.contains("old-hop"), "{output}");
+        assert!(
+            output.contains("To: Ada <ada@example.test>\r\nSubject: Plans"),
+            "{output}"
+        );
+        assert!(
+            output.ends_with("\r\n\r\nThe body may mention Bcc: in passing and keeps it.\r\n"),
+            "{output}"
+        );
+    }
+
     #[test]
     fn a_redirect_encodes_a_non_ascii_display_name() {
         // The build path hands names to lettre, which encodes them, and
@@ -1422,7 +1900,12 @@ mod attachment_tests {
             output.contains("From: Ada Lovelace <ada@example.test>"),
             "{output}"
         );
-        assert_eq!(built.message_id, "<original-1@example.test>");
+        assert!(
+            output.contains("Message-ID: <original-1@example.test>"),
+            "{output}"
+        );
+        // Known to the outbox by this hop's own id: the original may be in Sent already (L9).
+        assert_eq!(built.message_id, "<resent-1@halcyon.test>");
     }
 
     #[test]

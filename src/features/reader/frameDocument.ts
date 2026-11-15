@@ -50,9 +50,14 @@ export function frameDocument(
   const sheet =
     css === '' ? '' : `<style>@layer message {\n${css.replaceAll('<', '\\3c ')}\n}</style>`
 
+  // `x-dns-prefetch-control`: Chromium may look up the host of every link in a document as it
+  // loads, ahead of any click, and the CSP does not cover lookups. A sender who gives each
+  // recipient a link on a host of its own then learns who opened the message, and when, with
+  // remote images off (L34, 2026-11-14 audit). Off before the body is parsed.
   return `<!doctype html>
 <html><head>
 <meta charset="utf-8">
+<meta http-equiv="x-dns-prefetch-control" content="off">
 <meta http-equiv="Content-Security-Policy" content="${CSP}">
 <base target="_blank">
 <style>

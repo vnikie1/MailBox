@@ -24,13 +24,15 @@ import {
   useArchiveMessages,
   useMailboxes,
   useMessages,
+  useSmartCount,
   useSmartMessages,
   useToggleRead,
 } from '@/app/queries'
 import { useBodyPrefetch } from '@/features/reader/useBodyPrefetch'
 import type { Density } from '@/lib/appearance'
 import { cx } from '@/lib/cx'
-import { storeNow } from '@/lib/ipc'
+import { useAppliedDensity } from '@/app/useAppliedDensity'
+import { useToday } from '@/app/useToday'
 import { lengthToken } from '@/lib/tokens'
 import { useLayoutStore } from '@/store/layout'
 import { useMailStore } from '@/store/mail'
@@ -55,7 +57,8 @@ import { MessageRow } from './MessageRow'
 import { startMessageDrag } from '@/lib/messageDrag'
 
 import { setMessageDragImage } from './dragDeck'
-import { buildListItems } from './rows'
+import { listCounts } from './listCounts'
+import { buildListItems, rowElementId } from './rows'
 import { SORT_LABELS, sortRows, type SortField } from './sort'
 
 import styles from './MessageList.module.css'
@@ -85,6 +88,10 @@ export interface MessageListProps {
    * different things to be told.
    */
   searchRows?: Row[] | undefined
+  /** The search has not answered yet. Ignored when `searchRows` is undefined. */
+  searchRunning?: boolean
+  /** The search failed, rather than finding nothing. Ignored when `searchRows` is undefined. */
+  searchFailed?: boolean
   /** Rendered above the rows while a search is running. */
   scopeBar?: ReactNode
   /**
@@ -118,6 +125,8 @@ function flattenPages(data: { pages: (Row[] | { items: Row[] })[] } | undefined)
 export function MessageList({
   showSidebarToggle = false,
   searchRows,
+  searchRunning = false,
+  searchFailed = false,
   scopeBar,
   contextMenu,
 }: MessageListProps) {
@@ -163,11 +172,19 @@ export function MessageList({
     unreadOnly,
   )
   const saved = useSmartMessages(searching ? undefined : selection.predicate)
+  const { data: smartCount } = useSmartCount(selection.predicate)
 
-  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, isPending, isError, refetch } =
-    selection.predicate === undefined ? folders : saved
+  const query = selection.predicate === undefined ? folders : saved
+  const { data, fetchNextPage, hasNextPage, isFetchingNextPage, refetch } = query
 
-  const now = useMemo(storeNow, [])
+  // A search's own state, not the mailbox query's. That query is disabled while searching, and
+  // a disabled query is pending for ever, so "No messages match that search" could never appear:
+  // a search that found nothing showed a blank pane (M36, 2026-11-14 audit).
+  const isPending = searching ? searchRunning : query.isPending
+  const isError = searching ? searchFailed : query.isError
+
+  // Moves on at midnight, so a window left open overnight does not file yesterday under Today.
+  const now = useToday()
 
   const rows = useMemo(() => {
     // Search results arrive already ranked, and re-sorting them by date would throw the
@@ -190,8 +207,19 @@ export function MessageList({
   const items = useMemo(
     // Date headers only mean something while the list is in date order; under any other
     // sort they would label runs that are not contiguous in time.
-    () => buildListItems({ rows, now, selected, grouped: sortField === 'date' }),
-    [rows, now, selected, sortField],
+    //
+    // Search results are in neither: they are ranked by relevance, whatever the sort says. With
+    // headers, "Today" and "Yesterday" repeated down the results, each a new header with the key
+    // of the last one, and the duplicate keys left stale headers drawn over the inbox once the
+    // search was cleared (M34, 2026-11-14 audit).
+    () =>
+      buildListItems({
+        rows,
+        now,
+        selected,
+        grouped: sortField === 'date' && searchRows === undefined,
+      }),
+    [rows, now, selected, sortField, searchRows],
   )
 
   // Select the first row once a mailbox's first page arrives, rather than leaving the reader
@@ -199,7 +227,8 @@ export function MessageList({
   // never shows.
   const firstId = rows[0]?.id
   useEffect(() => {
-    if (selectedMessageIds.length === 0 && firstId !== undefined) selectMessage(firstId)
+    // The app's choice, not the user's: the one-pane layout must not open it (M38).
+    if (selectedMessageIds.length === 0 && firstId !== undefined) selectMessage(firstId, 'auto')
   }, [firstId, selectedMessageIds.length, selectMessage])
 
   // Where the selection sits while it is still in the list, remembered so that when it leaves
@@ -228,21 +257,23 @@ export function MessageList({
   }, [order, reconcileSelection])
 
   // Read once per render rather than per item: getComputedStyle forces a style recalc, and
-  // calling it inside estimateSize would do that a hundred times a frame. Density is in the
-  // dependencies because it changes the token.
+  // calling it inside estimateSize would do that a hundred times a frame. The density the
+  // document is drawn at is in the dependencies because it changes the token — that one, not
+  // the setting, which moves a render before the token does. See `useAppliedDensity`.
+  const appliedDensity = useAppliedDensity()
   const rowHeight = useMemo(() => {
     const base = lengthToken('--list-row-height-0', ROW_BASE_FALLBACK_PX)
     const step =
       lengthToken('--list-row-height-1', ROW_BASE_FALLBACK_PX + ROW_STEP_FALLBACK_PX) - base
     return base + previewLines * (step > 0 ? step : ROW_STEP_FALLBACK_PX)
-    // density is not read here, but it changes the CSS custom property that is.
+    // The density is not read here, but it changes the CSS custom property that is.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- React cannot see that.
-  }, [previewLines, density])
+  }, [previewLines, appliedDensity])
 
   const headerHeight = useMemo(
     () => lengthToken('--list-date-header-height', HEADER_FALLBACK_PX),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- as above.
-    [density],
+    [appliedDensity],
   )
 
   const virtualiser = useVirtualizer({
@@ -416,9 +447,7 @@ export function MessageList({
 
   // A unified row spans several mailboxes and belongs to no single account, so the header
   // names the row rather than trying to name an account.
-  const chosen = mailboxes.filter((entry) => selection.mailboxIds.includes(entry.id))
-  const total = chosen.reduce((sum, entry) => sum + entry.totalCount, 0)
-  const unread = chosen.reduce((sum, entry) => sum + entry.unreadCount, 0)
+  const counts = listCounts(selection, mailboxes, smartCount)
 
   return (
     <div className={styles.pane}>
@@ -440,8 +469,9 @@ export function MessageList({
         <div className={styles.titles}>
           <h1 className={styles.title}>{selection.label}</h1>
           <p className={cx(styles.subtitle, 'tabular')}>
-            {total} messages
-            {unread > 0 ? `, ${String(unread)} unread` : ''}
+            {/* A no-break space while a smart row's count is coming, so the title does not move. */}
+            {counts === null ? ' ' : `${String(counts.total)} messages`}
+            {counts !== null && counts.unread > 0 ? `, ${String(counts.unread)} unread` : ''}
           </p>
         </div>
 
@@ -555,7 +585,7 @@ export function MessageList({
             available lie: it reads as *your mail is gone*, and the note below about a blank pane
             being indistinguishable from a broken one was written without this case being
             handled. */}
-        {rows.length === 0 && !isPending && isError && (
+        {rows.length === 0 && !isPending && isError && !searching && (
           <EmptyState
             icon={AlertTriangle}
             title="This mailbox could not be loaded"
@@ -570,6 +600,14 @@ export function MessageList({
                 Try again
               </Button>
             }
+          />
+        )}
+
+        {rows.length === 0 && !isPending && isError && searching && (
+          <EmptyState
+            icon={AlertTriangle}
+            title="The search could not be run"
+            description="Your mail is still here. Try the search again, or change a word."
           />
         )}
 
@@ -624,6 +662,10 @@ export function MessageList({
             aria-label="Messages"
             aria-multiselectable
             aria-busy={isPending}
+            // Focus stays on the list, so it says which row is current. See `rowElementId`.
+            {...(selectedMessageIds[0] === undefined
+              ? {}
+              : { 'aria-activedescendant': rowElementId(selectedMessageIds[0]) })}
             tabIndex={0}
             className={cx(styles.scroll, focused && 'messageListFocused')}
             onKeyDown={onKeyDown}

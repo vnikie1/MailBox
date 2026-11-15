@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import type { AttachmentData } from '@/lib/generated/AttachmentData'
-import { attachmentPreview, attachmentSave } from '@/lib/ipc'
+import { attachmentPreview, attachmentSave, reasonFor } from '@/lib/ipc'
 import { Button, Sheet, useToast } from '@/ui'
 
 import styles from './AttachmentPreview.module.css'
@@ -84,11 +84,12 @@ function escapeHtml(text: string): string {
 function frameDocument(data: AttachmentData): string {
   const mime = data.mime.toLowerCase()
 
-  // The `data:` URI is built by the core and is base64 of bytes it decoded, so it cannot
-  // carry a quote that would break out of the attribute. It goes in an attribute rather than
-  // as markup either way, and the CSP above allows no scripting even if it did.
+  // Escaped although the core only hands over a checked image type. This comment used to say the
+  // URI "cannot carry a quote" because its data is base64 — but its *type* was the sender's
+  // Content-Type, pasted in unchecked, and `image/png" style="…` closed the attribute. The core
+  // now refuses that; escaping here means the frame does not depend on it.
   const body = mime.startsWith('image/')
-    ? `<img src="${data.dataUrl}" alt="">`
+    ? `<img src="${escapeHtml(data.dataUrl)}" alt="">`
     : `<pre>${escapeHtml(textOf(data.dataUrl))}</pre>`
 
   return `<!doctype html>
@@ -176,7 +177,7 @@ export function AttachmentPreview({ attachmentId, filename, onClose }: Attachmen
                 .catch((cause: unknown) => {
                   toast.show({
                     title: 'The attachment could not be saved',
-                    description: cause instanceof Error ? cause.message : String(cause),
+                    description: reasonFor(cause),
                   })
                 })
             }}

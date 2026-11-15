@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use base64::Engine;
 use mailparse::MailHeaderMap;
 use tauri::State;
 
@@ -48,6 +47,17 @@ const MAX_REMOTE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 
 const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a message's remote images may hold the message back, all together.
+///
+/// The body is handed to the reader only when its images are in, and each request had ten
+/// seconds of its own: sixty images six at a time was a hundred seconds of a blank reader for a
+/// sender with a slow server (L35, 2026-11-14 audit). What has not arrived by now is left out,
+/// and the reader says so as it does for any image that did not arrive.
+const REMOTE_DEADLINE: Duration = Duration::from_secs(12);
+
+/// How long to wait for a connection, apart from the response.
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How many remote images to fetch at once.
 ///
 /// They were fetched **one after another**, and that is what "the content loading is very very
@@ -82,7 +92,7 @@ fn inline_images(raw_path: Option<&str>) -> HashMap<String, String> {
         return images;
     };
 
-    let Ok(parsed) = mailparse::parse_mail(&raw) else {
+    let Ok(parsed) = crate::mail::mime::parse(&raw) else {
         return images;
     };
 
@@ -135,8 +145,11 @@ fn collect_parts(
         return;
     }
 
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    out.insert(reference, format!("data:{mime};base64,{encoded}"));
+    // Through the one builder that checks the type. `mime` is the sender's Content-Type, and
+    // `image/png" style="…` passes a `starts_with("image/")` test.
+    if let Some(data_uri) = render::image_data_uri(&mime, &bytes) {
+        out.insert(reference, data_uri);
+    }
 }
 
 /// Fetches the remote images a message wants, through the core.
@@ -168,6 +181,12 @@ fn collect_parts(
 ///
 /// No cookie store, and a generic agent. A client that carried cookies would let one sender's
 /// pixel identify the reader to the next.
+///
+/// And only the public internet. A message's `<img src>` could name `http://192.168.1.1/…` or
+/// `http://localhost:8080/…`, and this would fetch it from inside the user's network — a request
+/// to their router or to a service on their own machine, made by a stranger's mail (L35,
+/// 2026-11-14 audit). Addresses are checked in the URL, after every redirect, and in what a name
+/// resolves to, which is what stops a hostname that points at the LAN.
 fn remote_client() -> Option<&'static reqwest::Client> {
     static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
 
@@ -175,12 +194,105 @@ fn remote_client() -> Option<&'static reqwest::Client> {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .timeout(REMOTE_TIMEOUT)
+                .connect_timeout(REMOTE_CONNECT_TIMEOUT)
                 .user_agent("Mozilla/5.0")
-                .redirect(reqwest::redirect::Policy::limited(3))
+                .dns_resolver(std::sync::Arc::new(PublicOnly))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 3 {
+                        attempt.error("too many redirects")
+                    } else if url_allowed(attempt.url()) {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
                 .build()
                 .ok()
         })
         .as_ref()
+}
+
+/// Whether an address is on the public internet: not this machine, not the local network, and
+/// not one of the ranges set aside for something else.
+fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || a == 0
+                // Carrier-grade NAT, 100.64.0.0/10: the provider's network, not the internet.
+                || (a == 100 && (64..128).contains(&b))
+                // Benchmarking, 198.18.0.0/15, and everything from 240.0.0.0 up.
+                || (a == 198 && (b == 18 || b == 19))
+                || a >= 240)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(v4));
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique local, fc00::/7, and link-local, fe80::/10. Written out because the
+                // standard library's names for them are newer than this crate's minimum Rust.
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // Documentation, 2001:db8::/32.
+                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8))
+        }
+    }
+}
+
+/// Whether a remote image's URL may be fetched at all: web addresses only, and none naming this
+/// machine or the local network outright. A name is checked again when it is resolved.
+fn url_allowed(url: &url::Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => is_public(ip.into()),
+        Some(url::Host::Ipv6(ip)) => is_public(ip.into()),
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            !(name == "localhost" || name.ends_with(".localhost"))
+        }
+        None => false,
+    }
+}
+
+/// A resolver that answers only with public addresses. See `remote_client`.
+///
+/// A name that resolves only to the local network — `router.local`, or a public name an
+/// attacker has pointed at `127.0.0.1` — fails to resolve, as far as the request knows.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+
+        Box::pin(async move {
+            let public: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|address| is_public(address.ip()))
+                .collect();
+
+            if public.is_empty() {
+                return Err(format!("{host} has no public address").into());
+            }
+
+            let addresses: reqwest::dns::Addrs = Box::new(public.into_iter());
+            Ok(addresses)
+        })
+    }
 }
 
 /// Where fetched remote images are kept between reads.
@@ -237,7 +349,13 @@ fn sweep_remote_cache(dir: &std::path::Path) {
 
 /// Fetches one remote image and returns it as a `data:` URI.
 async fn fetch_one(client: &reqwest::Client, url: &str) -> Option<String> {
-    let response = client.get(url).send().await.ok()?;
+    let parsed = url::Url::parse(url).ok()?;
+    if !url_allowed(&parsed) {
+        tracing::debug!("remote image: not a public web address; not fetched");
+        return None;
+    }
+
+    let response = client.get(parsed).send().await.ok()?;
 
     if !response.status().is_success() {
         return None;
@@ -256,23 +374,36 @@ async fn fetch_one(client: &reqwest::Client, url: &str) -> Option<String> {
 
     // Only images. A server that answers an `<img src>` with HTML is not serving an image, and
     // turning that into a data: URI would put the sender's markup back into the document the
-    // sanitiser just cleaned.
-    if !mime.starts_with("image/") {
+    // sanitiser just cleaned. Checked in full, not by prefix: the header is the remote server's
+    // to write, and `image/x"><link …` starts with `image/`.
+    if !render::is_image_mime(&mime) {
         return None;
     }
 
-    if response.content_length().unwrap_or(0) > MAX_REMOTE_BYTES {
+    let bytes = read_capped(response, MAX_REMOTE_BYTES).await?;
+
+    render::image_data_uri(&mime, &bytes)
+}
+
+/// A response's body, or `None` once it passes `cap` bytes.
+///
+/// Read as it arrives and abandoned at the cap. `bytes()` read the whole body first and checked
+/// its size after, and a server that sends no `Content-Length` can send without end: everything
+/// it sent in the ten seconds allowed was held in memory before being refused (L35).
+async fn read_capped(mut response: reqwest::Response, cap: u64) -> Option<Vec<u8>> {
+    if response.content_length().unwrap_or(0) > cap {
         return None;
     }
 
-    let bytes = response.bytes().await.ok()?;
-
-    if bytes.len() as u64 > MAX_REMOTE_BYTES {
-        return None;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if (body.len() + chunk.len()) as u64 > cap {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
     }
 
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Some(format!("data:{mime};base64,{encoded}"))
+    Some(body)
 }
 
 /// Books one image against the budget, or refuses it.
@@ -338,8 +469,20 @@ async fn fetch_remote(urls: &[String]) -> HashMap<String, String> {
 
     let mut images = HashMap::new();
     let mut spent = 0_usize;
+    let deadline = tokio::time::Instant::now() + REMOTE_DEADLINE;
 
-    while let Some(entry) = stream.next().await {
+    loop {
+        // Out of time: what has not arrived is left out, as the budget below leaves it out.
+        let Ok(next) = tokio::time::timeout_at(deadline, stream.next()).await else {
+            tracing::debug!(
+                fetched = images.len(),
+                "remote images: out of time, leaving the rest"
+            );
+            break;
+        };
+        let Some(entry) = next else {
+            break;
+        };
         let Some((url, data)) = entry else {
             continue;
         };
@@ -440,9 +583,7 @@ pub async fn message_body(
         // Enumerated from the *sanitised* markup, not the raw stored HTML: the fetch list
         // must contain only URLs the sanitiser approved, or the app would make a request on
         // behalf of markup it had already refused to render.
-        let wanted = render::remote_urls(&render::sanitise_for_enumeration(
-            html.as_deref().unwrap_or_default(),
-        ));
+        let wanted = render::remote_image_urls(html.as_deref().unwrap_or_default());
 
         fetch_remote(&wanted).await
     } else {
@@ -452,9 +593,9 @@ pub async fn message_body(
     let rendered = render::render(
         html.as_deref(),
         text.as_deref(),
-        &inline,
+        inline,
         load_remote,
-        &remote,
+        remote,
     );
 
     tracing::info!(
@@ -487,41 +628,42 @@ pub async fn message_body(
 /// digits, nothing else. The reader never passes a sender's `tel:` through — it builds one
 /// from digits it recognised — so a `tel:` carrying anything else did not come from the
 /// detector and has no business being opened.
-fn scheme_permitted(target: &str) -> bool {
-    if target.starts_with("http://")
-        || target.starts_with("https://")
-        || target.starts_with("mailto:")
-    {
-        return true;
-    }
+///
+/// Returns the link as it is handed to the shell, or `None` when it may not be. The scheme is
+/// compared without regard to case, as RFC 3986 says it is, and the link is read without the
+/// spaces around it: `HTTPS://` and a link with a leading space were both refused in silence
+/// (L33, 2026-11-14 audit). What goes to the shell is the parsed URL, not the sender's text.
+fn permitted(target: &str) -> Option<String> {
+    let parsed = url::Url::parse(target.trim()).ok()?;
 
-    match target.strip_prefix("tel:") {
-        Some(number) => {
-            !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '+')
+    match parsed.scheme() {
+        "http" | "https" | "mailto" => Some(parsed.to_string()),
+        "tel" => {
+            let number = parsed.path();
+            (!number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '+'))
+                .then(|| format!("tel:{number}"))
         }
-        None => false,
+        _ => None,
     }
 }
 
 #[tauri::command]
 pub async fn open_external(url: String, visible_text: String) -> Result<LinkOutcome, AppError> {
-    let target = url.trim();
-
-    if !scheme_permitted(target) {
+    let Some(target) = permitted(&url) else {
         return Ok(LinkOutcome {
             opened: false,
             mismatch: None,
         });
-    }
+    };
 
-    if let Some(claimed) = mismatched_host(target, &visible_text) {
+    if let Some(claimed) = mismatched_host(&target, &visible_text) {
         return Ok(LinkOutcome {
             opened: false,
             mismatch: Some(claimed),
         });
     }
 
-    open_in_browser(target)?;
+    open_in_browser(&target)?;
 
     Ok(LinkOutcome {
         opened: true,
@@ -532,13 +674,12 @@ pub async fn open_external(url: String, visible_text: String) -> Result<LinkOutc
 /// Opens a link the user has confirmed despite the host mismatch.
 #[tauri::command]
 pub async fn open_external_confirmed(url: String) -> Result<(), AppError> {
-    let target = url.trim();
-
-    if !(target.starts_with("http://") || target.starts_with("https://")) {
-        return Ok(());
+    match permitted(&url) {
+        Some(target) if target.starts_with("http://") || target.starts_with("https://") => {
+            open_in_browser(&target)
+        }
+        _ => Ok(()),
     }
-
-    open_in_browser(target)
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -583,12 +724,28 @@ fn host_of(value: &str) -> Option<String> {
     Some(host.trim_start_matches("www.").to_string())
 }
 
+/// Who a host belongs to: the part of it that was registered, by the Public Suffix List.
+///
+/// `links.example.com` and `example.com` have one owner, and a link from one shown as the
+/// other is how most companies track their own mail, not a trick. `bank.co.uk` and
+/// `evil.co.uk` have two, which a rule like "the last two labels" would miss. An address is
+/// compared whole: the list knows nothing of numbers, and would call `10.0.1.15` and
+/// `192.168.1.15` the same.
+fn owner(host: &str) -> &str {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+
+    psl::domain_str(host).unwrap_or(host)
+}
+
 /// Whether the link text claims one destination and the href goes to another.
 fn mismatched_host(url: &str, visible_text: &str) -> Option<HostMismatch> {
     let shown = host_of(visible_text)?;
     let actual = host_of(url)?;
 
-    if shown == actual {
+    if owner(&shown) == owner(&actual) {
         return None;
     }
 
@@ -739,6 +896,50 @@ mod tests {
     }
 
     #[test]
+    fn an_inline_image_with_a_hostile_type_is_not_inlined() {
+        // H12. The type is the sender's Content-Type and was pasted into the data URI, and the
+        // data URI into the markup after sanitising, so a quote in it ended the attribute.
+        let raw = "Content-Type: multipart/related; boundary=r\r\n\r\n\
+--r\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:x\"><img src=\"cid:y\">\r\n\
+--r\r\nContent-Type: image/png\" style=\"background:url(https://evil.test/p)\r\nContent-ID: <x>\r\n\r\nPNG\r\n\
+--r\r\nContent-Type: IMAGE/PNG\r\nContent-ID: <y>\r\n\r\nPNG\r\n--r--\r\n";
+
+        let parsed = mailparse::parse_mail(raw.as_bytes()).expect("parse");
+        let mut images = HashMap::new();
+        collect_parts(&parsed, 0, &mut images);
+
+        assert!(!images.contains_key("x"), "{images:?}");
+        assert!(
+            images
+                .get("y")
+                .is_some_and(|uri| uri.starts_with("data:image/png;base64,")),
+            "an ordinary image, whatever the case of its type, still inlines: {images:?}"
+        );
+    }
+
+    #[test]
+    fn only_a_well_formed_image_type_makes_a_data_uri() {
+        assert!(render::image_data_uri("image/png", b"x").is_some());
+        assert!(render::image_data_uri("image/svg+xml", b"x").is_some());
+        assert!(render::image_data_uri("image/vnd.microsoft.icon", b"x").is_some());
+
+        for hostile in [
+            "image/",
+            "image/png\"",
+            "image/png\" onerror=\"x",
+            "image/x><link rel=preconnect href=https://evil.test>",
+            "image/png;charset=x",
+            "text/html",
+        ] {
+            assert!(
+                render::image_data_uri(hostile, b"x").is_none(),
+                "{hostile:?}"
+            );
+            assert!(!render::is_image_mime(hostile), "{hostile:?}");
+        }
+    }
+
+    #[test]
     fn remote_images_default_to_on() {
         // The setting the owner asked for, and the one default in this app chosen against the
         // security advice. Asserted so it cannot drift back by accident.
@@ -787,7 +988,7 @@ mod tests {
             "ms-officecmd:{}",
             "\\\\evil.test\\share",
         ] {
-            assert!(!scheme_permitted(hostile), "{hostile}");
+            assert!(permitted(hostile).is_none(), "{hostile}");
         }
     }
 
@@ -795,20 +996,147 @@ mod tests {
     fn only_the_detectors_reduced_tel_form_is_permitted() {
         // The detector hands over `+` and digits. Anything else in a `tel:` did not come from
         // it, and `tel:` is only on the list because of it.
-        assert!(scheme_permitted("tel:+442079460958"));
-        assert!(scheme_permitted("tel:02079460958"));
+        assert!(permitted("tel:+442079460958").is_some());
+        assert!(permitted("tel:02079460958").is_some());
 
-        assert!(!scheme_permitted("tel:"));
-        assert!(!scheme_permitted("tel:+44 20 7946 0958"));
-        assert!(!scheme_permitted("tel:*99#"));
-        assert!(!scheme_permitted("tel:x@evil.test"));
+        assert!(permitted("tel:").is_none());
+        assert!(permitted("tel:+44 20 7946 0958").is_none());
+        assert!(permitted("tel:*99#").is_none());
+        assert!(permitted("tel:x@evil.test").is_none());
     }
 
     #[test]
     fn the_ordinary_schemes_still_open() {
-        assert!(scheme_permitted("https://example.test"));
-        assert!(scheme_permitted("http://example.test"));
-        assert!(scheme_permitted("mailto:ada@example.test"));
+        assert!(permitted("https://example.test").is_some());
+        assert!(permitted("http://example.test").is_some());
+        assert!(permitted("mailto:ada@example.test").is_some());
+    }
+
+    #[test]
+    fn a_scheme_in_capitals_or_a_link_with_spaces_around_it_still_opens() {
+        // L33: both were refused in silence. Schemes are case-insensitive (RFC 3986 §3.1).
+        assert_eq!(
+            permitted("HTTPS://Example.test/Offer").as_deref(),
+            Some("https://example.test/Offer"),
+            "the scheme and host are lowered; the path is the sender's"
+        );
+        assert_eq!(
+            permitted("  https://example.test/x \n").as_deref(),
+            Some("https://example.test/x")
+        );
+        assert_eq!(
+            permitted("MAILTO:ada@example.test").as_deref(),
+            Some("mailto:ada@example.test")
+        );
+        // And capitals are no way round the list.
+        assert!(permitted("MS-MSDT:/id PCWDiagnostic").is_none());
+        assert!(permitted("JavaScript:alert(1)").is_none());
+    }
+
+    #[test]
+    fn a_remote_image_is_never_fetched_from_this_machine_or_its_network() {
+        // L35. A message's <img src> pointed at the user's router, or a service on their own
+        // machine, and the core fetched it from inside their network.
+        for refused in [
+            "http://localhost:8080/admin",
+            "http://LOCALHOST./x",
+            "http://printer.localhost/",
+            "http://127.0.0.1/",
+            "http://192.168.1.1/reboot",
+            "http://10.0.0.8/",
+            "http://172.16.4.2/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.64.1.1/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://[::ffff:192.168.1.1]/",
+            "ftp://example.com/x.png",
+            "file:///C:/Windows/win.ini",
+        ] {
+            let url = url::Url::parse(refused).expect(refused);
+            assert!(!url_allowed(&url), "{refused}");
+        }
+
+        for allowed in [
+            "https://cdn.example.com/logo.png",
+            "http://93.184.216.34/pixel.gif",
+            "https://[2606:2800:220:1:248:1893:25c8:1946]/x.png",
+        ] {
+            let url = url::Url::parse(allowed).expect(allowed);
+            assert!(url_allowed(&url), "{allowed}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_name_that_resolves_only_to_this_machine_does_not_resolve() {
+        use reqwest::dns::Resolve;
+        use std::str::FromStr;
+
+        // What stops a public-looking name pointed at 127.0.0.1. `localhost` stands in for it:
+        // it resolves, and only to loopback.
+        let name = reqwest::dns::Name::from_str("localhost").expect("name");
+        assert!(PublicOnly.resolve(name).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_body_with_no_length_is_abandoned_at_the_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // L35. A server that sends no Content-Length and never stops. `bytes()` held all of it
+        // before checking the size.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nTransfer-Encoding: chunked\r\n\r\n",
+                )
+                .await;
+            let chunk = format!("{:x}\r\n{}\r\n", 4096, "x".repeat(4096));
+            loop {
+                if socket.write_all(chunk.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        // A plain client: the app's own would refuse 127.0.0.1, which is the test above.
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/endless.png"))
+            .send()
+            .await
+            .expect("response");
+
+        let read = tokio::time::timeout(Duration::from_secs(5), read_capped(response, 64 * 1024))
+            .await
+            .expect("abandoned promptly, not read to the end");
+        assert!(read.is_none());
+    }
+
+    #[test]
+    fn hosts_are_compared_by_who_registered_them() {
+        // H15. A company's own tracking subdomain is the company.
+        assert!(mismatched_host("https://links.example.com/c/1", "example.com").is_none());
+        assert!(mismatched_host("https://example.com/", "shop.example.com").is_none());
+        assert!(mismatched_host("https://mail.example.co.uk/", "www.example.co.uk").is_none());
+
+        // Two registrations under one public suffix are two owners.
+        let claimed = mismatched_host("https://evil.co.uk/login", "bank.co.uk").expect("a prompt");
+        assert_eq!(claimed.shown, "bank.co.uk");
+        assert_eq!(claimed.actual, "evil.co.uk");
+        assert!(mismatched_host("https://login.example.com.evil.test/", "example.com").is_some());
+
+        // An address is compared whole.
+        assert!(mismatched_host("http://10.0.1.15/", "192.168.1.15").is_some());
+        assert!(mismatched_host("http://192.168.1.15/x", "192.168.1.15").is_none());
     }
 
     #[test]

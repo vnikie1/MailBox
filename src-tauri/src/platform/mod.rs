@@ -35,12 +35,16 @@
 pub mod appearance;
 pub mod backdrop;
 pub mod badge;
+pub mod browser_keys;
 pub mod fatal;
 pub mod files;
+pub mod handoff;
 pub mod jumplist;
 pub mod links;
 pub mod notify;
+pub mod package;
 pub mod sound;
+pub mod startup;
 pub mod toast;
 pub mod tray;
 pub mod window_state;
@@ -88,6 +92,16 @@ pub fn hwnd_of(window: &WebviewWindow) -> Result<HWND, Box<dyn std::error::Error
 /// silent exit — which is not good, but it is the first version of this failure they can see
 /// and report.
 pub fn install(app: &AppHandle, window: &WebviewWindow) {
+    decorate(window);
+
+    // Outside `decorate` on purpose. This is not decoration: it is what pushes theme, accent
+    // and transparency changes from Windows into the UI, and it needs no window handle. It
+    // finds the main window by name each time, so a main window made again needs no second one.
+    appearance::watch(app.clone());
+}
+
+/// The system backdrop, which every main window needs before it is first shown.
+fn decorate(window: &WebviewWindow) {
     match hwnd_of(window) {
         Ok(hwnd) => {
             let effective = backdrop::apply(
@@ -105,8 +119,49 @@ pub fn install(app: &AppHandle, window: &WebviewWindow) {
             );
         }
     }
+}
 
-    // Outside the match on purpose. This is not decoration: it is what pushes theme, accent
-    // and transparency changes from Windows into the UI, and it needs no window handle.
-    appearance::watch(app.clone());
+/// Makes the main window again, after it was closed while another window kept the app running.
+///
+/// Built from the same entry in `tauri.conf.json` as the first one, so it is the same window:
+/// hidden until the backdrop is on it, and placed where the window-state plugin last saw it.
+/// The badge is drawn on a window rather than on the app, so it is drawn again too (M30).
+///
+/// One at a time. The tray, a second launch and a toast can all ask in the same moment, and a
+/// second build under the label `main` would fail.
+pub fn reopen_main(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::Manager;
+
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let window = match app.get_webview_window("main") {
+        Some(window) => window,
+        None => {
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .ok_or("tauri.conf.json has no main window")?
+                .clone();
+
+            let window = tauri::WebviewWindowBuilder::from_config(app, &config)?.build()?;
+            decorate(&window);
+            tracing::info!("the main window was closed, and has been made again");
+            window
+        }
+    };
+
+    window.show()?;
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { tray::repaint(&app).await });
+
+    Ok(())
 }

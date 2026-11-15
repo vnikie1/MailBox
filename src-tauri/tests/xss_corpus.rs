@@ -234,12 +234,16 @@ fn css_as_read(css: &str) -> String {
 /// Renders every payload and returns a description of each one that kept something dangerous.
 fn survivors(load_remote: bool) -> (usize, Vec<String>) {
     let payloads = payloads();
-    let inline = HashMap::new();
-    let remote = HashMap::new();
     let mut failures = Vec::new();
 
     for payload in &payloads {
-        let rendered = render(Some(payload), None, &inline, load_remote, &remote);
+        let rendered = render(
+            Some(payload),
+            None,
+            HashMap::new(),
+            load_remote,
+            HashMap::new(),
+        );
         let lower = rendered.html.to_ascii_lowercase();
 
         for (needle, why) in FORBIDDEN {

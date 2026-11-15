@@ -104,8 +104,63 @@ pub fn set_prefs(
 #[derive(Debug, Clone)]
 pub struct Arrival {
     pub id: i64,
+    /// What the toast is titled with: the sender's name, or their address if they gave none.
     pub from: String,
+    /// The sender's address, for the VIP check.
+    pub address: String,
     pub subject: String,
+    /// Which message this is, beyond its row id. See `fingerprint`.
+    pub fingerprint: u64,
+}
+
+/// What a toast keeps to know it still names the message it was shown for.
+///
+/// A row id is not enough. `message.id` is SQLite's rowid, which is reused once the highest row
+/// is deleted, and a toast sits in the Action Center for hours. Pressing Archive on one for a
+/// message since deleted on a phone archived whichever message had been given its id meanwhile
+/// (L37, 2026-11-14 audit).
+///
+/// Taken from what never changes for a message: its Message-ID, the date it was written, and its
+/// subject. Not its UID or folder, which change when it moves, and a toast for a moved message
+/// still means that message.
+///
+/// FNV-1a rather than std's hasher, whose output may change between Rust releases: a toast
+/// shown before an update would then stop matching after it.
+pub fn fingerprint(message_id: Option<&str>, date_sent: i64, subject: Option<&str>) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+
+    let bytes = message_id
+        .unwrap_or("")
+        .bytes()
+        .chain([0])
+        .chain(date_sent.to_le_bytes())
+        .chain(subject.unwrap_or("").bytes());
+
+    for byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+
+    hash
+}
+
+/// The fingerprint of the message now at this id, or `None` if there is none.
+pub fn fingerprint_of(conn: &rusqlite::Connection, id: i64) -> Result<Option<u64>, DbError> {
+    use rusqlite::OptionalExtension;
+
+    Ok(conn
+        .query_row(
+            "SELECT message_id, date_sent, subject FROM message WHERE id = ?1",
+            rusqlite::params![id],
+            |row| {
+                Ok(fingerprint(
+                    row.get::<_, Option<String>>(0)?.as_deref(),
+                    row.get(1)?,
+                    row.get::<_, Option<String>>(2)?.as_deref(),
+                ))
+            },
+        )
+        .optional()?)
 }
 
 /// Which of these arrivals should raise a notification.
@@ -127,6 +182,15 @@ pub fn worth_showing(
         return Ok(Vec::new());
     }
 
+    // In pieces past SQLite's parameter limit (M7). See `db::write::CHUNK`.
+    if ids.len() > crate::db::write::CHUNK {
+        let mut all = Vec::new();
+        for chunk in ids.chunks(crate::db::write::CHUNK) {
+            all.extend(worth_showing(conn, account_id, chunk)?);
+        }
+        return Ok(all);
+    }
+
     let list = (0..ids.len())
         .map(|index| format!("?{}", index + 1))
         .collect::<Vec<_>>()
@@ -135,8 +199,17 @@ pub fn worth_showing(
     // Junk, muted threads and snoozed messages are excluded in the query rather than after it.
     // Each is the user having already said "not this" — about the sender, the conversation, or
     // the timing — and a notification would be overruling them.
+    //
+    // The name and the address, not `from_all`. That is the search column, name and address run
+    // together ("Ada Lovelace ada@example.test"), and reading it here made every toast's title
+    // both and failed the VIP check for any sender with a display name (H21, 2026-11-14 audit).
     let sql = format!(
-        "SELECT message.id, COALESCE(message.from_all, ''), COALESCE(message.subject, '')
+        "SELECT message.id,
+                COALESCE(NULLIF(TRIM(message.from_name), ''), NULLIF(message.from_addr, ''),
+                         message.from_all, ''),
+                COALESCE(NULLIF(message.from_addr, ''), message.from_all, ''),
+                COALESCE(message.subject, ''),
+                message.message_id, message.date_sent, message.subject
            FROM message
            LEFT JOIN thread ON thread.id = message.thread_id
           WHERE message.id IN ({list})
@@ -156,7 +229,13 @@ pub fn worth_showing(
             Ok(Arrival {
                 id: row.get(0)?,
                 from: row.get(1)?,
-                subject: row.get(2)?,
+                address: row.get(2)?,
+                subject: row.get(3)?,
+                fingerprint: fingerprint(
+                    row.get::<_, Option<String>>(4)?.as_deref(),
+                    row.get(5)?,
+                    row.get::<_, Option<String>>(6)?.as_deref(),
+                ),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -167,7 +246,7 @@ pub fn worth_showing(
 
     let mut kept = Vec::new();
     for arrival in rows {
-        if crate::rules::vip::is_vip(conn, &arrival.from)? {
+        if crate::rules::vip::is_vip(conn, &arrival.address)? {
             kept.push(arrival);
         }
     }
@@ -208,6 +287,7 @@ pub async fn announce(app: &AppHandle, db: &Db, account_id: i64, ids: Vec<i64>) 
             last = super::toast::show_message(
                 app,
                 arrival.id,
+                arrival.fingerprint,
                 &display_name(&arrival.from),
                 if arrival.subject.trim().is_empty() {
                     "(no subject)"
@@ -295,6 +375,54 @@ mod tests {
             rusqlite::params![id, from, i64::from(junk), snooze, i64::from(seen)],
         )
         .expect("message");
+    }
+
+    #[test]
+    fn a_toast_knows_when_its_id_has_been_given_to_another_message() {
+        // L37. The row a toast was shown for is deleted, and SQLite gives the next message the
+        // same id. The toast must not take the new message for the old one.
+        let conn = store();
+        add(&conn, 7, "ada@example.test", false, None, false);
+        let shown = worth_showing(&conn, 1, &[7]).expect("check")[0].fingerprint;
+        assert_eq!(fingerprint_of(&conn, 7).expect("read"), Some(shown));
+
+        conn.execute("DELETE FROM message WHERE id = 7", [])
+            .expect("delete");
+        assert_eq!(fingerprint_of(&conn, 7).expect("read"), None);
+
+        conn.execute(
+            "INSERT INTO message (
+                 id, account_id, mailbox_id, thread_id, uid, subject, date_sent, date_received,
+                 size, from_all, to_all, body_text, has_attachment, flag_seen, flag_flagged,
+                 is_junk
+             ) VALUES (7, 1, 1, 1, 70, 'Another', 5, 5, 10, 'b@x.test', '', '', 0, 0, 0, 0)",
+            [],
+        )
+        .expect("reused id");
+        assert_ne!(fingerprint_of(&conn, 7).expect("read"), Some(shown));
+    }
+
+    #[test]
+    fn a_moved_message_keeps_its_fingerprint() {
+        // A toast for a message filed elsewhere still means that message.
+        let conn = store();
+        add(&conn, 7, "ada@example.test", false, None, false);
+        let before = fingerprint_of(&conn, 7).expect("read");
+
+        conn.execute("UPDATE message SET uid = -7 WHERE id = 7", [])
+            .expect("park");
+        assert_eq!(fingerprint_of(&conn, 7).expect("read"), before);
+    }
+
+    #[test]
+    fn a_fingerprint_is_the_same_from_one_build_to_the_next() {
+        // Pinned, because a toast outlives an update. A hasher that changed would leave every
+        // toast shown before the update unable to act. Nine zero bytes, through FNV-1a 64.
+        assert_eq!(fingerprint(None, 0, None), 0xe604_823a_2490_29bf);
+        assert_ne!(
+            fingerprint(Some("<a@b>"), 1, Some("Hello")),
+            fingerprint(Some("<a@b>"), 2, Some("Hello"))
+        );
     }
 
     #[test]
@@ -397,6 +525,58 @@ mod tests {
         let kept = worth_showing(&conn, 1, &[1, 2]).expect("check");
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, 1);
+    }
+
+    /// H21 in the 2026-11-14 audit. Both read `from_all`, which is the search column — name and
+    /// address run together, "Ada Lovelace ada@example.test" — so a sender with a display name
+    /// (nearly all of them) was never a VIP, and every toast was titled with both.
+    #[test]
+    fn a_vip_with_a_display_name_is_announced_under_that_name() {
+        let mut conn = store();
+        add(&conn, 1, "ada@example.test", false, None, false);
+        conn.execute(
+            "UPDATE message
+                SET from_name = 'Ada Lovelace', from_addr = 'ada@example.test',
+                    from_all = 'Ada Lovelace ada@example.test'
+              WHERE id = 1",
+            [],
+        )
+        .expect("named sender");
+        conn.execute(
+            "INSERT INTO vip (address, added_at) VALUES ('ada@example.test', 0)",
+            [],
+        )
+        .expect("vip");
+
+        let tx = conn.transaction().expect("tx");
+        set_prefs(
+            &tx,
+            1,
+            NotifyPrefs {
+                vip_only: true,
+                ..NotifyPrefs::default()
+            },
+        )
+        .expect("set");
+        tx.commit().expect("commit");
+
+        let kept = worth_showing(&conn, 1, &[1]).expect("check");
+        assert_eq!(kept.len(), 1, "a VIP with a display name was not announced");
+        assert_eq!(kept[0].from, "Ada Lovelace");
+    }
+
+    #[test]
+    fn a_sender_with_no_name_is_announced_by_address() {
+        let conn = store();
+        add(&conn, 1, "ada@example.test", false, None, false);
+        conn.execute(
+            "UPDATE message SET from_name = NULL, from_addr = 'ada@example.test' WHERE id = 1",
+            [],
+        )
+        .expect("bare sender");
+
+        let kept = worth_showing(&conn, 1, &[1]).expect("check");
+        assert_eq!(kept[0].from, "ada@example.test");
     }
 
     #[test]

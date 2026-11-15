@@ -114,6 +114,11 @@ export function Specimens() {
     { id: 'b', label: 'grace@example.com', value: 'grace@example.com' },
     { id: 'c', label: 'not an address', value: 'not an address', invalid: true },
   ])
+  // Its own list, so a chip dragged here from the field above lands; the two share a drag group.
+  const [copied, setCopied] = useState<Token[]>([
+    { id: 'd', label: 'Ada Lovelace', value: 'ada@example.com' },
+    { id: 'e', label: 'grace@example.com', value: 'grace@example.com' },
+  ])
 
   const toast = useToast()
 
@@ -315,14 +320,16 @@ export function Specimens() {
             onTokensChange={setTokens}
             placeholder="Add a recipient"
             validate={(value) => value.includes('@')}
+            dragGroup="specimens"
           />
         </Row>
         <Row label="With avatars">
           <TokenField
             label="Cc:"
-            tokens={tokens.slice(0, 2)}
-            onTokensChange={() => undefined}
+            tokens={copied}
+            onTokensChange={setCopied}
             showAvatars
+            dragGroup="specimens"
           />
         </Row>
         <Row label="Disabled">
