@@ -10415,3 +10415,22 @@ then yes to updating the privacy policy, recording a second video, and sending t
   - how to test with no login, payment or phone check;
   - the five policy disclosures, and the junk filter as the only, per-user model;
   - CASA not applying, with that call left to Google.
+- **Halcyon Mail 1.0.1 is live in the Microsoft Store.** It passed certification. Partner Center
+  says "Your product is now updated", and the live submission (Submission 2, last modified
+  2026-11-17) carries `Halcyon_1.0.1.0_x64.msix`, x64, Windows 10/11 Desktop from 10.0.22000.
+  Its package page still shows the `runFullTrust` "requires approval" warning seen at upload,
+  which certification evidently accepted.
+- **Submission 3 went to certification the same day, listing only** (asked: _"do this"_ about the
+  old links, then _"yes submit now"_). The package is still the certified 1.0.1.0.
+  - The privacy policy URL and the description's last sentence now name
+    `https://halcyon.unikie1.com/privacy.html`. The description shrank by exactly the 11
+    characters the URLs differ by, so nothing else in it moved.
+  - The website URL is now `https://halcyon.unikie1.com/`.
+  - Both old github.io addresses had gone out with 1.0.0.0 and 1.0.1.0. They redirected, so
+    nothing was broken.
+  - No `runFullTrust` explanation box appeared in this draft. In submission 2 it appeared once
+    the new package was uploaded; this one carries over the package already certified with the
+    capability, and asked for nothing. If certification objects, the 497-character text is in
+    `store/README.md`.
+  - The certification notes are per product now, on _Additional Testing Information_, and were
+    left as they were.

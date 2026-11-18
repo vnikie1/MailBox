@@ -89,8 +89,8 @@ Center refused it on the first upload.
 | Field | Answer |
 | --- | --- |
 | Category | **Productivity** (no subcategory) |
-| Privacy policy URL | <https://halcyon.unikie1.com/privacy.html> — Partner Center still holds `https://vnikie1.github.io/halcyon-mail/privacy.html` from 1.0.0.0 and 1.0.1.0, which redirects here since 2026-11-16; change it, and the same link in the description, with the next submission |
-| Website | <https://halcyon.unikie1.com/> (the same: the github.io address redirects) |
+| Privacy policy URL | <https://halcyon.unikie1.com/privacy.html> — in Partner Center, and in the description's last sentence, since submission 3 (2026-11-18). 1.0.0.0 and 1.0.1.0 went out with `https://vnikie1.github.io/halcyon-mail/privacy.html`, which redirects here |
+| Website | <https://halcyon.unikie1.com/> — since submission 3 too; the github.io address before it redirects |
 | Support contact | vnikie1@gmail.com (already public on the site) |
 | Does your product access, collect or transmit personal information? | **Yes** — it stores the user's mail and credentials on their PC and talks to their mail provider. Hence the privacy policy. |
 
