@@ -1,6 +1,6 @@
 # Privacy policy
 
-**Halcyon, version 1.2. Last updated 3 October 2026.**
+**Halcyon, version 1.3. Last updated 18 November 2026.**
 
 > Published at <https://halcyon.unikie1.com/privacy.html>, which is the URL given to
 > the Microsoft Store and to Google (the old `vnikie1.github.io/halcyon-mail/` address redirects
@@ -42,12 +42,12 @@ There are no other connections. Nothing runs on a schedule except your own mail 
 
 All of it is on your computer. None of it is uploaded.
 
-|                                                            |                                                               |
-| ---------------------------------------------------------- | ------------------------------------------------------------- |
-| Your mail, its attachments, and the search index           | `%LOCALAPPDATA%\com.uniki.halcyon`                            |
-| Passwords and OAuth tokens                                 | Windows Credential Manager, protected by your Windows account |
-| Logs, and crash reports if the app ever stops unexpectedly | `%LOCALAPPDATA%\com.uniki.halcyon\diagnostics`                |
-| Window size, theme, and your settings                      | `%APPDATA%\com.uniki.halcyon`                                 |
+|                                                                                    |                                                               |
+| ---------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Your mail, its attachments, the search index, and what the junk filter has learned | `%LOCALAPPDATA%\com.uniki.halcyon`                            |
+| Passwords and OAuth tokens                                                         | Windows Credential Manager, protected by your Windows account |
+| Logs, and crash reports if the app ever stops unexpectedly                         | `%LOCALAPPDATA%\com.uniki.halcyon\diagnostics`                |
+| Window size, theme, and your settings                                              | `%APPDATA%\com.uniki.halcyon`                                 |
 
 **Passwords are never written to the database, to a configuration file, to a log, or into an
 error message.** They are handed to Windows Credential Manager and referenced by a name that is
@@ -65,16 +65,39 @@ _"Read, compose, send and permanently delete all your email from Gmail"_ — the
 `https://mail.google.com/`. Halcyon asks for that one and no other, because it is the only one
 Google's IMAP and SMTP servers accept.
 
-Halcyon uses it for what a mail client does, at your direction: downloading your mail to your
-computer so that you can read and search it, sending what you write, and moving, flagging and
-deleting messages when you ask. What it receives from Google is stored only on your computer, in
-the places listed above, with the sign-in token in Windows Credential Manager.
+**What it accesses.** Your Gmail messages — their headers, bodies and attachments — the names of
+your labels and mailboxes, each message's flags (read, starred, and so on), and your account's
+email address. Nothing else in your Google Account: not your contacts, calendar, files or
+profile.
 
-Halcyon does not send Google user data to us or to anyone else — none of it reaches us, so no one
-here can read it — does not use it for advertising, and does not use it to develop, improve or
-train artificial-intelligence or machine-learning models. You can withdraw Halcyon's access at
-any time at <https://myaccount.google.com/permissions>. To delete what it has stored, delete the
-folders listed above; the uninstaller offers to do it for you.
+**How it uses it.** For what a mail client does, at your direction: downloading your mail to your
+computer so that you can read and search it, sending what you write, and moving, flagging and
+deleting messages when you ask. The junk filter also learns from the messages you mark, as
+described below.
+
+**Who it is shared with.** No one. What Halcyon receives from Google is stored only on your
+computer, in the places listed above; mail you send goes to Google's mail server and on to the
+recipients you chose. Halcyon does not send Google user data to us or to anyone else — none of it
+reaches us, so no one here can read it — and does not sell it or use it for advertising.
+
+**How it is protected.** Every connection to Google is encrypted. The sign-in token is held by
+Windows Credential Manager, protected by your Windows account, and is never written to the
+database, a file or a log. The mail database itself is not encrypted, as described above.
+
+**How long it is kept, and how it is deleted.** Your mail stays on your computer for as long as
+the account is in Halcyon, and follows what is on Gmail: a message deleted there is deleted here
+at the next sync. Removing the account (**Settings → Accounts**) deletes that account's stored
+mail, its search entries and its sign-in token from your computer. Uninstalling the Microsoft
+Store version removes the data Windows keeps for it; removing your accounts first, or deleting
+the folders listed above, makes certain nothing is left. You can also withdraw Halcyon's access
+at any time at <https://myaccount.google.com/permissions>, which stops the stored token working.
+
+**Machine learning.** Halcyon's junk filter is a small statistical classifier. It learns only from
+the messages you mark as junk or not junk, it runs on your computer, and it is used only to sort
+your own mail. What it learns — counts of words — is kept in the mail database on your computer,
+is never sent anywhere, and is deleted with Halcyon's data. Halcyon does not use Google user data
+to develop, improve or train any other artificial-intelligence or machine-learning model, and
+sends none of it to any AI service.
 
 Halcyon's use and transfer to any other app of information received from Google APIs will adhere
 to the
@@ -128,8 +151,8 @@ Halcyon is not directed at children and collects nothing from anyone, of any age
 ## Your rights
 
 Because we hold no data about you, there is nothing for us to disclose, correct, export or
-delete. Deleting your data means deleting the folders listed above, and the uninstaller offers
-to do it for you.
+delete. Deleting your data means removing your accounts in Halcyon or deleting the folders listed
+above; the downloadable installer's uninstaller offers to do it for you.
 
 Mail held by your email provider is governed by that provider's own privacy policy, not this
 one.

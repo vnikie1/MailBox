@@ -39,6 +39,7 @@ const root = path.resolve(__dirname, '..')
 const exe = path.join(root, 'src-tauri', 'target', 'release', 'halcyon.exe')
 const scratch = path.join(root, 'src-tauri', 'target', 'demovideo')
 const stopFile = path.join(scratch, 'stop')
+const nextFile = path.join(scratch, 'next')
 const statePath = path.join(process.env.APPDATA ?? '', 'com.uniki.halcyon', '.window-state.json')
 const stateBackup = path.join(scratch, 'window-state.user.json')
 const PORT = 9333
@@ -46,6 +47,31 @@ const PORT = 9333
 const email = (process.env.HALCYON_DEMO_EMAIL ?? '').trim()
 const startDelay = Number(process.env.HALCYON_DEMO_START_DELAY ?? 25) * 1000
 const dryRun = process.env.HALCYON_DEMO_DRY_RUN === '1'
+// Source-account mode, for Google's "show the changes reflected in the user's Google account":
+// Halcyon on the left of the screen, Gmail in a browser on the right, and a pause after each
+// change for the person at the keyboard to show it in Gmail. See `inGmail`.
+const sourceMode = process.env.HALCYON_DEMO_SOURCE === '1'
+// The last run's scratch store kept, account and all, so a take starts signed in. Google's
+// sign-in opens in whatever browser window the default browser picks, which nothing driving
+// Gmail from a tab of its own can reach, and the first video already shows it. The token is in
+// Credential Manager under the address, so the kept account is still signed in.
+const keepStore = process.env.HALCYON_DEMO_KEEP_STORE === '1'
+// Gmail driven from a browser tab -- by an assistant -- rather than at the keyboard: a checkpoint
+// waits only for the next file, and its caption says nothing about clicking anything.
+const handsFree = process.env.HALCYON_DEMO_HANDS_FREE === '1'
+// The screen's work height in physical pixels: this PC's 2,080 less the taskbar, which is what
+// the recordings measure.
+const workHeight = Number(process.env.HALCYON_DEMO_WORK_HEIGHT ?? 1968)
+
+/** What to type into Gmail's search box to find `subject` where `where` is, quoted as Gmail wants. */
+const gmailSearch = (where, subject) => `${where} "${subject}"`
+/** Gmail's search operator for a mailbox Halcyon moved the message to. */
+const gmailWhere = (mailbox) =>
+  mailbox === 'Important'
+    ? 'is:important'
+    : mailbox === 'Starred'
+      ? 'is:starred'
+      : `label:"${mailbox}"`
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 const log = (line) => {
@@ -300,15 +326,27 @@ function running() {
   return listed.toLowerCase().includes('halcyon.exe')
 }
 
-/** Maximised, so the recording shows the app and nothing behind it. */
+/**
+ * Maximised, so the recording shows the app and nothing behind it -- or, in source-account mode,
+ * the left half of the screen, leaving the right half for Gmail.
+ */
 function windowState() {
-  const place = { x: 40, y: 40, width: 2200, height: 1300 }
+  const place = sourceMode
+    ? // The stored size is the inside of the window; Windows adds the title bar and borders, which
+      // at this PC's 200% came to 26 × 71 px more -- measured with GetWindowRect on a rehearsal,
+      // when the full work height ran the window under the taskbar.
+      // Wider than half, though: under 1,000 CSS px Halcyon drops its sidebar (`useBreakpoint`),
+      // and the first source-mode take failed there, its Move to picker finding no mailbox the
+      // video could follow. 2,016 px at 200% is 1,008. Gmail gets the rest and is driven by its
+      // search box, which needs no room.
+      { x: 0, y: 0, width: 2016, height: workHeight - 72 }
+    : { x: 40, y: 40, width: 2200, height: 1300 }
   return {
     main: {
       ...place,
       prev_x: place.x,
       prev_y: place.y,
-      maximized: true,
+      maximized: !sourceMode,
       visible: true,
       decorated: true,
       fullscreen: false,
@@ -322,6 +360,50 @@ function windowState() {
  * conversation, and an earlier take's copy must not be what a later take finds.
  */
 const SUBJECT = `Sent from Halcyon at ${new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}`
+
+/**
+ * Source-account mode only: a pause for the person at the keyboard to show, in Gmail beside
+ * Halcyon, what the step just did to the account itself. Google's verification checklist of
+ * 2026-11-17 asks for exactly that -- "if the app demonstrates permanent deletion, the video must
+ * also show the email being purged in the Gmail source account" -- and the first video showed
+ * only Halcyon.
+ *
+ * The handshake is focus, because it needs nothing typed into this terminal while recording:
+ * Halcyon loses focus when the person clicks into Gmail, and gets it back when they click
+ * Halcyon's title bar. The title bar, not the window, so the click lands on nothing in the app.
+ *
+ * Or the next file, for a rehearsal with no one at the keyboard: whoever checked Gmail -- the
+ * full dry run of 2026-11-18 did it from another browser tab -- creates it to go on.
+ */
+async function inGmail(page, what) {
+  if (!sourceMode) return
+  fs.rmSync(nextFile, { force: true })
+  await page.caption(
+    handsFree
+      ? `In Gmail, on the right: ${what}.`
+      : `In Gmail: ${what}. Then click Halcyon's title bar to go on.`,
+  )
+  log(`checkpoint -- in Gmail: ${what}`)
+  const deadline = Date.now() + 15 * 60_000
+  let left = false
+  while (Date.now() < deadline) {
+    if (fs.existsSync(nextFile)) {
+      fs.rmSync(nextFile, { force: true })
+      break
+    }
+    if (handsFree) {
+      await sleep(250)
+      continue
+    }
+    const focused = await page.eval('document.hasFocus()').catch(() => null)
+    if (focused === false) left = true
+    else if (focused === true && left) break
+    await sleep(250)
+  }
+  if (Date.now() >= deadline) log('nobody came back to Halcyon in 15 minutes; carrying on')
+  log('back in Halcyon')
+  await sleep(1500)
+}
 
 const mailboxNamed = (name) =>
   `[...document.querySelectorAll('[role="treeitem"]')].find((t) => t.textContent.trim().replace(/\\d+$/, '') === ${JSON.stringify(name)})`
@@ -388,6 +470,13 @@ async function demonstrate(page, { email, subject, send }) {
     )
     await page.until(`!!${rowWith(subject)}`, 'the message to arrive', 180_000)
     await sleep(1500)
+    await inGmail(
+      page,
+      // Inbox first, so the next checkpoint's first search -- the Inbox again -- is a new one:
+      // Gmail can answer a search identical to the one on screen with what it showed before,
+      // and the full dry run of 2026-11-18 saw the moved message "still in the Inbox" that way.
+      `search ${gmailSearch('in:inbox', subject)}, then ${gmailSearch('in:sent', subject)} -- it is in both`,
+    )
   }
 
   // ---- reading
@@ -428,6 +517,10 @@ async function demonstrate(page, { email, subject, send }) {
   await sleep(1500)
   await page.click(rowWith(subject), 'the message')
   await sleep(3000)
+  await inGmail(
+    page,
+    `search ${gmailSearch('in:inbox', subject)} -- gone -- then ${gmailSearch(gmailWhere(String(destination)), subject)} -- there`,
+  )
 
   // ---- deleting
   await page.caption('Deleting: the message goes to the Bin.')
@@ -439,6 +532,7 @@ async function demonstrate(page, { email, subject, send }) {
   await sleep(1500)
   await page.click(rowWith(subject), 'the message')
   await sleep(3000)
+  await inGmail(page, `search ${gmailSearch('in:trash', subject)} -- it is in the Bin`)
 
   // ---- deleting permanently
   await page.caption(
@@ -455,6 +549,11 @@ async function demonstrate(page, { email, subject, send }) {
   await page.until(`!${rowWith(subject)}`, 'the message to be gone', 30_000)
   log('deleted permanently')
   await sleep(4000)
+  await inGmail(
+    page,
+    // Anywhere first, for the same reason: the Bin is what is on screen from the last checkpoint.
+    `search ${gmailSearch('in:anywhere', subject)}, then ${gmailSearch('in:trash', subject)} -- gone everywhere`,
+  )
 }
 
 // ------------------------------------------------------------------ the run
@@ -470,10 +569,17 @@ async function main() {
     )
   }
 
-  // A store and a WebView profile of its own, fresh every run.
-  fs.rmSync(path.join(scratch, 'local'), { recursive: true, force: true })
-  fs.rmSync(path.join(scratch, 'webview'), { recursive: true, force: true })
+  // A store and a WebView profile of its own, fresh every run -- or the last run's, kept.
+  if (keepStore) {
+    if (!fs.existsSync(path.join(scratch, 'local'))) {
+      throw new Error('no store to keep; run once without HALCYON_DEMO_KEEP_STORE first')
+    }
+  } else {
+    fs.rmSync(path.join(scratch, 'local'), { recursive: true, force: true })
+    fs.rmSync(path.join(scratch, 'webview'), { recursive: true, force: true })
+  }
   fs.rmSync(stopFile, { force: true })
+  fs.rmSync(nextFile, { force: true })
   fs.mkdirSync(scratch, { recursive: true })
 
   const hadState = fs.existsSync(statePath)
@@ -498,88 +604,127 @@ async function main() {
       (url) => !url.includes('compose') && !url.includes('settings'),
       'main window',
     )
-    await page.until(`!!${buttonWithText('Add your account')}`, 'the welcome', 30_000)
-    await page.caption(
-      'Halcyon Mail, a desktop email client for Windows 11 — a fresh install, with no accounts yet.',
-    )
+    if (keepStore) {
+      await page.until(`!!${bin}`, 'the kept account', 60_000)
+      // Wherever the last run left it -- the Bin, after the permanent delete -- the Inbox, where
+      // the message will arrive.
+      await page.click(mailboxNamed('Inbox'), 'the Inbox')
+      await page.until(`${rows}.length > 0`, 'the Inbox', 30_000)
+      await page.caption(
+        'Halcyon Mail, signed in to a Gmail account with the https://mail.google.com/ scope. On the right, Gmail itself, signed in to the same account.',
+      )
+    } else {
+      await page.until(`!!${buttonWithText('Add your account')}`, 'the welcome', 30_000)
+      await page.caption(
+        'Halcyon Mail, a desktop email client for Windows 11 — a fresh install, with no accounts yet.',
+      )
+    }
+    if (sourceMode) {
+      // The sidebar, and with it the steps that follow the message, needs 1,000 CSS px.
+      const width = Number(await page.eval('window.innerWidth'))
+      log(
+        `the window is ${String(width)} CSS px wide${width < 1000 ? ' -- TOO NARROW for the sidebar' : ''}`,
+      )
+    }
     log(`ready; starting in ${String(startDelay / 1000)} s -- start the recording now`)
     await sleep(startDelay)
 
-    // ---- adding the account
-    await page.caption('Adding a Google account: Add your account → Google.')
-    await sleep(2500)
+    if (keepStore && dryRun) {
+      log(`dry run: the kept account is loaded, ${String(await page.eval(`${rows}.length`))} rows`)
+      return
+    }
 
-    const reached = await reachEmailForm(page)
-    if (reached === 'beyond') {
-      log('the account was added at the keyboard -- carrying on from the sign-in')
-    } else {
-      await sleep(1000)
+    if (!keepStore) {
+      // ---- adding the account
+      await page.caption('Adding a Google account: Add your account → Google.')
+      await sleep(2500)
 
-      await page.click(fieldLabelled('Name'), 'the name field')
-      await page.press('a', 'KeyA', 65, 2)
-      await page.type('Halcyon Demo')
-      await sleep(500)
-      await page.click(fieldLabelled('Email Address'), 'the email field')
-      await page.press('a', 'KeyA', 65, 2)
-      await page.type(email)
-      await sleep(1200)
+      const reached = await reachEmailForm(page)
+      if (reached === 'beyond') {
+        log('the account was added at the keyboard -- carrying on from the sign-in')
+      } else {
+        await sleep(1000)
 
-      await page.caption(
-        "Halcyon opens Google's own sign-in page in the default browser. It never sees the Google password.",
-      )
-      await sleep(4000)
+        await page.click(fieldLabelled('Name'), 'the name field')
+        await page.press('a', 'KeyA', 65, 2)
+        await page.type('Halcyon Demo')
+        await sleep(500)
+        await page.click(fieldLabelled('Email Address'), 'the email field')
+        await page.press('a', 'KeyA', 65, 2)
+        await page.type(email)
+        await sleep(1200)
 
-      // A rehearsal stops here, before anything opens the browser or talks to Google.
-      if (dryRun) {
-        const enabled = await page.eval(`!${buttonWithText('Continue')}.disabled`)
-        log(
-          `dry run: the account form is filled and Continue is ${enabled ? 'enabled' : 'DISABLED'}`,
+        await page.caption(
+          "Halcyon opens Google's own sign-in page in the default browser. It never sees the Google password.",
         )
-        return
+        await sleep(4000)
+
+        // A rehearsal stops here, before anything opens the browser or talks to Google.
+        if (dryRun) {
+          const enabled = await page.eval(`!${buttonWithText('Continue')}.disabled`)
+          log(
+            `dry run: the account form is filled and Continue is ${enabled ? 'enabled' : 'DISABLED'}`,
+          )
+          return
+        }
+
+        await page.click(buttonWithText('Continue'), 'Continue')
+        log('the browser has the sign-in -- over to the person at the keyboard')
       }
 
-      await page.click(buttonWithText('Continue'), 'Continue')
-      log('the browser has the sign-in -- over to the person at the keyboard')
-    }
-
-    // ---- the person signs in at Google, and comes back to Halcyon
-    await page.caption('Waiting for Google sign-in in the browser…')
-    // Either Halcyon's report, or -- if the person clicked Add Account themselves, as the third
-    // take did while this was still waiting on a covered window -- the mailbox already there.
-    await page.until(
-      `!!${buttonWithText('Add Account')} || ${rows}.length > 0`,
-      'the sign-in to finish',
-      10 * 60_000,
-    )
-    log('signed in')
-    if (await page.eval(`!!${buttonWithText('Add Account')}`)) {
-      await page.caption(
-        "Back in Halcyon: it has signed in to Gmail's IMAP and SMTP servers with the token Google issued.",
+      // ---- the person signs in at Google, and comes back to Halcyon
+      await page.caption('Waiting for Google sign-in in the browser…')
+      // Either Halcyon's report, or -- if the person clicked Add Account themselves, as the third
+      // take did while this was still waiting on a covered window -- the mailbox already there.
+      await page.until(
+        `!!${buttonWithText('Add Account')} || ${rows}.length > 0`,
+        'the sign-in to finish',
+        10 * 60_000,
       )
-      await sleep(6000)
-      await page.click(buttonWithText('Add Account'), 'Add Account')
+      log('signed in')
+      if (await page.eval(`!!${buttonWithText('Add Account')}`)) {
+        await page.caption(
+          "Back in Halcyon: it has signed in to Gmail's IMAP and SMTP servers with the token Google issued.",
+        )
+        await sleep(6000)
+        await page.click(buttonWithText('Add Account'), 'Add Account')
+      }
+
+      await page.caption('Halcyon downloads the mailbox to this PC.')
+      await page.until(`${rows}.length > 0`, 'the Inbox', 120_000)
+      await sleep(4000)
+
+      // Not until the person has brought Halcyon back in front of the browser, or the video would
+      // show the browser while everything below happened behind it. Three minutes, then on anyway.
+      await page
+        .until('document.hasFocus()', 'Halcyon to be in front', 3 * 60_000)
+        .then(() => {
+          log('halcyon is in front')
+        })
+        .catch(() => {
+          log('Halcyon never took focus; carrying on')
+        })
+      await sleep(2500)
     }
-
-    await page.caption('Halcyon downloads the mailbox to this PC.')
-    await page.until(`${rows}.length > 0`, 'the Inbox', 120_000)
-    await sleep(4000)
-
-    // Not until the person has brought Halcyon back in front of the browser, or the video would
-    // show the browser while everything below happened behind it. Three minutes, then on anyway.
-    await page
-      .until('document.hasFocus()', 'Halcyon to be in front', 3 * 60_000)
-      .then(() => {
-        log('halcyon is in front')
-      })
-      .catch(() => {
-        log('Halcyon never took focus; carrying on')
-      })
-    await sleep(2500)
 
     // The account's own mailboxes in the sidebar mean its first folder sync is done, and the Bin
     // has to be there for the last step anyway.
     await page.until(`!!${bin}`, "the account's mailboxes", 120_000)
     await sleep(2000)
+
+    if (sourceMode) {
+      // Hands free, Gmail is already on the right and the recording already running.
+      if (!handsFree) {
+        await inGmail(
+          page,
+          'open Gmail to the right of Halcyon, signed in to the same account, and start the recording',
+        )
+      }
+      await page.caption(
+        'Each change Halcyon makes is shown in the Gmail account itself, on the right.',
+      )
+      await sleep(4000)
+    }
 
     try {
       await demonstrate(page, { email, subject: SUBJECT, send: true })

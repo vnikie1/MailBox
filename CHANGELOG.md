@@ -10306,3 +10306,112 @@ the updater out. The Store update is 1.0.1, below under its own heading.
 
 - `npm run verify` with `CARGO_BUILD_JOBS=6`, clean: format, lint, stylelint, types, **399 unit**,
   **181 e2e**, `cargo fmt`, clippy, **1,189 Rust tests** (24 ignored, the rig gates).
+
+---
+
+## 2026-11-18 — Google's verification checklist, answered
+
+Asked: _"i got a mail from google regarding the app verification … please check and revert"_,
+then yes to updating the privacy policy, recording a second video, and sending the reply.
+
+### Changed
+
+- **Privacy policy 1.3** (`PRIVACY.md`, and `privacy.html` in `vnikie1/halcyon-mail` `39279b5`,
+  live at <https://halcyon.unikie1.com/privacy.html>). Google's _Third Party Data Safety Team_
+  sent its checklist on 2026-11-17, and it asks for five disclosures by name; the Google section
+  now states each: **what is accessed** (messages with headers, bodies and attachments, label
+  and mailbox names, flags, the account address, nothing else in the Google Account), **how it
+  is used**, **who it is shared with** (no one), **how it is protected**, and **how long it is
+  kept and how it is deleted** (with the account, following Gmail; removing the account deletes
+  its mail, search entries and token; the Store uninstall; revoking at Google).
+- **The policy no longer says Halcyon trains no machine-learning model.** It said so, and the
+  junk filter is one: a Bayesian classifier (`rules/junk.rs`) trained only on messages the user
+  marked, kept as word counts in the mail database, never sent anywhere. Google's rules allow
+  exactly that — "the specific user's personalized model" — so the policy now describes it
+  instead of denying it. The storage table names it too. "The uninstaller offers to do it" now
+  says which uninstaller, since the Store version has none of its own.
+- **`tools/demo-video.cjs` has a source-account mode** (`HALCYON_DEMO_SOURCE=1`), for the
+  checklist's _"For write or delete permissions, show the changes triggered in the app reflected
+  in the user's Google account"_, which the first video does not: it shows Halcyon only. Halcyon
+  opens on the left half of the screen, leaving the right for Gmail, and after sending, moving,
+  deleting and deleting permanently it captions what to show in Gmail and waits. The handshake
+  is focus — Halcyon losing it when the person clicks into Gmail and getting it back when they
+  click its title bar — so nothing is typed into the terminal mid-recording. The window size was
+  measured with `GetWindowRect` on a rehearsal: the full work height ran 71 px under the taskbar,
+  because the stored size is the inside of the window; it now fits the work height.
+- **Halcyon takes 2,016 px of the width, not half.** Half was 832 CSS px at this PC's 200%, and
+  under 1,000 `useBreakpoint` hides the sidebar; see Incidents. 2,016 px is 1,008 CSS px, and
+  the run logs the width it got and says if it is too narrow. Gmail, on the remainder, is driven
+  by its search box, so the captions now give the exact searches (`in:inbox "<subject>"`,
+  `is:important …`, `in:trash …`, `in:anywhere …`) instead of naming mailboxes to open.
+- **No two checkpoints in a row start with the same search**: check 1 ends on Sent and check 4
+  starts with `in:anywhere`. The dry run below asked Gmail for the Inbox search a second time,
+  after the move, and got the first answer back, with the message still in it; only a different
+  search in between gave the true one, empty. On camera that would have contradicted the step.
+- **A checkpoint also goes on when `target/demovideo/next` appears**, beside the focus round
+  trip, so a rehearsal can be run with the Gmail checks made from a browser tab instead of at
+  the keyboard.
+- **Two more switches, for a take with no one at the keyboard** (asked: _"cant you do the whole
+  take i will swtich on the whole recording"_). `HALCYON_DEMO_KEEP_STORE=1` keeps the last
+  run's scratch store, so the take opens already signed in: Google's sign-in opens in whatever
+  window the default browser picks, which the browser extension cannot reach, and the first
+  video already shows the consent. It reopens on the Bin where the last run ended, so it clicks
+  the Inbox first. `HALCYON_DEMO_HANDS_FREE=1` makes each checkpoint wait only for the next file,
+  with a caption that says what is being searched rather than what to click.
+
+### Incidents
+
+- **The first source-mode take failed at the move.** Send and receive worked, and were shown in
+  Gmail; then the Move to picker listed only All Mail, Bin, Drafts, Important, Inbox, Sent, Spam
+  and Starred, and the script looks for a destination the sidebar shows, so the video can follow
+  the message there. There was no sidebar: the half-screen window was 832 CSS px. Fixed by the
+  width above. The take left one test message, "Sent from Halcyon at 10:52", in the test
+  account's Inbox.
+- **A rehearsal straight after the width change stalled**: "Runtime.evaluate got no answer in
+  10 s", then no account form in two minutes, with the app's log showing a normal start. The same
+  rehearsal passed unchanged at 12:23 IST, with the browser beside Halcyon rather than over it.
+  The same symptom as the covered-window stalls of 2026-11-16; not reproduced, so not fixed.
+- **Full dry run, 12:25–12:31 IST, passed end to end** with no one recording: the person signed
+  in at Google, and every Gmail check was made from a Chrome tab on the test account. Sent and
+  Inbox found the message; after the move, Inbox found nothing and `is:important` found it;
+  after Delete, `in:trash` found it; after Shift+Delete, `in:anywhere` found nothing — the
+  message gone from Gmail altogether, Sent copy included, since Gmail keeps one message for
+  mail sent to oneself. One retry on the way: the first New Message click opened no compose
+  window in ten seconds, the second did, as on 2026-11-16.
+- **The second video, recorded 12:50 IST, hands free**: Halcyon at 1,008 CSS px on the left,
+  Gmail in a Chrome window on the right, every Gmail search typed by the assistant through the
+  browser extension, all four checks as in the dry run. What it took, and what shows:
+  - The extension opens its tabs in the background of an existing window and has no way to
+    bring one forward, so the person clicked the Gmail tab once before recording.
+  - The terminal the person typed "go" in is the foreground window, and `SetWindowPos(HWND_TOP)`
+    from another process does not lift a window above it. Halcyon and the Gmail window were
+    pinned `HWND_TOPMOST` for the take and unpinned after.
+  - **The first search went in as `ain:inbox …`**: the select-all keystroke reached Gmail's
+    search box as a letter. Gmail showed "No messages matched" for ten seconds, 1:27–1:37 in the
+    person's trimmed copy, before the cleared and retyped search found the message. Every later
+    search cleared the box with its × instead.
+  - At Gmail's 650 px the search field shrinks to its icons, so the text typed is not visible;
+    the captions say each search, and the results carry Gmail's own labels (Inbox, Bin) or "No
+    messages matched". Chrome's '"Claude" started debugging this browser' bar is in every frame.
+  - The person trimmed the recording to 4:55 (`Downloads\halcyon demo.mp4`, 1920 × 1080,
+    re-encoded with a keyframe every 5 s), and it was checked frame by frame: every caption
+    legible, each Gmail result as the step says. They then cut the mistyped search, uploaded the
+    4:45 result, and it went up **Unlisted at <https://youtu.be/EkSzE2tYN3o>** with a title,
+    timestamps, the client ID and a link to the first video, saved only once YouTube's copyright
+    check had passed. YouTube offered "Publish anyway" before then, with a warning about strikes.
+
+### Notes
+
+- **The checklist, item by item, against the app:** one scope, matching the console; video
+  unlisted, consent screen readable; no login, payment or phone check of Halcyon's own; Limited
+  Use and no third parties; a mail client, so no prohibited use; no Data Portability API. CASA:
+  Google's page requires it where restricted data is stored on or transmitted through servers, or
+  a server can reach user data through the app, and Halcyon has no server; the reply says so and
+  leaves the decision to Google.
+- **The reply went at 13:27 IST**, from the developer contact's Gmail, in the thread of Google's
+  checklist and to its sender only. It answers each item in turn:
+  - the one scope and why nothing narrower works for IMAP and SMTP;
+  - both videos, with timestamps;
+  - how to test with no login, payment or phone check;
+  - the five policy disclosures, and the junk filter as the only, per-user model;
+  - CASA not applying, with that call left to Google.
