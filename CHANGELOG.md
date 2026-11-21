@@ -10434,3 +10434,35 @@ then yes to updating the privacy policy, recording a second video, and sending t
     `store/README.md`.
   - The certification notes are per product now, on _Additional Testing Information_, and were
     left as they were.
+
+## 2026-11-21 — Google asks for a CASA assessment; asked to confirm it applies
+
+Asked: _"i got another mail from google please check and revert to it"_, then _"send the
+pushback"_.
+
+### Notes
+
+- **Google's next email came on 2026-11-20, in a new thread**, "[Action Needed] OAuth
+  Verification Request Acknowledgement". It asks for an ADA-CASA **AL1 (formerly Tier 2)**
+  assessment by an authorised lab, due **17 February 2027** and annual after that. It names TAC
+  Security as the discounted lab and quotes 2–6 weeks, and says to reply in that thread when done.
+  The email is a template; it does not answer the 18 November point that Halcyon has no server.
+- **Google's own words tie the assessment to a server.** The restricted-scope guide says _"If you
+  store or transmit restricted scope data on servers, then you need to complete a security
+  assessment"_, and applies it to apps that can access Google user data _"from or through a
+  server"_. It never says outright that a server-less app is exempt, so the reply asks rather than
+  asserts.
+- **Prices could not be confirmed.** One comparison page gives $540 per app at TAC's discounted
+  Tier 2 rate, and one lab lists $3,000–6,000; either is annual. The tooling is built for web and
+  mobile apps.
+- **The reply went at 12:01 IST, in the new thread, to the sender only.** It asks Google to
+  confirm the assessment applies, quoting the guide, and sets out:
+  - the direct PC-to-Google connections;
+  - local storage only, with tokens in Credential Manager;
+  - no backend, proxy, telemetry or crash service;
+  - the Desktop OAuth client's loopback redirect;
+  - the public source.
+
+  If Google still requires it, the reply asks which level and what it should cover, and promises
+  it before the deadline. Nothing paid has been agreed. If it comes to that, the decision is the
+  user's: pay a lab every year, or stay unverified with the warning screen and the 100-user cap.
